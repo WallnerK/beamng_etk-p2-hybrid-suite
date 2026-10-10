@@ -1,0 +1,29 @@
+{
+    "Configuration": "ActiveHybrid 35d (N57)",
+    "Author": "Deuflhard",
+    "useSubCluster": true,
+    "vehicleSelectorSubCluster": "ActiveHybrid",
+    "SubModel": "ActiveHybrid",
+    "vehicleSelectorSubGroup": "ActiveHybrid 35d - Diesel I6 N57",
+    "Population": 0,
+    "Body Style": "Wagon",
+    "Config Type": "Custom",
+    "Country": "Germany",
+    "Description": "ETK 854 ActiveHybrid 35d (N57) - a hypothetical six-cylinder diesel plug-in hybrid: 3.0 L inline-six diesel with two-stage sequential turbocharging (N57D30TOP calibration, 230 kW / 637 Nm, torque plateau 1500-2500 rpm, limiter 5400 rpm) + K0 disconnect clutch + 83 kW / 265 Nm P2 e-machine ahead of the torque converter, 8-speed automatic, 2.81 rear axle ratio, rear-wheel drive. 13.5 kWh battery, 50 L diesel tank. System output 313 kW (426 PS); the VCU caps the combined input torque at 680 Nm, the same cap as on the 40e, for a realistic power delivery. Sequential-turbo character: full boost from about 1200 rpm, around 0.33 s response time. Sailing, recuperation and all-electric pull-away. Delivered without the factory 250 km/h top-speed limiter (top speed limited by the powertrain).",
+    "Drivetrain": "RWD",
+    "Fuel Type": "Diesel",
+    "Induction Type": "Turbo",
+    "Power": 426,
+    "PowerPeakRPM": "4400 - 4600",
+    "Propulsion": "Hybrid",
+    "Torque": 680,
+    "TorquePeakRPM": "1500 - 2500",
+    "Transmission": "Automatic",
+    "Value": 72200,
+    "Weight": 1835,
+    "Years": {
+        "min": 2024,
+        "max": 2026
+    },
+    "defaultPaintName1": "Mineral Green"
+}

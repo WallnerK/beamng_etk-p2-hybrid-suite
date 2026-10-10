@@ -1,0 +1,29 @@
+{
+    "Configuration": "ActiveHybrid 40e Performance (B58S 550)",
+    "Author": "Deuflhard",
+    "useSubCluster": true,
+    "vehicleSelectorSubCluster": "ActiveHybrid",
+    "SubModel": "ActiveHybrid",
+    "vehicleSelectorSubGroup": "ActiveHybrid 40e - Gasoline I6 B58",
+    "Population": 0,
+    "Body Style": "Wagon",
+    "Config Type": "Custom",
+    "Country": "Germany",
+    "Description": "ETK 854 ActiveHybrid 40e Performance (B58S 550) - upgraded-turbo build based on the 3.0 L I6 turbo gasoline engine (B58). Instead of the stock turbocharger at 0.6 bar, the larger ttSport turbocharger is fitted as standard and runs 1.45 bar of boost: 415 kW (565 PS) at about 6800 rpm and a torque plateau of about 700 Nm (704 Nm peak) between 2500 and 5000 rpm, with the rev limiter back at 7000 rpm instead of the 6300 rpm of the 40e calibration. Strengthened internals carry the torque; as on the 500 PS diesel, the control unit limits system torque electronically - here to 820 Nm in stock form and up to 1190 Nm with the E-Boost stages. Also fitted: carbon-ceramic brakes, the Performance cooling package (auxiliary radiator in the airflow + oil cooler, no overheating even on long full-throttle stretches), K0 disconnect clutch and P2 e-machine (83 kW / 265 Nm at Stage 0) ahead of the converter, 8-speed automatic, 2.81 rear axle ratio, RWD. 13.5 kWh battery, 50 L gasoline tank. System output 498 kW (678 PS). The larger turbo builds boost later than the stock setup - below 2000 rpm the e-machine fills the gap, which is exactly why it sits ahead of the converter. Sailing, recuperation and all-electric pull-away are retained. Delivered without a factory top-speed limiter.",
+    "Drivetrain": "RWD",
+    "Fuel Type": "Gasoline",
+    "Induction Type": "Turbo",
+    "Power": 678,
+    "PowerPeakRPM": "6300 - 6700",
+    "Propulsion": "Hybrid",
+    "Torque": 820,
+    "TorquePeakRPM": "2500 - 5000",
+    "Transmission": "Automatic",
+    "Value": 85500,
+    "Weight": 1805,
+    "Years": {
+        "min": 2024,
+        "max": 2026
+    },
+    "defaultPaintName1": "Mineral Green"
+}

@@ -1,0 +1,51 @@
+{
+  // ==========================================================================
+  // ETK 854 ActiveHybrid - default keyboard bindings (vehicle inputmap)
+  // ==========================================================================
+  // Scheme: Alt + mnemonic, nothing on F-keys.
+  //   Alt+1/2/3  COMFORT / ECO PRO / SPORT     Alt+F  cycle driving experience
+  //   Alt+4/5    MAX EV / AUTO EV      Alt+E  cycle EV mode
+  //   Alt+B      BATTERY CONTROL               Alt+PageUp/PageDown target SOC +/-10
+  //   Alt+R      recuperation level            Alt+K  launch control
+  //   Alt+G      shift program (8HP)           Alt+M  legacy preset cycle
+  //   Alt+T      trailer mode                  Alt+W  xAllrad AWD / 2WD
+  //
+  // Conflict check 2026-09-30 against BeamNG.drive 0.39.4
+  //   settings/inputmaps/keyboard.json (driving map) plus keyboard_editor,
+  //   keyboard_flowgraph, keyboard_rallyEditor, keyboard_openxr and
+  //   keyboard_beamng.tech (modifier order normalised, // lines ignored):
+  //   alt 1..5, alt b, alt e, alt f, alt g, alt k, alt m, alt pageup,
+  //   alt pagedown, alt r, alt t: not bound anywhere.
+  //   alt w: only keyboard_editor.json (editorPlacePlayerAtCamera), i.e. only
+  //   while the World Editor is open - never while driving.
+  //   The etk800 and common vehicle archives ship no keyboard inputmap.
+  // Replaced defaults that the base driving map also uses:
+  //   f5 cefdev_reload_ui, f7 dropPlayerAtCameraNoReset,
+  //   f8 dropCameraAtPlayer, alt a toggleRangeStatus,
+  //   alt up / alt down toggle_slow_motion, alt l couplersUnlock (would drop a
+  //   hitched trailer when arming launch control).
+  // ==========================================================================
+  "bindings": [
+    { "control": "alt 1", "action": "etk854hybrid_setComfort" },
+    { "control": "alt 2", "action": "etk854hybrid_setEcoPro" },
+    { "control": "alt 3", "action": "etk854hybrid_setSportDE" },
+    { "control": "alt 4", "action": "etk854hybrid_setMaxEdrive" },
+    { "control": "alt 5", "action": "etk854hybrid_setAutoEdrive" },
+    { "control": "alt b", "action": "etk854hybrid_setBatteryControl" },
+    { "control": "alt f", "action": "etk854hybrid_cycleDeMode" },
+    { "control": "alt e", "action": "etk854hybrid_cycleEdrive" },
+    { "control": "alt pageup", "action": "etk854hybrid_targetSocUp" },
+    { "control": "alt pagedown", "action": "etk854hybrid_targetSocDown" },
+    { "control": "alt r", "action": "etk854hybrid_cycleRegen" },
+    { "control": "alt k", "action": "etk854hybrid_launchArm" },
+    { "control": "alt g", "action": "etk854hybrid_cycleShiftProgram" },
+    { "control": "alt m", "action": "etk854hybrid_cycleMode" },
+    { "control": "alt t", "action": "etk854hybrid_toggleTrailerMode" },
+    { "control": "alt w", "action": "etk854hybrid_toggleAwdMode" }
+  ],
+  "name": "Keyboard",
+  "version": 1,
+  "devicetype": "keyboard",
+  "vidpid": "6F1D2B61",
+  "guid": "{6F1D2B61-D5A0-11CF-BFC7-444553540000}"
+}

@@ -1,0 +1,29 @@
+{
+    "Configuration": "ActiveHybrid 35d Performance xAllrad (N57S 500)",
+    "Author": "Deuflhard",
+    "useSubCluster": true,
+    "vehicleSelectorSubCluster": "ActiveHybrid",
+    "SubModel": "ActiveHybrid",
+    "vehicleSelectorSubGroup": "ActiveHybrid 35d - Diesel I6 N57",
+    "Population": 0,
+    "Body Style": "Wagon",
+    "Config Type": "Custom",
+    "Country": "Germany",
+    "Description": "ETK 854 ActiveHybrid 35d Performance xAllrad (N57S 500) - upgraded-turbo build based on the 3.0 L I6 twin-turbo diesel (N57D30TOP). Instead of the stock sequential turbochargers, the larger Stage 3 turbocharger is fitted as standard and runs 3.4 bar absolute boost: 369 kW (502 PS) at about 4450 rpm and up to 888 Nm (plateau 1800-3000 rpm), rev limiter unchanged at 5400 rpm. Strengthened internals (conrods, pistons, bolts) carry the torque; as on real road builds, the control unit limits system torque electronically - here to 950 Nm in stock form and up to 1320 Nm with the E-Boost stages. Also fitted: carbon-ceramic brakes, the Performance cooling package (auxiliary radiator in the airflow + oil cooler, no overheating even on long full-throttle stretches), K0 disconnect clutch and P2 e-machine (83 kW / 265 Nm at Stage 0) ahead of the converter, 8-speed automatic, 2.81 axle ratio, all-wheel drive. 13.5 kWh battery, 50 L diesel tank. System output 452 kW (615 PS). Response is marginally slower than the stock setup - the larger turbo needs around 0.43 s instead of 0.36 s to reach stock boost, still only a fraction of the base engine's spool time. Sailing, recuperation and all-electric pull-away are retained. Delivered without a factory top-speed limiter. All-wheel drive: electronically controlled multi-plate clutch in the transfer case (rear-biased base torque split, variably shifted to the front axle on slip), front differential, front propshaft and front driveshafts, front final drive with the same ratio as the rear (2.81). The e-machine still sits ahead of the converter, so its drive torque also reaches both axles. On overrun the AWD clutch opens, so recuperation runs through the rear axle. Switchable to pure rear-wheel drive (2WD).",
+    "Drivetrain": "AWD",
+    "Fuel Type": "Diesel",
+    "Induction Type": "Turbo",
+    "Power": 615,
+    "PowerPeakRPM": "4300 - 4600",
+    "Propulsion": "Hybrid",
+    "Torque": 950,
+    "TorquePeakRPM": "1800 - 3000",
+    "Transmission": "Automatic",
+    "Value": 88150,
+    "Weight": 1930,
+    "Years": {
+        "min": 2024,
+        "max": 2026
+    },
+    "defaultPaintName1": "Mineral Green"
+}

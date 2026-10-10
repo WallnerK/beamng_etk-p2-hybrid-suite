@@ -1,0 +1,491 @@
+{
+    // ===========================================================================
+    // ETK 854 ActiveHybrid - DSC / DTC (Driving & Safety Electronics)
+    // ===========================================================================
+    //
+    // WHY THIS FILE EXISTS
+    // --------------------
+    // The stock ETK DSE parts (etk_DSE_ESC / etk_DSE_TC_RWD / etk_DSE_TC_AWD /
+    // etk_DSE_drivemodes_stock_ICE) only ever list "mainEngine" (plus the stock
+    // EV motors "frontMotor"/"rearMotor") as a controlled motor. Our P2 hybrid
+    // feeds up to 500 Nm into the same shaft through the device "integratedMotor",
+    // which the stock parts never trim. Result before this file existed:
+    //   * traction control could cut the ICE to idle and the car still spun up
+    //     the rear axle on e-torque alone,
+    //   * the ONLY thing fighting the e-machine was the brake stage, which is
+    //     why the intervention felt coarse / on-off ("Bremseingriff statt
+    //     Momenteneingriff").
+    //
+    // Two further stock bugs are fixed here:
+    //   1. etk800_dse_esc.jbeam puts "yawControlledMotors" INSIDE the
+    //      "yawControl" sub-table. motorTorqueControl.lua reads it from the TOP
+    //      level of its own jbeam block (initSecondStage:
+    //          local yawControlledMotors = jbeamData.yawControlledMotors or {}).
+    //      With the stock nesting the list is empty -> motorCount == 0 -> the
+    //      torque stage of ESC never runs at all and yaw control is brake-only.
+    //      We declare it at the top level, where it is actually read.
+    //   2. The stock tuning gives motorTorqueControl and brakeControl almost the
+    //      same thresholds (comfort: yawAV 0.5 vs 0.6, slipAngle 0.05 vs 0.08),
+    //      so the brake stage bites practically together with the torque stage.
+    //      Production DSC works the other way round: a fine, early, almost unnoticeable
+    //      torque trim, and a distinctly later, harder single-wheel brake stage.
+    //
+    // TWO-STAGE PHILOSOPHY (OEM DSC)
+    // ------------------------------
+    //   Stage 1 "Momenteneingriff" (motorTorqueControl)
+    //     - triggers EARLY (low thresholds), acts SOFTLY (throttle factor, no
+    //       brake noise, no ABS pump), never cuts to zero (minimumThrottleLimit).
+    //     - e-torque is trimmed a hair before ICE torque: the e-machine is the
+    //       fastest actuator in the car (no manifold filling, no turbo lag), so
+    //       taking it back first is both quicker and less audible.
+    //   Stage 2 "Bremseingriff" (brakeControl)
+    //     - triggers LATER (yaw 1.4x / slip angle 1.5x the stage-1
+    //       thresholds since the 2026-09 retune), acts HARD.
+    //       This is the stage the driver is supposed to notice, and only when
+    //       the car is genuinely getting away.
+    //     - the brake-based TC additionally has a speed ceiling (maxVelocity):
+    //       like a production brake-based diff lock it is a low-speed traction
+    //       aid, not a high-speed torque limiter.
+    //
+    // MOD COMPLIANCE: all part names prefixed etk854hybrid_, all parts occupy
+    // EXISTING stock slots (etk_DSE_ESC / etk_DSE_TC / etk_DSE_drivemodes).
+    // No base-game file is overridden. The ABS part (etk_DSE_ABS) and the DSE
+    // base part (etk_DSE, which declares the CMU, the sensors and the shared
+    // motorTorqueControl / brakeControl controller instances) stay stock.
+    // ===========================================================================
+
+    // ===========================================================================
+    // STABILITY CONTROL (DSC yaw control, both stages)
+    // ===========================================================================
+    "etk854hybrid_DSE_ESC": {
+        "information": {
+            "authors": "Deuflhard",
+            "name": "DSC Stability Control (ActiveHybrid)",
+            "value": 250
+        },
+        "slotType": "etk_DSE_ESC",
+
+        "controller": [
+            ["fileName"],
+            ["drivingDynamics/supervisors/yawControl", {"name": "yawControl"}],
+            // maxLateralAcceleration is the cap the single-track model puts on
+            // the yaw rate it considers reachable. Stock default is 12 m/s^2,
+            // which is supercar-on-semi-slick territory. A ~2.0 t wagon on road
+            // tyres peaks around 9.5-10 m/s^2; leaving it at 12 makes the model
+            // expect MORE yaw than the car can ever produce, so real oversteer
+            // is under-reported and DSC reacts late and then abruptly.
+            ["drivingDynamics/supervisors/yawProviders/STMEstimate", {"maxLateralAcceleration": 9.5}]
+        ],
+
+        // ---------------------------------------------------------------
+        // STAGE 1 - torque trim (fine, early, barely noticeable)
+        // ---------------------------------------------------------------
+        "motorTorqueControl": {
+            "useForYawControl": true,
+            // TOP LEVEL on purpose - see bug (1) in the header. Both propulsion
+            // devices of the P2 chain must be listed, otherwise the e-machine
+            // keeps pushing through the yaw intervention.
+            "yawControlledMotors": ["mainEngine", "integratedMotor"],
+            "yawControl": {
+                "PIDSettings": [
+                    ["type",      "kP",  "kI",  "kD",   "integralInCoef", "integralOutCoef"],
+                    // Higher kP than stock (2.0) so the correction is already
+                    // meaningful at the low threshold below, kD damps the
+                    // e-machine's zero-lag response (stock has no kD here).
+                    ["yawAV",     3.0,   0.8,   0.05,   100,              10],
+                    // slipAngle = body slip angle; only counted when it points
+                    // AGAINST the yaw (oversteer), see motorTorqueControl.lua:88-90.
+                    // kI 0.6 (was 1.2): the input is the INTEGRATED virtual
+                    // body slip angle (virtualSensors.lua:119-149), which drifts
+                    // on grades, camber and bumps; a high kI turned that drift
+                    // into a standing torque trim (2026-09 feedback: DSC lamp
+                    // blinking in normal driving).
+                    ["slipAngle", 3.0,   0.6,   0.0,    10,               1]
+                ],
+                // 0.32 rad/s (~18 deg/s) of yaw-rate error (was 0.25). Stock ETK:
+                // 0.4 base / 0.5 in comfort, and the stock torque stage never
+                // runs at all (bug 1 above), so every trim from this stage is
+                // new compared to stock. Still clearly below our brake stage
+                // (0.45) so the two-stage order is kept.
+                "yawAVThreshold": 0.32,
+                // 0.065 rad ~ 3.7 deg of body slip (was 0.04 ~ 2.3 deg). 2.3 deg
+                // was inside the drift band of the integrated body slip angle
+                // estimate; 3.7 deg is where a road car starts to feel loose,
+                // and still below the brake stage (0.10 rad).
+                "slipAngleThreshold": 0.065,
+                // Never cut below 15% torque. A hard cut to 0 unloads the rear
+                // axle and can turn a mild slide into a snap; it is also what
+                // made the old behaviour feel like an on/off switch.
+                "minimumThrottleLimit": 0.15
+                // frontAxleSlipAngle deliberately left at its zero-gain default:
+                // power-on understeer is handled by the BRAKE stage below
+                // (inside-rear brake), not by cutting torque. Cutting torque on
+                // understeer on a RWD car mostly just feels like a dead pedal.
+            }
+        },
+
+        // ---------------------------------------------------------------
+        // STAGE 2 - single-wheel brake intervention (hard, late, deliberate)
+        // ---------------------------------------------------------------
+        "brakeControl": {
+            "useForYawControl": true,
+            "yawControl": {
+                "PIDSettings": [
+                    ["type",               "kP",  "kI",  "kD",  "integralInCoef", "integralOutCoef"],
+                    // Deliberately stiffer than stage 1: once we are here the
+                    // car IS leaving, and a timid brake pulse only extends the
+                    // slide. Stock ETK used 2.0/0.5 and 2.0/1.0.
+                    ["yawAV",              4.0,   1.0,   0.0,   100,              10],
+                    ["slipAngle",          4.0,   1.5,   0.0,   10,               1],
+                    // Understeer branch: brakes the INSIDE REAR wheel to rotate
+                    // the car back into the corner (production-style "cornering brake"
+                    // behaviour). Softer gains - understeer is not dangerous,
+                    // it is just slow, and over-braking here makes the rear step
+                    // out on a RWD car.
+                    ["frontAxleSlipAngle", 2.0,   0.5,   0.0,   10,               1]
+                ],
+                // ~1.4x the stage-1 yaw threshold and ~1.5x the slip-angle
+                // threshold. This gap IS the feature: between 0.32 and 0.45 rad/s
+                // the car is being stabilised silently by torque alone.
+                "yawAVThreshold": 0.45,
+                // 0.10 rad ~ 5.7 deg body slip - a slide the driver can feel.
+                "slipAngleThreshold": 0.10,
+                // 0.15 rad ~ 8.6 deg front slip angle: real, sustained understeer.
+                // brakeControl weights this against the rear slip angle
+                // (combinedAxleSlipAngle = |front| - 2*|rear|), so a four-wheel
+                // drift never triggers the understeer branch.
+                "frontAxleSlipAngleThreshold": 0.15
+            }
+        }
+    },
+
+    // ===========================================================================
+    // TRACTION CONTROL - RWD
+    // ===========================================================================
+    "etk854hybrid_DSE_TC_RWD": {
+        "information": {
+            "authors": "Deuflhard",
+            "name": "DSC Traction Control (ActiveHybrid, RWD)",
+            "value": 250
+        },
+        "slotType": "etk_DSE_TC",
+
+        "controller": [
+            ["fileName"],
+            ["drivingDynamics/supervisors/tractionControl", {"name": "tractionControl"}],
+            ["drivingDynamics/supervisors/slipProviders/virtualSpeedSlip"]
+        ],
+
+        "tractionControl": {
+            // Each entry becomes a wheelGroup named after the motor, whose wheels
+            // are resolved with powertrain.getChildWheels(). For the P2 chain
+            // BOTH devices resolve to the same driven axle - that is intended:
+            // the two groups exist so each propulsion device gets its OWN
+            // throttle-trim PID in motorTorqueControl.
+            "tractionControlledMotors": ["mainEngine", "integratedMotor"]
+        },
+
+        // ---------------------------------------------------------------
+        // STAGE 1 - torque trim, one PID per propulsion device
+        // ---------------------------------------------------------------
+        "motorTorqueControl": {
+            "useForTractionControl": true,
+            "tractionControl": {
+                "wheelGroupSettings": [
+                    ["motorName",       "slipThreshold", "kP",  "kI",  "kD",  "integralInCoef", "integralOutCoef", "minimumThrottleLimit"],
+                    // ICE: 0.08 normalised slip (stock RWD part: 0.15, kD 0.15).
+                    // Earlier than stock because a turbo engine needs the head
+                    // start - by the time boost has decayed the slip event is
+                    // over.
+                    // 2026-10: the WP3 retune (ICE 0.11 / e-machine 0.085, kD
+                    // 0.10 against derivative "phantom" trims) was measured in
+                    // game and reverted for the torque stage: QA T18 on the B58
+                    // (full-throttle launch, DSC) went from slipPeakLate ~0.25 to
+                    // 0.27-0.29 (limit 0.25), intermediate values (0.09 / 0.075,
+                    // kD 0.15) still failed 1 of 4. The blinking lamp the retune
+                    // aimed at was a frozen cluster page plus the unqualified
+                    // raw flags; both are fixed elsewhere (CSS-animation-free
+                    // screens, qualified lamp in gaugeData items 5/8), and the
+                    // launch slip peak is now also reduced by the sequencer's
+                    // traction-aware blend (etk854hybrid_iceSequencer
+                    // T_BLEND_TC: the ICE share ramps over >= 0.9 s while this
+                    // stage trims). T18 B58 runOnly: 0.21 / 0.22 / 0.21 / 0.21.
+                    ["mainEngine",      0.08,            2.5,   0.20,  0.20,  200,              80,                0.10],
+                    // E-machine: trimmed a hair earlier and a hair harder. It
+                    // responds within one physics step, so it is the right place
+                    // to take the first bite out of a slip event; the TC PID
+                    // works on maxSlip - slipThreshold (motorTorqueControl.lua:67),
+                    // so every +0.01 here moves the regulated slip up by about
+                    // the same. The low floor (0.05) lets TC lean on it before
+                    // touching the ICE.
+                    ["integratedMotor", 0.07,            3.0,   0.25,  0.20,  200,              80,                0.05]
+                ]
+            }
+        },
+
+        // ---------------------------------------------------------------
+        // STAGE 2 - brake-based TC (brake-based diff lock style low-speed traction aid)
+        // ---------------------------------------------------------------
+        "brakeControl": {
+            "useForTractionControl": true,
+            "tractionControl": {
+                // ONLY the mainEngine group is listed here on purpose.
+                // brakeControl keys its per-wheel PIDs by WHEEL name but steps
+                // them once per wheelGroup (actAsTractionControl is called for
+                // every group). Listing both P2 devices would step the same
+                // wheel PID twice per physics tick, doubling the effective kI
+                // and making the brake stage bite EARLIER than stage 1 - the
+                // exact opposite of the two-stage design. One group already
+                // covers the whole driven axle, whichever device is driving it.
+                "wheelGroupSettings": [
+                    ["motorName",  "slipThreshold", "slipRangeThreshold", "maxVelocity", "kP",  "kI",  "kD",  "integralInCoef", "integralOutCoef"],
+                    // slipThreshold 0.12 (unchanged; ~1.1x the stage-1 ICE and
+                    // ~1.4x the e-machine threshold since the 2026-09 retune,
+                    // the slipRange gate
+                    // below keeps it a one-wheel-spin aid).
+                    // slipRangeThreshold 0.08: brake TC only engages once the two
+                    // wheels of the axle actually DISAGREE by that much, i.e. a
+                    // one-wheel-spin (split-mu / inside wheel unloaded), not a
+                    // clean two-wheel power slide.
+                    // maxVelocity 20 m/s (72 km/h): above that the brake stage
+                    // fades out (linearScale over 1 m/s) and traction is a pure
+                    // torque job again - braking a driven wheel at speed just
+                    // heats the disc and upsets the car.
+                    ["mainEngine", 0.12,            0.08,                 20,            1.5,   1.5,   0.0,   20,               2]
+                ]
+            }
+        }
+    },
+
+    // ===========================================================================
+    // TRACTION CONTROL - AWD (etk_transfer_case_AWD configs)
+    // ===========================================================================
+    "etk854hybrid_DSE_TC_AWD": {
+        "information": {
+            "authors": "Deuflhard",
+            "name": "DSC Traction Control (ActiveHybrid, AWD)",
+            "value": 250
+        },
+        "slotType": "etk_DSE_TC",
+
+        "controller": [
+            ["fileName"],
+            ["drivingDynamics/supervisors/tractionControl", {"name": "tractionControl"}],
+            ["drivingDynamics/supervisors/slipProviders/virtualSpeedSlip"]
+        ],
+
+        "tractionControl": {
+            // On AWD both devices resolve to all four wheels through the
+            // transfer case, so the wheelGroup spans the whole car.
+            "tractionControlledMotors": ["mainEngine", "integratedMotor"]
+        },
+
+        "motorTorqueControl": {
+            "useForTractionControl": true,
+            "tractionControl": {
+                // Thresholds a touch higher than RWD: with four driven wheels
+                // the same longitudinal force produces less slip, and the stock
+                // electronicSplitShaftLock already shuffles torque before TC
+                // needs to. (Stock etk_DSE_TC_AWD sets slipThreshold 99, i.e. it
+                // disables the torque stage entirely and relies on brakes -
+                // exactly the coarse behaviour we are removing.)
+                // 2026-10: the WP3 retune (ICE 0.14 / e-machine 0.11, kD 0.10)
+                // is reverted together with the RWD part (see there).
+                "wheelGroupSettings": [
+                    ["motorName",       "slipThreshold", "kP",  "kI",  "kD",  "integralInCoef", "integralOutCoef", "minimumThrottleLimit"],
+                    ["mainEngine",      0.10,            2.2,   0.20,  0.20,  200,              80,                0.12],
+                    ["integratedMotor", 0.09,            2.6,   0.25,  0.20,  200,              80,                0.06]
+                ]
+            }
+        },
+
+        "brakeControl": {
+            "useForTractionControl": true,
+            "tractionControl": {
+                // See the RWD part for why only one group is listed.
+                "wheelGroupSettings": [
+                    ["motorName",  "slipThreshold", "slipRangeThreshold", "maxVelocity", "kP",  "kI",  "kD",  "integralInCoef", "integralOutCoef"],
+                    // slipRangeThreshold 0.10: across four wheels a bigger spread
+                    // is normal (front/rear speed difference in a corner), so the
+                    // brake-differential must be less trigger-happy than on RWD.
+                    ["mainEngine", 0.14,            0.10,                 20,            1.5,   1.5,   0.0,   20,               2]
+                ]
+            }
+        }
+    },
+
+    // ===========================================================================
+    // DRIVE MODES - DSC / DTC / DSC OFF
+    // ===========================================================================
+    // Deliberately NOT the stock 4-step Comfort/Sport/Sport+/Off ladder: on the reference car
+    // the damper & powertrain character sits on the Driving-Experience switch
+    // (our COMFORT / ECO PRO / SPORT, handled by etk854hybridControl.lua), while
+    // the DSC button is its own 3-step axis DSC -> DTC -> DSC OFF.
+    //
+    // NOTE: no sub-slots. The stock part carries etk_DSE_drivemodes_default /
+    // etk_DSE_drivemodes_sport_plus purely to inject "defaultMode" and an extra
+    // "enabledModes"; we set defaultMode here directly. Configs referencing those
+    // slots must clear them (see the .pc files).
+    //
+    // NOTE: no adaptive damper / sway bar settings here either. Ours are called
+    // etk854hybrid_damperF/R and are driven by etk854hybrid_adaptiveSusp.lua off
+    // the Driving-Experience mode - the DSC axis must not fight it.
+    // ===========================================================================
+    "etk854hybrid_DSE_drivemodes": {
+        "information": {
+            "authors": "Deuflhard",
+            "name": "DSC / DTC Drive Modes (ActiveHybrid)",
+            "value": 250
+        },
+        "slotType": "etk_DSE_drivemodes",
+
+        "controller": [
+            ["fileName"],
+            ["adaptiveBrakeLights"],
+            ["postCrashBrake", {"brakeThreshold": 60}],
+            ["driveModes"]
+        ],
+
+        "driveModes": {
+            "uiName": "DSC",
+            "enabledModes": ["dsc", "dtc", "off"],
+            "defaultMode": "dsc",
+
+            // Applied first for every mode, then overwritten by the mode's own
+            // settings. "default" restores the value the jbeam booted with.
+            "defaultSettings": [
+                ["type"],
+                ["controller", {"controllerName": "tractionControl", "isEnabled": true}],
+                ["controller", {"controllerName": "yawControl", "isEnabled": true}],
+                ["controller", {"controllerName": "motorTorqueControl", "tractionControl": "default", "yawControl": "default"}],
+                ["controller", {"controllerName": "brakeControl", "tractionControl": "default", "yawControl": "default"}],
+                ["controller", {"controllerName": "adaptiveBrakeLights", "isEnabled": true}]
+            ],
+
+            "modes": {
+                // -----------------------------------------------------------
+                // DSC - full stability control (Comfort / Eco Pro)
+                // -----------------------------------------------------------
+                "dsc": {
+                    "name": "DSC",
+                    "order": 10,
+                    "settings": [
+                        ["type"],
+                        ["controller", {"controllerName": "tractionControl", "isEnabled": true}],
+                        ["controller", {"controllerName": "yawControl", "isEnabled": true}],
+                        // DSC = the boot calibration of the fitted ESC / TC parts.
+                        // "default" restores the whole sub-table from the jbeam
+                        // values (CMU.applyParameter, motorTorqueControl.lua:319/
+                        // :333), so the RWD and the AWD TC part each keep their
+                        // OWN thresholds. The old explicit per-key rows here
+                        // (0.08/0.07, RWD values) silently overwrote the AWD
+                        // part as soon as the VCU selected "dsc".
+                        // isEnabled is set explicitly after the restore so a
+                        // switch back from DSC OFF always re-arms.
+                        // brakeControl the same way: its old explicit rows
+                        // (0.12 / 0.08 / 20 m/s, RWD values) overwrote the AWD
+                        // brake stage's 0.14 / 0.10 in the same manner.
+                        ["controller", {
+                            "controllerName": "motorTorqueControl",
+                            "tractionControl": "default",
+                            "yawControl": "default",
+                            "tractionControl.isEnabled": true,
+                            "yawControl.isEnabled": true
+                        }],
+                        ["controller", {
+                            "controllerName": "brakeControl",
+                            "tractionControl": "default",
+                            "yawControl": "default",
+                            "tractionControl.isEnabled": true,
+                            "yawControl.isEnabled": true
+                        }],
+                        ["controller", {"controllerName": "adaptiveBrakeLights", "isEnabled": true}],
+                        ["simpleControlButton", {"buttonId": "dse", "uiName": "DSC", "icon": "powertrain_esc", "color": "238BE6", "offColor": "343434", "offColorElectric": "dseWarningPulse"}]
+                    ]
+                },
+
+                // -----------------------------------------------------------
+                // DTC - Dynamic Traction Control (Sport)
+                // Production DTC does NOT switch anything off, it raises the leash:
+                // more wheel slip is allowed for traction (snow, launches), more
+                // yaw is allowed before the car is straightened - but it still
+                // catches the car.
+                // -----------------------------------------------------------
+                "dtc": {
+                    "name": "DTC",
+                    "order": 20,
+                    "settings": [
+                        ["type"],
+                        ["controller", {"controllerName": "tractionControl", "isEnabled": true}],
+                        ["controller", {"controllerName": "yawControl", "isEnabled": true}],
+                        ["controller", {
+                            "controllerName": "motorTorqueControl",
+                            "tractionControl.isEnabled": true,
+                            // ~2x the DSC slip budget: the axle is allowed to
+                            // spin enough to steer the car on the throttle.
+                            "tractionControl.wheelGroupSettings.mainEngine.slipThreshold": 0.16,
+                            "tractionControl.wheelGroupSettings.mainEngine.minimumThrottleLimit": 0.25,
+                            "tractionControl.wheelGroupSettings.integratedMotor.slipThreshold": 0.15,
+                            "tractionControl.wheelGroupSettings.integratedMotor.minimumThrottleLimit": 0.20,
+                            "yawControl.isEnabled": true,
+                            // 2026-09 retune, same factors as the DSC stage
+                            // (yawAV x1.28, slip angle x1.625): 0.40 -> 0.51,
+                            // 0.10 -> 0.16. Still below the DTC brake stage
+                            // (0.60 / 0.18).
+                            "yawControl.yawAvThreshold": 0.51,
+                            "yawControl.slipAngleThreshold": 0.16
+                        }],
+                        ["controller", {
+                            "controllerName": "brakeControl",
+                            "tractionControl.isEnabled": true,
+                            "tractionControl.wheelGroupSettings.mainEngine.slipThreshold": 0.20,
+                            "tractionControl.wheelGroupSettings.mainEngine.slipRangeThreshold": 0.10,
+                            // 12 m/s (~43 km/h): in DTC the brake differential is
+                            // a pull-away aid only, it must not interfere with a
+                            // deliberate power slide.
+                            "tractionControl.wheelGroupSettings.mainEngine.maxVelocity": 12,
+                            "yawControl.isEnabled": true,
+                            // Still a real safety net - 0.6 rad/s / 0.18 rad
+                            // (~10 deg) is a proper slide, not a wiggle.
+                            "yawControl.yawAvThreshold": 0.60,
+                            "yawControl.slipAngleThreshold": 0.18,
+                            "yawControl.frontAxleSlipAngleThreshold": 0.25
+                        }],
+                        ["controller", {"controllerName": "adaptiveBrakeLights", "isEnabled": true}],
+                        ["simpleControlButton", {"buttonId": "dse", "uiName": "DTC", "icon": "powertrain_esc", "color": "DA0C0C", "offColor": "343434", "offColorElectric": "dseWarningPulse"}]
+                    ]
+                },
+
+                // -----------------------------------------------------------
+                // DSC OFF - traction + yaw supervisors disabled.
+                // ABS stays active (separate supervisor, etk_DSE_ABS part), as
+                // it does in the real car.
+                // -----------------------------------------------------------
+                "off": {
+                    "name": "DSC OFF",
+                    "order": 30,
+                    "settings": [
+                        ["type"],
+                        ["controller", {"controllerName": "tractionControl", "isEnabled": false}],
+                        ["controller", {"controllerName": "yawControl", "isEnabled": false}],
+                        // DELIBERATELY EMPTY (same as the stock "off" mode).
+                        // driveModes sorts the keys "tractionControl" and
+                        // "yawControl" FIRST (highPrioritySettings), so the two
+                        // supervisors above disable themselves and propagate
+                        // isEnabled=false into every registered component.
+                        // Passing "tractionControl": "default" here would then
+                        // run CMU.applyParameter on the WHOLE sub-table and
+                        // restore its boot value - including isEnabled=true -
+                        // silently switching DSC back on. The entries must exist
+                        // (they override the defaultSettings row for this key)
+                        // but must carry no parameters.
+                        ["controller", {"controllerName": "motorTorqueControl"}],
+                        ["controller", {"controllerName": "brakeControl"}],
+                        ["controller", {"controllerName": "adaptiveBrakeLights", "isEnabled": true}],
+                        ["simpleControlButton", {"buttonId": "dse", "uiName": "DSC OFF", "icon": "powertrain_esc", "color": "343434", "offColor": "343434", "offColorElectric": "dseWarningPulse"}]
+                    ]
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,52 @@
+/* ETK 854 ActiveHybrid - centre screen "energy flow" page (512 x 256)
+ * Rendered as the emissive map of the stock "etk800_screen" material; the
+ * mesh shows ~99 % of the texture, keep >= 4 px margin at every edge.
+ */
+@font-face {
+  font-family: "Etk854Cond";
+  src: url(/ui/common/RobotoCondensed-Regular.ttf);
+  font-weight: 400;
+}
+@font-face {
+  font-family: "Etk854Cond";
+  src: url(/ui/common/RobotoCondensed-Bold.ttf);
+  font-weight: 700;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 512px;
+  height: 256px;
+  overflow: hidden;
+  background: #05070a;
+}
+
+#etk-flow {
+  display: block;
+  width: 512px;
+  height: 256px;
+  font-family: "Etk854Cond", "Roboto Condensed", "Arial Narrow", sans-serif;
+  text-rendering: geometricPrecision;
+  -webkit-user-select: none;
+  user-select: none;
+}
+#etk-flow text { font-family: "Etk854Cond", "Roboto Condensed", "Arial Narrow", sans-serif; }
+.b { font-weight: 700; }
+
+/* animated energy paths */
+.flow {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 5 6;
+}
+.flow.idle {
+  stroke: #1c222c;
+  stroke-width: 2;
+  stroke-dasharray: none;
+}
+/* NO CSS animations / transitions (2026-10): a BeamNG 0.39.4 vehicle HTML
+ * texture stopped showing DOM updates once an infinite CSS animation ran;
+ * dashes and blinks are driven by etk854hybrid_navi_screen.js animate(). */

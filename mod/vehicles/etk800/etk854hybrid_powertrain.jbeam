@@ -1,0 +1,541 @@
+{
+"etk854hybrid_powertrain": {
+    "information":{
+        "authors":"Deuflhard",
+        "name":"ETK 854 ActiveHybrid Powertrain (P2, 8AT)",
+        "value":12500
+    },
+    "slotType": "etk_transmission",
+
+    "slots": [
+        ["type", "default", "description"],
+        ["etk_transfer_case", "etk_transfer_case_RWD", "Transfer Case"],
+        // E-Boost stage as a selectable PART. See etk854hybrid_boost_stages.jbeam
+        // for the parts and the section-merge mechanism; the VCU falls back to
+        // the $ebooststage slider below when the "Tuning-Regler" part is fitted.
+        ["etk854hybrid_boost_stage", "etk854hybrid_boost_stage_0", "E-Boost Stage"]
+    ],
+
+    // ------------------------------------------------------------------
+    // Tuning variables.
+    //
+    // DISPLAY RULES (F:\...\BeamNG.drive\lua\common\jbeam\variables.lua,
+    // _sanitizeVars, lines 208-260) - these bite hard if ignored:
+    //   * unit == ""  ->  unit is nilled (:208), and because unit is then nil
+    //                     minDis defaults to -100 (:232), maxDis to +100 (:239)
+    //                     and the unit is finally forced to "%" (:256).
+    //                     Result: the slider shows a MEANINGLESS -100 % .. +100 %
+    //                     deviation scale instead of the real value. That was
+    //                     the bug on $ebooststage / $regenstrength / $sailingenabled.
+    //   * unit != ""  ->  minDis/maxDis default to min/max, i.e. the slider shows
+    //                     the RAW value with the unit appended (:230/:237).
+    //   * minDis/maxDis given explicitly -> the slider shows that display range and
+    //                     the game maps it onto [min,max] linearly (:250,
+    //                     ui/.../tuningStore.js:170-178 valToValDis/valDisToVal).
+    //                     This is how the base game turns 0..1 into 0..100 %
+    //                     (etk800_brakes.jbeam:284 $brakebias).
+    //   * stepDis      -> slider granularity IN DISPLAY UNITS.
+    //
+    // Reference patterns copied from the base game:
+    //   etk800_fueltank.jbeam:15   $fuel      unit "L",   stepDis 0.5
+    //   etk800_n2o.jbeam:16        $n2o_rpm   unit "RPM", stepDis 50
+    //   etk800_n2o.jbeam:17        $n2o_gear  unit "Gear", minDis/maxDis/stepDis 1  (discrete selector)
+    //   etk800_brakes.jbeam:284    $brakebias unit "",    minDis 0 / maxDis 100     (percent remap)
+    // ------------------------------------------------------------------
+    "variables": [
+        ["name", "type", "unit", "category", "default", "min", "max", "title", "description"],
+        // Discrete 0..3 selector, modelled on $n2o_gear. Only in effect when the
+        // "E-Boost: Tuning-Regler" part sits in the etk854hybrid_boost_stage slot.
+        ["$ebooststage", "range", "Stage", "Hybrid System", 0, 0, 3, "E-Boost Stage (Tuning Slider Part Only)", "Only effective when the 'E-Boost Stage' slot holds the part 'E-Boost: Tuning Slider'. 0 = stock (265 Nm / 83 kW), 1 = 320 Nm / 110 kW, 2 = 400 Nm / 150 kW, 3 = 500 Nm / 200 kW. Fixed stage parts override this slider.", {"minDis":0, "maxDis":3, "stepDis":1, "subCategory":"E-Machine"}],
+        // 0.5..2.0 internally, shown as 50..200 % (base-game $brakebias pattern).
+        ["$regenstrength", "range", "%", "Hybrid System", 1.0, 0.5, 2.0, "Recuperation Strength", "Scales the target deceleration of the recuperation levels (Alt+R: OFF / LOW / MED / HIGH). 100 % = stock calibration (LOW 0.5 - MED 1.2 - HIGH 2.2 m/s^2), 200 % = twice as strong.", {"minDis":50, "maxDis":200, "stepDis":5, "subCategory":"E-Machine"}],
+        // Binary switch. No boolean variable type exists (variables.lua:277 only
+        // accepts type "range"), so it stays a 2-position slider - unit and title
+        // spell the two states out.
+        ["$sailingenabled", "range", "on/off", "Hybrid System", 1, 0, 1, "Sailing (0 = Off, 1 = On)", "1 = sailing allowed: off the throttle the K0 clutch opens and the combustion engine shuts off (25-160 km/h, not in SPORT). 0 = sailing fully disabled, the combustion engine stays coupled.", {"minDis":0, "maxDis":1, "stepDis":1, "subCategory":"E-Machine"}],
+        // EV pedal zone of the split pedal map (etk854hybridControl.lua mapPedal,
+        // AUTO EV only). COMFORT 0.30..0.65, ECO PRO 0.40..0.85 internally
+        // (DE_CFG pEvMin / pEvMax), shown in % like $regenstrength above. ECO PRO
+        // map v3 (feedback round 3): the EV-MAX plateau (+0.05) and the kick
+        // point (+0.05 more) follow the zone; urgent / kickdown stays at 0.95.
+        ["$evPedalZoneComfort", "range", "%", "Hybrid System", 0.45, 0.30, 0.65, "EV Pedal Zone COMFORT", "Share of accelerator pedal travel that requests only the e-motor in COMFORT / AUTO EV (zero to full e-motor torque). Above it the combustion engine range begins, up to full system power; full throttle stays full throttle. Larger = electric for longer, but less torque per unit of pedal travel. 45 % = stock.", {"minDis":30, "maxDis":65, "stepDis":1, "subCategory":"Hybrid Strategy"}],
+        ["$evPedalZoneEco", "range", "%", "Hybrid System", 0.80, 0.40, 0.85, "EV Pedal Zone ECO PRO", "Share of pedal travel that requests only the e-motor; then a 5 % full-EV plateau (full electric power), then the hybrid range (engine start based on the load integral), immediate start above 90 %, kickdown above 95 %. 80 % = stock.", {"minDis":40, "maxDis":85, "stepDis":1, "subCategory":"Hybrid Strategy"}],
+        // unit "RPM" is already non-empty, so minDis/maxDis correctly default to
+        // min/max - same as the base-game $n2o_rpm.
+        ["$shiftLowDownRPM", "range", "RPM", "Hybrid System", 1100, 600, 2500, "Downshift RPM (Part Load)", "Only used by the basic shift logic (fallback when the 8HP shift logic is not active).", {"stepDis":50, "subCategory":"Transmission"}],
+        ["$shiftLowUpRPM", "range", "RPM", "Hybrid System", 1900, 1000, 3500, "Upshift RPM (Part Load)", "Only used by the basic shift logic (fallback when the 8HP shift logic is not active).", {"stepDis":50, "subCategory":"Transmission"}],
+        ["$tcLockupRPM", "range", "RPM", "Hybrid System", 1200, 700, 2500, "Converter Lock-Up Speed", "8HP logic: the converter lock-up clutch engages above this turbine speed and stays closed down to about 350 rpm below it.", {"stepDis":50, "subCategory":"Transmission"}],
+        ["$shift8hpOffset", "range", "RPM", "Hybrid System", 0, -300, 400, "Shift Map Offset (8HP logic)", "Shifts all part-load shift points of the 8HP logic (up- and downshifts alike). Negative = even lower revs; protection limits remain.", {"stepDis":50, "subCategory":"Transmission"}],
+        ["$shift8hpAdaptGain", "range", "%", "Hybrid System", 1.0, 0, 1.5, "Driving Style Adaptation (8HP logic)", "0 % = fixed shift maps, 100 % = stock, 150 % = reacts more strongly to a sporty driving style.", {"minDis":0, "maxDis":150, "stepDis":5, "subCategory":"Transmission"}],
+        // Launch control preload (etk854hybrid_launchControl.lua LC.GEN_LOAD):
+        // 0 = pure ICE, 1 = E-machine generator load (default since the round-2
+        // in-game check: pure ICE held the N57 at ~170 Nm / 13 % throttle ->
+        // -1.8 psi at the release), 2 = generator on petrol engines only.
+        ["$etk854hybrid_lcGenLoad", "range", "", "Hybrid System", 1, 0, 2, "Launch Control: E-Machine as Load (0 = Off, 1 = On, 2 = Gasoline Only)", "While preloading against the brakes, the torque at the converter is regulated to the car's holding limit (rear brakes + tires against the front brakes). 1 = the combustion engine runs at full load (boost) and the e-machine, acting as a generator, absorbs the torque above the holding limit. 0 = combustion engine only, throttled to the holding limit (little boost). 2 = generator on gasoline engines only. The e-machine never drives during preload.", {"minDis":0, "maxDis":2, "stepDis":1, "subCategory":"Launch Control"}],
+        // EV creep / virtual idle (etk854hybrid_creep.lua + motorShaft creepFloor):
+        // 1 = the E-machine holds the converter pump at ICE idle speed while
+        // the engine is off, so D / S / M1-2 / R creep like an automatic; HOLD
+        // (brake or parking brake at a standstill) stops the E-machine.
+        // 0 = v1.0.1 behaviour (creep only with the ICE coupled).
+        ["$etk854hybrid_evCreep", "range", "on/off", "Hybrid System", 1, 0, 1, "EV Creep (0 = Off, 1 = On)", "1 = in D/S/M/R the car also creeps on electric power alone, like a conventional automatic (the e-machine holds the converter at idle speed); with the brake pedal or parking brake applied at standstill the e-machine stops. 0 = creep only with the combustion engine coupled (behavior of v1.0.1).", {"minDis":0, "maxDis":1, "stepDis":1, "subCategory":"E-Machine"}]
+    ],
+
+    "controller": [
+        ["fileName"],
+        ["etk854hybridControl", {
+            "name": "hybridControl",
+            "useNewBatteryMonitor": true,
+            "debugLogLevel": 0,
+            "eBoostStage": "$ebooststage",
+            "regenStrength": "$regenstrength",
+            "sailingEnabled": "$sailingenabled",
+            "evPedalZoneComfort": "$evPedalZoneComfort",
+            "evPedalZoneEco": "$evPedalZoneEco",
+            // Immediate ICE start on a fast pedal [1/s, filtered pedal rate]
+            // above 0.60 pedal in COMFORT / 0.90 in ECO PRO, and only while
+            // the E-machine is clearly short (ICEPOL.RATE_URGENT, DEF fastPedal
+            // / fastR in etk854hybridControl.lua; normal start profile).
+            // 0 disables the rate rule - the DEFAULT since 2026-10: keyboard
+            // (3/s) and gamepad triggers (~100/s) step the pedal, so every
+            // quick press above 0.60 started the ICE at once; the kick point
+            // (COMFORT 0.70 / ECO 0.90) and the urgent pedal (COMFORT >= 0.85,
+            // ECO >= 0.95 held 0.12 s) stay.
+            // A pedal / wheel user can set e.g. 2.5.
+            "iceRateUrgent": 0,
+            "batteryControlTargetSoc": 0.90,
+            // BASE value (= E-Boost stage 0) of the combined ICE + E-machine
+            // torque ceiling at the converter input.  This is NOT the final cap:
+            //   effective cap = base + STAGE bonus (BOOST_STAGES[n].capBonusNm
+            //                   in etk854hybridControl.lua: 0 / +100 / +220 / +370)
+            // so the series calibration keeps its 680 Nm while a stage-3 build
+            // is allowed 1050 Nm - otherwise the paid-for stages would be cut
+            // away again at full load and feel identical.
+            //
+            // An ECU part may OVERRIDE this base through the custom dict section
+            //   "etk854hybridSystemCap": { "baseNm": <Nm> }
+            // (same section-merge mechanism as etk854hybridBoostStage; see
+            // etk854hybrid_engines.jbeam).  The 500 PS N57S ECU uses it because
+            // its engine alone already makes 880 Nm.  The section wins over this
+            // value; both go through the same stage staffel.
+            //
+            // Reason the cap exists at all: everything downstream of the K0 sees
+            // ICE + motor in series on one shaft, and the reference hybrid caps for
+            // exactly the same 8HP input-torque reason.  Set to 0 to disable.
+            "systemTorqueCapNm": 680,
+            // 1 = legacy one-frame ICE start (ignition + starter + K0 4/s, no rev-match, no fill) for bisecting regressions
+            "iceSeqPassthrough": 0,
+            // Launch control (etk854hybrid_launchControl.lua, constants LC.*):
+            //   launchGenLoad     1 = ICE at full load, E-machine absorbs the
+            //                     torque above the hold cap (boost at the
+            //                     release), 0 = ICE regulated to the cap,
+            //                     2 = generator on petrol engines only
+            //                     (default 1, see the variable)
+            //   launchBrakeAssist 1 = DSC hold assist: full brake torque on all
+            //                     four wheels while preloaded (brakeControl.lua
+            //                     pattern), released in the fire frame
+            //   launchBrakeGuard  1 = brake + pedal at a standstill caps the
+            //                     converter output in every mode (production brake
+            //                     override), 0 = off
+            //   launchAutoArm     1 = SPORT + DTC / DSC OFF arms itself on brake
+            //                     + kickdown at a standstill (gamepad path)
+            //   launchMargin      share of the hold capacity (rear brakes +
+            //                     rear tyres against the front brakes) the
+            //                     converter may put on the axle at stall
+            //                     (0.40..0.90)
+            "launchGenLoad": "$etk854hybrid_lcGenLoad",
+            "launchBrakeAssist": 1,
+            "launchBrakeGuard": 1,
+            "launchAutoArm": 1,
+            "launchMargin": 0.75,
+            // EV creep / virtual idle (etk854hybrid_creep.lua, constants CR.*):
+            //   evCreep           1 = on, 0 = creep only with the ICE coupled
+            //   creepMaxNm        authority limit at the shaft [Nm] (min with the
+            //                     E-machine cap incl. derate / reverse limiter)
+            //   creepHoldBrake    brake that enters the standstill HOLD (E-machine
+            //                     stops, no drain); creepReleaseBrake exits it
+            //   creepHoldDwellS   braked standstill time before HOLD [s]
+            //   creepHillGrade    no HOLD uphill in the travel direction above this
+            //                     grade (0 = rule off: HOLD on any slope)
+            //   creepHighReverse  1 = R creeps also with recuperation HIGH (the
+            //                     one-pedal hold does not exist in R)
+            // Further optional keys: creepIdleOffsetRpm, creepMinCapNm,
+            // creepVFullKmh / creepVZeroKmh, creepMaxGear, creepHoldKmh,
+            // creepHoldExitKmh, creepHoldRpm.
+            "evCreep": "$etk854hybrid_evCreep",
+            "creepMaxNm": 90,
+            "creepHoldBrake": 0.15,
+            "creepReleaseBrake": 0.08,
+            "creepHoldDwellS": 0.30,
+            "creepHillGrade": 0.05,
+            "creepHighReverse": 1
+        }],
+        ["etk854HybridUI", {"name": "hybridUI"}]
+    ],
+
+    "actionsEnabled": [
+        ["id"],
+        ["etk854hybrid_cycleDeMode"],
+        ["etk854hybrid_cycleEdrive"],
+        ["etk854hybrid_setComfort"],
+        ["etk854hybrid_setEcoPro"],
+        ["etk854hybrid_setSportDE"],
+        ["etk854hybrid_setAutoEdrive"],
+        ["etk854hybrid_setMaxEdrive"],
+        ["etk854hybrid_setBatteryControl"],
+        ["etk854hybrid_cycleMode"],
+        ["etk854hybrid_setAuto"],
+        ["etk854hybrid_setHybrid"],
+        ["etk854hybrid_setEV"],
+        ["etk854hybrid_setHold"],
+        ["etk854hybrid_setSport"],
+        ["etk854hybrid_cycleRegen"],
+        ["etk854hybrid_launchArm"],
+        ["etk854hybrid_targetSocUp"],
+        ["etk854hybrid_targetSocDown"],
+        ["etk854hybrid_cycleShiftProgram"],
+        ["etk854hybrid_toggleTrailerMode"]
+    ],
+
+    "mainEngine": {
+        "electricsThrottleName": "etk854hybrid_iceThrottle"
+    },
+
+    "powertrain": [
+        ["type", "name", "inputName", "inputIndex"],
+
+        ["frictionClutch", "clutchK0", "mainEngine", 1, {
+            "uiName": "K0 Hybrid Clutch",
+            "electricsClutchRatioName": "etk854hybrid_k0ClutchRatio",
+            // The K0 sits UPSTREAM of the E-machine, so it only ever carries ICE
+            // torque - never the system torque.  Worst case in this mod is the
+            // N57S ECU with 887 Nm; 887 * 1.3 (the usual dry-clutch design factor,
+            // and the same factor PLAN_N57_BITURBO used for the 630 Nm series
+            // engine) = 1153 -> 1150 Nm.
+            // Fixed value on purpose: lockTorque is a SLIP THRESHOLD, not a gain.
+            // As long as it stays above the commanded torque the clutch behaves
+            // identically, so over-rating it cannot change the series feel - but
+            // under-rating it would silently turn every boost stage into clutch
+            // slip instead of thrust.  A $variable would not help either: the
+            // stage can come from a runtime tuning slider, while jbeam values are
+            // baked at spawn, so a stage-tracking clutch rating is impossible.
+            "lockTorque": 1150,
+            "additionalEngineInertia": 0.05,
+            // NOTE: "maxClutchAngle" and "lockDamp" are NOT read by the stock
+            // frictionClutch.lua - calculateInertia() (frictionClutch.lua:
+            // 189-194) computes lockSpring, lockDamp and maxClutchAngle from
+            // lockTorque and the driveline inertia at runtime. Kept only so the
+            // file documents the old intent; tuning them changes nothing. The
+            // ICE sequencer (etk854hybrid_iceSequencer.lua) reads the RUNTIME
+            // fields for its K0 capacity model.
+            "maxClutchAngle": 0.30,
+            "clutchStiffness": 35,
+            "clutchFreePlay": 0.01,
+            "lockDamp": 80,
+            // Torsional damping of the locked K0 (READ by frictionClutch.lua:
+            // lockDamp = lockDampRatio * sqrt(lockSpring * cumulativeInertia)).
+            // The stock 0.15 assumes clutchStiffness 1; with 35 the ICE<->shaft
+            // mode sits at ~65 Hz with a damping ratio of ~0.2 % - measured
+            // 2026-09-30: +-1150 Nm limit cycle at idle in D/N/P (the clutch
+            // slipped at lockTorque), +-150 Nm ringing and +-40 rpm at cruise.
+            // 11 -> lockDamp ~15 Nm*s/rad, damping ratio ~0.2-0.25 of that mode,
+            // the job the dual-mass flywheel/damper does in the real module.
+            // In the slip phases it adds r * lockDamp * slip to the K0 torque;
+            // the sequencer's capacity model (k0Cap) reads the runtime value.
+            "lockDampRatio": 11
+        }],
+
+        ["etk854hybrid_motorShaft", "integratedMotor", "clutchK0", 1, {
+            "uiName": "P2 Electric Motor (ActiveHybrid)",
+            // P2 inline BEFORE the gearbox: reversing is done by the R gear
+            // ratio downstream. "auto" would flip the motor against the ICE
+            // in reverse (motor fights the engine, car barely moves).
+            "directionMode": "forward",
+            "gearRatio": 1.0,
+            "electricsThrottleName": "etk854hybrid_evThrottle",
+            "electricsRegenThrottleName": "etk854hybrid_evRegen"
+        }],
+
+        ["torqueConverter", "torqueConverter", "integratedMotor", 1, {
+            "uiName": "Hybrid Torque Converter"
+        }],
+
+        ["automaticGearbox", "gearbox", "torqueConverter", 1, {
+            "uiName": "8-Speed Automatic"
+        }]
+    ],
+
+    "integratedMotor": {
+        "torque": [
+            ["rpm", "torque"],
+            [0,     500],
+            [500,   500],
+            [1000,  500],
+            [1500,  500],
+            [2000,  500],
+            [2500,  500],
+            [3000,  500],
+            [3500,  500],
+            [4000,  477],
+            [4500,  424],
+            [5000,  382],
+            [5500,  347],
+            [6000,  318],
+            [6500,  294],
+            [7000,  273],
+            [7500,  255],
+            [8000,  239],
+            [8500,  225],
+            [9000,  212],
+            [9500,  201],
+            [10000, 191]
+        ],
+        "maxRPM": 10000,
+        "inertia": 0.12,
+        // Device throttle smoother (etk854hybrid_motorShaft.lua new()): only
+        // interpolates between VCU frames now (was a fixed 10/s rise, 30/s
+        // fall). The VCU jerk limiter in etk854hybrid_torqueCoord.lua is the
+        // single drive-torque shaper; two shapers on the two halves of the
+        // system torque (motor 10/s, ICE 15/s) were part of the "coarse
+        // control" feel.
+        "throttleRiseRate": 40,
+        "throttleFallRate": 60,
+        "friction": 2.0,
+        "dynamicFriction": 0.0005,
+        "electricalEfficiency": 0.94,
+        // Recuperation envelope. UNITS: electricMotor.lua builds the regen
+        // curve as min(maxRegenTorque, maxRegenPower * 1000 / av), i.e.
+        // maxRegenPower is in kW - the old 80000 meant 80 MW and disabled the
+        // power taper entirely, leaving a dead-flat 180 Nm curve.
+        // 95 kW = the strongest E-Boost stage's regen budget; the VCU still
+        // applies the per-stage budget (BOOST_STAGES[n].regenKw) on top, so a
+        // stage-0 car never sees more than its 55 kW.
+        // 300 Nm (was 180): 180 Nm at the motor is ~0.10 g at the wheels in the
+        // gears where one-pedal driving happens - the E-machine ran out of
+        // envelope long before the deceleration target was met. 300 Nm covers
+        // the 2.2 m/s^2 HIGH target up to ~gear 4; above that the power budget
+        // is the binding limit anyway (as on the real car).
+        "maxRegenPower": 95,
+        "maxRegenTorque": 300,
+        "maximumWantedRegenTorque": 300,
+        "regenFadeRPM": 600,
+        // EV creep floor (etk854hybrid_motorShaft.lua creepFloor; armed only by
+        // the VCU channels etk854hybrid_creepTargetRpm / _creepMaxNm; a limit
+        // of 0 fades out at creepAuthFallRate on the last armed limit,
+        // _creepCut = 1 drops the floor at once):
+        //   creepKp 15 Nm/(rad/s) (dt*Kp/J = 0.0625 at 2 kHz), creepKi 150
+        //   (integral time 0.1 s: no droop, the pump sits exactly at idle),
+        //   setpoint ramps [rpm/s], device torque ceiling [Nm], authority
+        //   ramps [1/s], fade on the effective K0 ratio k0 * (1 - fillGain)
+        //   (Hi = the sequencer's governor handover 0.30) and on the lock-up
+        //   clutch. creepEnabled false = kill switch (needs directionMode
+        //   "forward" anyway).
+        "creepEnabled": true,
+        "creepKp": 15,
+        "creepKi": 150,
+        "creepRampUpRpmS": 5000,
+        "creepRampDownRpmS": 1500,
+        "creepMaxNm": 90,
+        "creepAuthRiseRate": 20,
+        "creepAuthFallRate": 5,
+        "creepK0FadeLo": 0.05,
+        "creepK0FadeHi": 0.30,
+        "creepLockupFadeLo": 0.10,
+        "creepLockupFadeHi": 0.50,
+        "energyStorage": "mainBattery",
+        "torqueReactionNodes:": ["tra1", "e1r", "e1l"],
+        "soundConfig": "soundConfigP2v2Motor",
+        "uiName": "P2 Electric Motor (ActiveHybrid)"
+    },
+
+    // ------------------------------------------------------------------
+    // E-machine sound.
+    // Mechanism: the stock `electricMotor` initSounds/updateSounds hook pattern
+    // (F:\...\BeamNG.drive\lua\vehicle\powertrain\electricMotor.lua:432-500 +
+    //  :163-168), driven by powertrain.lua:716-718 / :214-216 for ANY device
+    // that exposes those methods - ported 1:1 into etk854hybrid_motorShaft.lua.
+    // `sampleName` must resolve to art/sound/blends/<name>.sfxBlend2D.json.
+    // ElectricMotor_02 is the blend the stock Vivace EV uses
+    // (-> event:>Engine>Bands>Real>electric_eng_02). ElectricMotor_01 does NOT
+    // exist in art_sound.zip - the previous value was silently dead.
+    // ------------------------------------------------------------------
+    "soundConfigP2v2Motor": {
+        // stock soundConfig schema
+        "sampleName": "ElectricMotor_02",
+        "mainGain": -8.0,
+        "onLoadGain": 0.9,
+        "offLoadGain": 0.45,
+        "minLoadMix": 0.0,
+        "maxLoadMix": 0.95,
+        // Smoother rates: outRate = moving away from zero (attack),
+        // inRate = moving back towards zero (release). See filters.lua:351/:356.
+        "rpmSmootherInRate": 18,
+        "rpmSmootherOutRate": 28,
+        "loadSmootherInRate": 14,
+        "loadSmootherOutRate": 20,
+
+        // ETK854 extensions (read by etk854hybrid_motorShaft.initSounds)
+        // idleVolume: floor volume while the shaft turns but the motor is
+        //             passive (K0 closed, ICE driving the shaft).
+        "idleVolume": 0.18,
+        // referenceTorque: Nm mapped to full volume (reference-hybrid stage-0 envelope).
+        "referenceTorque": 280,
+        // regenVolumeCoef: recuperation stays audible, a touch below traction.
+        "regenVolumeCoef": 0.85,
+        // volumeFadeInRPM: below this motor RPM the emitter fades out, so a
+        //                  parked car with the shaft at rest is silent.
+        "volumeFadeInRPM": 60,
+        "volumeSmootherInRate": 3,
+        "volumeSmootherOutRate": 6,
+        // activeVolumeThreshold: etk854hybrid_motorSoundActive flips here.
+        "activeVolumeThreshold": 0.02
+    },
+
+    "torqueConverter": {
+        "converterDiameter": 0.30,
+        "converterStiffness": 12,
+        "couplingAVRatio": 0.92,
+        "stallTorqueRatio": 1.7,
+        // Rated for the highest system-torque cap this mod can produce:
+        // N57S base 950 Nm + stage-3 bonus 370 = 1320 Nm, plus ~15 % reserve
+        // -> 1520 Nm.  Same argument as lockTorque above: this is the torque at
+        // which the lock-up clutch starts to slip, so sizing it above every
+        // commanded torque makes the VCU cap - not the hardware - the binding
+        // limit.  That is the whole point: the stages must be felt as thrust,
+        // not burnt as converter slip.  Series behaviour is unchanged because a
+        // clutch that never slipped before still never slips.
+        "lockupClutchTorque": 1520,
+        "additionalEngineInertia": 0.20
+    },
+
+    "gearbox": {
+        "gearRatios": [-3.317, 0, 4.714, 3.143, 2.106, 1.667, 1.285, 1.00, 0.839, 0.667],
+        "parkLockTorque": 2500,
+        "oneWayViscousCoef": 35,
+        "gearChangeTime": 0.10,
+        "shiftEfficiency": 0.82,
+        "friction": 1.45,
+        "dynamicFriction": 0.0015,
+        "torqueLossCoef": 0.017,
+        "gearboxNode:":["tra1"]
+    },
+
+    "vehicleController": {
+        // 8HP / ActiveHybrid shift program: lua/controller/vehicleController/
+        // shiftLogic/etk854hybrid_8hp.lua via the shim lua/controller/shiftLogic-etk854hybrid_8hp.lua
+        "shiftLogicName": "etk854hybrid_8hp",
+        "automaticModes": "PRNDSM",
+        // stays true: only the base fallback uses the resulting tables; the 8HP program
+        // reads the ECU highShiftUpRPM directly as its full-load point
+        "calculateOptimalLoadShiftPoints": true,
+        // base-logic fallback only: the 8HP program times its own shifts
+        // (8hpCore PT.upTime*/tUpAfterUp/debUp: ~0.20-0.25 s gap after a shift,
+        // round 2 R3); 0.45 -> 0.25 so a fallback behaves alike
+        "transmissionGearChangeDelay": 0.25,
+        "shiftDownRPMOffsetCoef": 1.15,
+        "aggressionHoldOffThrottleDelay": 2.0,
+        "aggressionSmoothingUp": 1.8,
+        "aggressionSmoothingDown": 0.25,
+        "gearboxDecisionSmoothingUp": 2.0,
+        "gearboxDecisionSmoothingDown": 2.0,
+        // base-logic fallback only (ignored by the 8HP program)
+        "lowShiftDownRPM": "$shiftLowDownRPM",
+        "lowShiftUpRPM": "$shiftLowUpRPM",
+        "maxGearChangeTime": 0.5,
+        "minGearChangeTime": 0.25,
+        "sportGearChangeTime": 0.08,
+        // only used with etk854hybrid8hp.legacyPedalCut = true
+        "throttleCoefWhileShifting": 0.55,
+        "torqueConverterLockupRPM": "$tcLockupRPM",
+        "torqueConverterLockupRange": 250,
+        "torqueConverterLockupMinGear": 2,
+        // linear smoother: LockupRate = ENGAGE rate, LockupInRate = RELEASE rate (filters.lua:390-424)
+        "torqueConverterLockupRate": 4,
+        "torqueConverterLockupInRate": 10,
+        "torqueConverterHasPartialLockup": true,
+        "torqueConverterMinPartialLockupRatio": 0.5,
+        "etk854hybrid8hpOffsetRPM": "$shift8hpOffset",
+        "etk854hybrid8hpAdaptGain": "$shift8hpAdaptGain",
+        "etk854hybrid8hp": {
+            "paddleTempManual": false,
+            "legacyPedalCut": false,
+            "startIsolation": 1.0,
+            "kickdownPedal": 0.95,
+            "freezeWatchdogS": 1.5,
+            // ECO PRO / AUTO EV: EV upshift line towards the E-machine
+            // corner speed while the pedal asks for (nearly) full E-machine
+            // torque (pedal 0.70-0.85), capped below the ECO ICE-start rev cap
+            // (etk854hybrid_8hpCore.lua K.evPow*). false = efficiency line only.
+            "evPowerLineEco": true,
+            "debug": 0
+        },
+        // 8HP engine calibration for an engine whose ECU part carries NO
+        // etk854hybrid8hpEngine block - in practice the ETK 2.0 i4 (30e) on its
+        // stock base-game ECU "etk_engine_i4_2.0_ecu_250", which must not be
+        // edited. The R6 ECU parts (etk854hybrid_engines.jbeam) bring their
+        // own block, which always wins over this one (etk854hybrid_8hpCore.lua
+        // initParams). Measured on the 30e (sweep 2026-09-30):
+        //   nUpFullRPM 6400: the i4 inherits highShiftUpRPM 6800 from its turbo
+        //     intake, only 200 rpm under its 7000 soft limiter and past the
+        //     power peak (~190 kW at 6000-6250 rpm); from 6600 on the VCU
+        //     redline guard also tapers the E-machine out, so kickdowns and
+        //     launches ran the last 400 rpm of every gear without boost.
+        //     6400 = ICE wheel-force crossover of the 3->4 .. 5->6 steps
+        //     (6400-6475 rpm on the i4 curve; 1->2 / 2->3 would pay off to
+        //     ~6850 on the ICE alone, but the boost fades from 6600).
+        //     Measured: launch 0-100 4.60 -> 4.52 s, kickdown peak 6780 -> 6400.
+        //   lugMinRPM 1000 / coastDnRPM 1100: a 2.0 four-cylinder, not a six
+        //   turboRampRPM 1400-2200 / lagMin 0.5: single-scroll 2.0 turbo, boost
+        //     builds later than on the twin-scroll B58 (1200-1800)
+        //   resvMaxRPM 2500: less low-end torque -> reserve checks a bit higher
+        //   Torque-first ECO/COMFORT (feedback 2026-10 round 2): brake targets
+        //   the petrol defaults (ECO [1400,1700], COMFORT [1600,2000]); coast
+        //   target, start cap and engagement floor from the petrol FAMILY
+        //   (etk854hybrid_8hpCore.lua); SPORT relax floor 2200 (FD 3.15, a
+        //   2.0 four-cylinder)
+        "etk854hybrid8hpEngineDefault": {
+            "family": "petrol",
+            "nUpFullRPM": 6400,
+            "lugMinRPM": 1000,
+            "coastDnRPM": 1100,
+            "evLugBonusRPM": 250,
+            "turboRampRPM": [1400, 2200],
+            "lagMin": 0.50,
+            "resvMaxRPM": 2500,
+            "brakeTargetRPM": {"ECO": [1400, 1700], "COMFORT": [1600, 2000], "SPORT": [2600, 3600]},
+            "sportRelaxRPM": 2200
+        }
+    },
+
+    "flexbodies": [
+        ["mesh", "[group]:", "nonFlexMaterials"],
+        ["etk_transmission", ["etk_engine", "etk_transmission"], [], {"pos":{"x":0, "y":0, "z":0}}]
+    ],
+
+    "nodes": [
+        ["id", "posX", "posY", "posZ"],
+        {"selfCollision": false},
+        {"collision": true},
+        {"nodeMaterial": "|NM_METAL"},
+        {"frictionCoef": 0.5},
+        {"group": "etk_transmission"},
+        {"nodeWeight": 78},
+        ["tra1", 0.0, -0.36, 0.33],
+        {"group": ""}
+    ],
+
+    "beams": [
+        ["id1:", "id2:"],
+        {"beamType": "|NORMAL", "beamLongBound": 1.0, "beamShortBound": 1.0},
+
+        {"beamSpring": 15001000, "beamDamp": 500},
+        {"beamDeform": 250000, "beamStrength": "FLT_MAX"},
+
+        ["tra1", "e1r"],
+        ["tra1", "e1l"],
+        ["tra1", "e3r"],
+        ["tra1", "e3l"],
+
+        {"beamPrecompression": 1, "beamType": "|NORMAL", "beamLongBound": 1.0, "beamShortBound": 1.0}
+    ]
+}
+}

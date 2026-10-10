@@ -1,0 +1,109 @@
+{
+  "title": "ETK 854 ActiveHybrid",
+  "name": "ETK 854 ActiveHybrid",
+  "type": "etk854_hybrid",
+  "version": 0.6,
+  "apps": [
+    {
+      "appName": "etk854HybridHud",
+      "placement": {
+        "position": "absolute",
+        "left": "",
+        "top": "",
+        "right": "5px",
+        "bottom": "310px",
+        "width": "320px",
+        "height": "220px"
+      }
+    },
+    {
+      "appName": "tacho2",
+      "appVersion": 1,
+      "placement": {
+        "position": "absolute",
+        "right": "5px",
+        "bottom": "5px",
+        "width": "300px",
+        "height": "300px"
+      },
+      "settings": {
+        "noCockpit": true
+      }
+    },
+    {
+      "appName": "simplePowertrainControl",
+      "placement": {
+        "position": "absolute",
+        "right": "260px",
+        "bottom": "0px",
+        "width": "230px",
+        "height": "170px"
+      }
+    },
+    {
+      "appName": "damageApp",
+      "placement": {
+        "position": "absolute",
+        "left": "0px",
+        "top": "",
+        "right": "",
+        "bottom": "0px",
+        "width": "168.75px",
+        "height": "300px"
+      }
+    },
+    {
+      "appName": "inputHints",
+      "appVersion": 8,
+      "placement": {
+        "position": "absolute",
+        "left": "",
+        "top": "0px",
+        "right": "0px",
+        "bottom": "",
+        "width": "450px",
+        "height": "600px"
+      }
+    },
+    {
+      "appName": "topLeftApps",
+      "appVersion": 2,
+      "placement": {
+        "position": "absolute",
+        "left": "0px",
+        "top": "0px",
+        "right": "",
+        "bottom": "",
+        "width": "380px",
+        "height": "600px"
+      }
+    },
+    {
+      "appName": "topCenterApps",
+      "appVersion": 1,
+      "placement": {
+        "position": "absolute",
+        "left": 0,
+        "right": 0,
+        "top": "100px",
+        "bottom": "",
+        "margin": "auto",
+        "width": "610px",
+        "height": "350px"
+      }
+    },
+    {
+      "appName": "etk854HybridActions",
+      "appVersion": 1,
+      "placement": {
+        "position": "absolute",
+        "left": "",
+        "top": "",
+        "right": "330px",
+        "bottom": "318px",
+        "width": "290px",
+        "height": "250px"
+      }
+    }
+  ]
+}

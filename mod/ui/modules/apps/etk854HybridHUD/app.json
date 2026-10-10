@@ -1,0 +1,24 @@
+{
+  "domElement": "<etk854-hybrid-hud></etk854-hybrid-hud>",
+  "directive": "etk854HybridHud",
+  "appName": "etk854HybridHud",
+  "name": "ETK 854 ActiveHybrid Cockpit",
+  "description": "Battery SOC, recuperation, ICE / e-motor power, total output and P2 power flow for the ETK 854 ActiveHybrid.",
+  "author": "Deuflhard",
+  "version": "3.0",
+  "category": "Dashboard",
+  "types": [
+    "ui.apps.categories.vehicle_info"
+  ],
+  "css": {
+    "right": "5px",
+    "bottom": "310px",
+    "width": "320px",
+    "height": "220px"
+  },
+  "min-width": "200px",
+  "min-height": "138px",
+  "preserveAspectRatio": true,
+  "isAuxiliary": false,
+  "interactive": "no"
+}

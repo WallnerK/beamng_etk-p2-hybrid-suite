@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ETK 854 ActiveHybrid - energy flow</title>
+  <!--
+    ETK 854 ActiveHybrid centre screen page (OEM-style energy flow).
+    Loaded by the stock beamNavigator controller "etk800_navi" into the web
+    view "@etk800_screen" at 512 x 256 (see etk854hybrid_gauges.jbeam, part
+    etk854hybrid_navi_energyflow).
+    JS entry points:
+      etk854hybridUpdate(d)   15 Hz from lua/controller/etk854hybrid_screenData.lua
+      map.updateData(g)       15 Hz from beamNavigator (x, y, rotation, speed,
+                              ignitionLevel) - only ignitionLevel is used
+      map.setData(m)          once from the game engine (road network) - ignored
+      map.setBootscreenImage  optional - ignored
+    Everything is stubbed/buffered in this head script so no call can hit an
+    undefined function before etk854hybrid_navi_screen.js has run.
+    Desktop browser: runs a demo; #demo=<state> pins one state.
+  -->
+  <script>
+    (function () {
+      var q = window.__etk854nq = { data: null, ign: null };
+      window.etk854hybridUpdate = function (d) { q.data = d; };
+      window.map = {
+        updateData: function (g) { if (g && typeof g.ignitionLevel === "number") { q.ign = g.ignitionLevel; } },
+        setData: function () {},
+        setBootscreenImage: function () {},
+        setRoute: function () {},
+        setMarkers: function () {},
+        setRotation: function () {},
+        setLocation: function () {}
+      };
+      window.onerror = function (msg, src, line, col) {
+        try {
+          if (typeof beamng !== "undefined" && beamng.sendEngineLua) {
+            var t = String(msg) + " @" + String(src).split("/").pop() + ":" + line + ":" + col;
+            beamng.sendEngineLua("log('E','etk854hybrid.naviScreen'," + JSON.stringify(t) + ")");
+          }
+        } catch (e) { /* never throw from the error hook */ }
+        return false;
+      };
+    })();
+  </script>
+  <link rel="stylesheet" type="text/css" href="etk854hybrid_navi_screen.css">
+</head>
+<body>
+<svg id="etk-flow" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 256" width="512" height="256">
+  <defs>
+    <linearGradient id="nSoc" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#1f6fe0"/>
+      <stop offset="1" stop-color="#8cc8ff"/>
+    </linearGradient>
+    <linearGradient id="nBody" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#101620"/>
+      <stop offset="0.5" stop-color="#0c1118"/>
+      <stop offset="1" stop-color="#101620"/>
+    </linearGradient>
+  </defs>
+
+  <!-- ============================== header ============================== -->
+  <text class="b" x="10" y="19" font-size="12" letter-spacing="1.6" fill="#e6ebf2">ENERGY FLOW</text>
+  <rect x="10" y="23" width="78" height="1.6" fill="#2b8bff"/>
+  <text x="106" y="19" font-size="10" letter-spacing="1.2" fill="#5d6778">HYBRID SYSTEM</text>
+  <text id="hTemp" x="464" y="19" font-size="10" text-anchor="end" fill="#8b95a5"></text>
+  <text id="hClock" class="b" x="502" y="19" font-size="12" text-anchor="end" fill="#e6ebf2"></text>
+  <rect x="8" y="28" width="496" height="1" fill="#1c222c"/>
+
+  <!-- ===================== car schematic (top view) ===================== -->
+  <!-- phase badge + mode line -->
+  <rect id="phBox" x="10" y="35" width="92" height="17" rx="8.5" fill="#0b0e13" stroke="#8cc8ff" stroke-width="1.2"/>
+  <text id="phTxt" class="b" x="56" y="47.3" font-size="10.5" letter-spacing="1.3" text-anchor="middle" fill="#8cc8ff">READY</text>
+  <text id="modeTxt" x="336" y="47.5" font-size="10" letter-spacing="0.9" text-anchor="end" fill="#8b95a5">COMFORT &#183; AUTO EV</text>
+
+  <!-- body -->
+  <path d="M50 66 H296 Q318 66 320 90 V142 Q318 166 296 166 H50 Q28 166 26 142 V90 Q28 66 50 66 Z"
+        fill="url(#nBody)" stroke="#2a3140" stroke-width="1.4"/>
+  <path d="M118 72 Q110 116 118 160" fill="none" stroke="#1d242f" stroke-width="1.4"/>
+  <path d="M292 72 Q300 116 292 160" fill="none" stroke="#1d242f" stroke-width="1.4"/>
+
+  <!-- wheels -->
+  <g id="wF" fill="#0b0e13" stroke="#394150" stroke-width="1.4">
+    <rect x="70" y="56" width="34" height="13" rx="4"/>
+    <rect x="70" y="163" width="34" height="13" rx="4"/>
+  </g>
+  <g id="wR" fill="#0b0e13" stroke="#394150" stroke-width="1.4">
+    <rect x="244" y="56" width="34" height="13" rx="4"/>
+    <rect x="244" y="163" width="34" height="13" rx="4"/>
+  </g>
+
+  <!-- front drivetrain (only with the AWD transfer case) -->
+  <g id="frontDrive" opacity="0">
+    <!-- runs at y 152, clear of the HV line (y 143) -->
+    <path id="fProp" class="flow idle" d="M177 128 V152 H93"/>
+    <!-- upper half shaft passes under the engine block -->
+    <path id="fA1" class="flow idle" d="M87 146.5 V134 M87 98 V71"/>
+    <path id="fA2" class="flow idle" d="M87 157.5 V162"/>
+    <circle id="fDiff" cx="87" cy="152" r="5.5" fill="#0b0e13" stroke="#394150" stroke-width="1.4"/>
+  </g>
+
+  <!-- energy paths -->
+  <path id="fuelLn" class="flow idle" d="M198 89 H120 Q110 89 110 97"/>
+  <path id="hvLn" class="flow idle" d="M198 143 H152 Q140 143 140 131"/>
+  <path id="iceLn1" class="flow idle" d="M108 116 H113"/>
+  <path id="iceLn2" class="flow idle" d="M119 116 H127"/>
+  <path id="emLn" class="flow idle" d="M153 116 H158"/>
+  <path id="rProp" class="flow idle" d="M196 116 H253"/>
+  <path id="rA1" class="flow idle" d="M261 108 V71"/>
+  <path id="rA2" class="flow idle" d="M261 124 V161"/>
+
+  <!-- components -->
+  <g id="ice" fill="#0b0e13" stroke="#394150" stroke-width="1.5">
+    <rect x="46" y="98" width="62" height="36" rx="4"/>
+    <!-- inline six (B58 / N57 style) -->
+    <circle cx="53" cy="116" r="3.3"/>
+    <circle cx="63" cy="116" r="3.3"/>
+    <circle cx="73" cy="116" r="3.3"/>
+    <circle cx="83" cy="116" r="3.3"/>
+    <circle cx="93" cy="116" r="3.3"/>
+    <circle cx="103" cy="116" r="3.3"/>
+  </g>
+  <line id="k0A" x1="114.5" y1="105" x2="114.5" y2="127" stroke="#394150" stroke-width="2"/>
+  <line id="k0B" x1="117.5" y1="105" x2="117.5" y2="127" stroke="#394150" stroke-width="2"/>
+  <text id="k0Lbl" x="116" y="101" font-size="8" letter-spacing="0.6" text-anchor="middle" fill="#5d6778">K0</text>
+  <g id="em">
+    <circle cx="140" cy="116" r="13" fill="#0b0e13" stroke="#394150" stroke-width="1.6"/>
+    <path id="emBolt" d="M142.6 106.8 L134.8 117.4 H139.6 L137.2 125.4 L145.2 114.4 H140.4 Z" fill="#394150"/>
+  </g>
+  <g id="gb">
+    <rect x="158" y="104" width="38" height="24" rx="3" fill="#0b0e13" stroke="#394150" stroke-width="1.5"/>
+    <text x="177" y="119.6" font-size="9" letter-spacing="0.8" text-anchor="middle" class="b" fill="#8b95a5">8AT</text>
+  </g>
+  <circle id="rDiff" cx="261" cy="116" r="8" fill="#0b0e13" stroke="#394150" stroke-width="1.5"/>
+  <g id="tank">
+    <rect x="198" y="76" width="50" height="26" rx="4" fill="#0b0e13" stroke="#394150" stroke-width="1.5"/>
+    <rect id="tankFill" x="201" y="79" width="0" height="20" rx="2" fill="#ffab3d" opacity="0.28"/>
+    <!-- litres from the on-board computer (gaugeData item 10), "FUEL" without data -->
+    <text id="tankTxt" x="223" y="93" font-size="9" letter-spacing="1" text-anchor="middle" class="b" fill="#8b95a5">FUEL</text>
+  </g>
+  <g id="batt">
+    <rect id="battBody" x="198" y="130" width="50" height="26" rx="3" fill="#0b0e13" stroke="#394150" stroke-width="1.5"/>
+    <rect id="battFill" x="201" y="133" width="0" height="20" rx="2" fill="#2b8bff" opacity="0.35"/>
+    <text id="battTxt" x="223" y="147" font-size="10" text-anchor="middle" class="b" fill="#e6ebf2">--%</text>
+  </g>
+
+  <!-- legend -->
+  <g font-size="9" letter-spacing="0.8" fill="#8b95a5">
+    <circle cx="32" cy="189" r="3" fill="#2b8bff"/><text x="38" y="192">ELECTRIC</text>
+    <circle cx="94" cy="189" r="3" fill="#ffab3d"/><text x="100" y="192">ENGINE</text>
+    <circle cx="148" cy="189" r="3" fill="#2ad99c"/><text x="154" y="192">RECUPERATION / CHARGE</text>
+  </g>
+
+  <!-- =========================== right panel ============================ -->
+  <rect x="344" y="34" width="1" height="216" fill="#1c222c"/>
+  <text x="352" y="44" font-size="9.5" letter-spacing="1.4" fill="#8b95a5">BATTERY</text>
+  <text id="soc" class="b" x="352" y="79" font-size="34" fill="#e6ebf2"><tspan id="socVal">--</tspan><tspan font-size="16" dx="1">%</tspan></text>
+  <text id="rngLbl" x="504" y="44" font-size="9.5" letter-spacing="1.4" text-anchor="end" fill="#2b8bff">EV</text>
+  <text id="rng" class="b" x="504" y="79" font-size="22" text-anchor="end" fill="#e6ebf2"><tspan id="rngVal">--</tspan><tspan id="rngUnit" font-size="11" dx="2" fill="#8b95a5">km</tspan></text>
+  <rect x="352" y="86" width="152" height="7" rx="3.5" fill="#161b23"/>
+  <rect id="socBar" x="352" y="86" width="0" height="7" rx="3.5" fill="url(#nSoc)"/>
+  <rect id="socTgt" x="400" y="83" width="2" height="13" fill="#e6ebf2" opacity="0"/>
+
+  <text x="352" y="116" font-size="10" letter-spacing="1.2" fill="#8b95a5">ENGINE</text>
+  <text id="iceKw" class="b" x="504" y="116" font-size="15" text-anchor="end" fill="#ffab3d">0 kW</text>
+  <!-- instantaneous fuel consumption between label and power (x ~397..455) -->
+  <text id="iceCons" x="426" y="116" font-size="9" letter-spacing="0.4" text-anchor="middle" fill="#8b95a5"></text>
+  <rect x="352" y="120" width="152" height="3" rx="1.5" fill="#161b23"/>
+  <rect id="iceBar" x="352" y="120" width="0" height="3" rx="1.5" fill="#ffab3d"/>
+
+  <text x="352" y="141" font-size="10" letter-spacing="1.2" fill="#8b95a5">E-MOTOR</text>
+  <text id="evKw" class="b" x="504" y="141" font-size="15" text-anchor="end" fill="#2b8bff">0 kW</text>
+  <rect x="352" y="145" width="152" height="3" rx="1.5" fill="#161b23"/>
+  <rect id="evBar" x="352" y="145" width="0" height="3" rx="1.5" fill="#2b8bff"/>
+
+  <text x="352" y="166" font-size="10" letter-spacing="1.2" fill="#8b95a5">SYSTEM</text>
+  <text id="sysKw" class="b" x="504" y="166" font-size="15" text-anchor="end" fill="#e6ebf2">0 kW</text>
+
+  <!-- status chips, laid out left to right by the script -->
+  <g id="chips"></g>
+
+  <!-- ============================ bottom row ============================ -->
+  <rect x="8" y="202" width="496" height="1" fill="#1c222c"/>
+  <text x="10" y="218" font-size="9" letter-spacing="1.2" fill="#8b95a5">HISTORY</text>
+  <text x="10" y="230" font-size="9" letter-spacing="1.2" fill="#5d6778">15 MIN</text>
+  <rect x="60" y="232" width="278" height="1" fill="#2a3140"/>
+  <g id="hist"></g>
+
+  <text x="352" y="216" font-size="9" letter-spacing="1.2" fill="#8b95a5">AVG ELECTRIC</text>
+  <text id="cons" class="b" x="352" y="238" font-size="16" fill="#e6ebf2"><tspan id="consVal">--</tspan><tspan id="consUnit" font-size="9" dx="2" fill="#8b95a5">kWh/100 km</tspan></text>
+  <text x="504" y="216" font-size="9" letter-spacing="1.2" text-anchor="end" fill="#8b95a5">EV SHARE</text>
+  <text id="share" class="b" x="504" y="238" font-size="16" text-anchor="end" fill="#2b8bff">--</text>
+  <!-- trip average fuel + trip distance (same values as the cluster) -->
+  <text id="fuelAvg" x="352" y="250" font-size="8.5" letter-spacing="0.6" fill="#8b95a5">AVG FUEL <tspan id="fuelAvgVal" class="b" fill="#ffab3d">--</tspan><tspan id="fuelAvgUnit" dx="2">L/100 km</tspan></text>
+  <text id="tripTxt" x="504" y="250" font-size="8.5" letter-spacing="0.6" text-anchor="end" fill="#8b95a5">TRIP <tspan id="tripVal" class="b" fill="#e6ebf2">--</tspan><tspan id="tripUnit" dx="2">km</tspan></text>
+
+  <!-- standby / no data overlay -->
+  <g id="standby" opacity="0">
+    <rect x="0" y="0" width="512" height="256" fill="#05070a"/>
+    <text id="sbTitle" class="b" x="256" y="122" font-size="16" letter-spacing="3" text-anchor="middle" fill="#8b95a5">HYBRID SYSTEM</text>
+    <text id="sbSub" x="256" y="142" font-size="11" letter-spacing="1.6" text-anchor="middle" fill="#5d6778">STANDBY</text>
+  </g>
+</svg>
+<script src="etk854hybrid_navi_screen.js"></script>
+</body>
+</html>

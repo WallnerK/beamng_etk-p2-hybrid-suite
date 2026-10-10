@@ -1,0 +1,908 @@
+{
+// ====================================================================
+// ETK 854 ActiveHybrid - Anhaengekupplungen (tow hitches)
+// ====================================================================
+//
+// All parts go into the stock wagon/sedan body slot "etk800_towhitch"
+// (etk800.zip vehicles/etk800/etk800_body_wagon.jbeam:49).  That slot
+// carries {"nodeOffset":{"x":0,"y":-0.30,"z":-0.16}}, which the jbeam
+// slot system adds to EVERY node AND flexbody pos of the part and passes
+// on to child slots (lua/common/jbeam/slotSystem.lua:260-262 merges the
+// parent slot options into each child slot; utils.lua:260-276 adds
+// nodeOffset + nodeMove additively).  So all coordinates below are
+// authored in the same PRE-offset frame as the stock 0.39.4 hitch
+// (etk800.zip etk800_towhitch.jbeam - NOT the outdated C_CODE extract).
+//
+// Every node / rail / breakGroup / trigger carries the hyb_ prefix, so
+// the stock tow_hitch_* attachments (which need tw1/tw2/... names) do
+// NOT fit here; we ship our own ball mounts in our own child slots:
+//   etk854hybrid_towhitch_eu -> slot etk854hybrid_towball_eu
+//   etk854hybrid_towhitch_hd -> slot etk854hybrid_towball_hd
+// Emptying the child slot = ball removed (like a production detachable tow hitch).
+//
+// Coupling: the car-side (active) node carries couplerTag "tow_hitch",
+// couplerRadius 1 - exactly like every stock car ball (common.zip
+// towhitch_attachments.jbeam:1126).  Every stock car-size trailer
+// (boxutility, boxutility_large, caravan, cargotrailer, tsfb, tiltdeck
+// tongue) carries the passive tag "tow_hitch".  beamstate.attachCouplers
+// (lua/vehicle/beamstate.lua:297-304) passes the ACTIVE node's
+// couplerStrength to obj:attachCoupler, so the car side decides the
+// break force: EU 2001000 (stock), HD 3001000.
+// The HD pintle combo adds a second active node with couplerTag
+// "pintle" (passive tag on dolly_single/dolly_double and the tiltdeck
+// 30ft pintle tongue).  It is toggled by the stock interaction action
+// pintleHitchToggle (common.zip common_default.interaction.json) or by
+// the generic coupler key (L -> beamstate.toggleCouplers()).
+//
+// World positions after the body nodeOffset (rear axle hub ~y1.50):
+//   EU ball              (0, 2.544, 0.465)
+//   HD 2in-rise ball     (0, 2.547, 0.435)   default HD mount
+//   HD 4in-rise ball     (0, 2.547, 0.490)
+//   HD pintle (combo)    (0, 2.610, 0.545)   eye node ~0.11 m above the
+//     ball: stock pintle tongues carry their coupler that much higher than
+//     the ball tongue of the same frame (tiltdeck_tongue.jbeam:612 t4 z0.569
+//     tow_hitch vs :698 t4 z0.678 pintle; dollies z0.77-0.80 vs car
+//     trailers z0.43-0.44), so the trailer sits level on the pintle.
+//
+// components.hasDiffuserCutout switches the stock sport bumper and all
+// etk800_diffuser_R_* meshes to their *_cut variants
+// (etk800_bumper_R.jbeam:1001,1495-1543) - same as the stock hitch.
+// ====================================================================
+"etk854hybrid_towhitch_eu": {
+    "information":{
+        "authors":"Deuflhard",
+        "name":"ETK 854 Detachable Tow Hitch (EU Tow Ball, 2.0 t)",
+        "value":1150,
+    },
+    "slotType" : "etk800_towhitch",
+    // Serien-AHK-Niveau: Geometrie + Steifigkeit 1:1 wie die 0.39.4-Stock-AHK
+    // (etk800.zip etk800_towhitch.jbeam:17-121), nur Namen mit hyb_-Prefix.
+    // Receiver ~17.6 kg, Kugelkopf ~10 kg.
+    "slots2": [
+        ["name", "allowTypes", "denyTypes", "default", "description"],
+        ["etk854hybrid_towball_eu", ["etk854hybrid_towball_eu"], [], "etk854hybrid_towball_eu", "Tow Ball (empty = removed)", {"nodeMove2":{"x":0.00, "y":2.507, "z":0.435}}],
+    ],
+    "components":{
+        "hasDiffuserCutout":true,
+    },
+    "flexbodies": [
+        ["mesh", "[group]:", "nonFlexMaterials"],
+        ["eu_tow_beam", ["hyb_towhitch_recv"], [], {"pos":{"x":0.000, "y":2.597, "z":0.490}, "scale":{"x":1.17, "y":1.00, "z":1.0}}],
+        ["eu_tow_mount_L", ["hyb_towhitch_recv"], [], {"pos":{"x":0.000, "y":2.597, "z":0.490}, "scale":{"x":1.17, "y":1.00, "z":1.0}}],
+        ["eu_tow_mount_R", ["hyb_towhitch_recv"], [], {"pos":{"x":0.000, "y":2.597, "z":0.490}, "scale":{"x":1.17, "y":1.00, "z":1.0}}],
+        ["eu_tow_receiver", ["hyb_towhitch_recv"], [], {"pos":{"x":0.000, "y":2.597, "z":0.490}, "scale":{"x":1.00, "y":1.00, "z":1.0}}],
+    ],
+    "nodes": [
+        ["id", "posX", "posY", "posZ"],
+        {"collision":true},
+        {"frictionCoef":0.5},
+        {"selfCollision":true},
+        {"nodeMaterial":"|NM_METAL"},
+        {"group":["towhitchColide", "hyb_towhitch_recv"]},
+        {"nodeWeight":3.3},
+        ["hyb_tw1r", -0.50, 2.49, 0.625],
+        ["hyb_tw1l",  0.50, 2.49, 0.625],
+        {"nodeWeight":2.0},
+        ["hyb_tw1",   0.00, 2.40, 0.435],
+        ["hyb_tw2",   0.00, 2.70, 0.435, {"nodeWeight":3.0}],
+        ["hyb_tw11",  0.00, 2.40, 0.535],
+        ["hyb_tw12",  0.00, 2.70, 0.535],
+        {"group":["towhitchColide"]},
+        ["hyb_tw3",   0.00, 2.49, 0.625, {"collision":false, "nodeWeight":2.0}],
+        {"group":""},
+    ],
+    "torsionbars": [
+        ["id1:", "id2:", "id3:", "id4:"],
+        {"spring":151000, "damp":1, "deform":932000, "strength":100000},
+        ["hyb_tw2", "hyb_tw1", "hyb_tw1r", "r1rr", {"breakGroup":"hyb_towRecv_R"}],
+        ["hyb_tw2", "hyb_tw1", "hyb_tw1l", "r1ll", {"breakGroup":"hyb_towRecv_L"}],
+        ["hyb_tw12", "hyb_tw11", "hyb_tw1r", "r1rr", {"breakGroup":"hyb_towRecv_R"}],
+        ["hyb_tw12", "hyb_tw11", "hyb_tw1l", "r1ll", {"breakGroup":"hyb_towRecv_L"}],
+        {"spring":351000, "damp":1, "deform":932000, "strength":100000},
+        ["hyb_tw2", "hyb_tw1", "hyb_tw11", "hyb_tw1r", {"breakGroup":"hyb_towRecv_R"}],
+        ["hyb_tw2", "hyb_tw1", "hyb_tw11", "hyb_tw1l", {"breakGroup":"hyb_towRecv_L"}],
+    ],
+    "rails": {
+        "hyb_hitchRailT":{"links:":["hyb_tw1", "hyb_tw2"], "broken:":[], "looped":false, "capped":false},
+        "hyb_hitchRailB":{"links:":["hyb_tw11", "hyb_tw12"], "broken:":[], "looped":false, "capped":false},
+        "hyb_hitchBeam":{"links:":["hyb_tw1r", "hyb_tw1l"], "broken:":[], "looped":false, "capped":false},
+    },
+    "slidenodes": [
+        ["id:", "railName", "attached", "fixToRail", "tolerance", "spring", "strength", "capStrength"],
+        ["hyb_tw3", "hyb_hitchBeam", true, true, 0.0, 2500100, "FLT_MAX", "FLT_MAX"],
+    ],
+    "beams": [
+        ["id1:", "id2:"],
+        {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+        //--receiver tube + cross member--
+        {"beamSpring":1264150, "beamDamp":183.3},
+        {"beamDeform":90300, "beamStrength":623000},
+        ["hyb_tw1", "hyb_tw2"],
+        ["hyb_tw1", "hyb_tw11"],
+        ["hyb_tw2", "hyb_tw12"],
+        ["hyb_tw2", "hyb_tw11"],
+        ["hyb_tw1", "hyb_tw12"],
+        ["hyb_tw1r", "hyb_tw1"],
+        ["hyb_tw1l", "hyb_tw1"],
+        ["hyb_tw1r", "hyb_tw2"],
+        ["hyb_tw1l", "hyb_tw2"],
+        ["hyb_tw1r", "hyb_tw11"],
+        ["hyb_tw1l", "hyb_tw11"],
+        ["hyb_tw1r", "hyb_tw12"],
+        ["hyb_tw1l", "hyb_tw12"],
+        {"beamSpring":1264150, "beamDamp":50},
+        ["hyb_tw3", "hyb_tw1"],
+        ["hyb_tw3", "hyb_tw2"],
+        ["hyb_tw3", "hyb_tw11"],
+        ["hyb_tw3", "hyb_tw12"],
+        {"beamSpring":864150, "beamDamp":50},
+        ["hyb_tw3", "hyb_tw1r"],
+        ["hyb_tw3", "hyb_tw1l"],
+        //--attach receiver to the wagon rear frame (world coords after nodeOffset:
+        //  tw1r/l (-/+0.50, 2.19, 0.465), tw1 (0, 2.10, 0.275), tw2 (0, 2.40, 0.275))
+        {"beamSpring":2000150, "beamDamp":325},
+        {"beamDeform":60300, "beamStrength":283000},
+        {"breakGroup":"hyb_towRecv_L"},
+        ["hyb_tw1l", "r1ll"],
+        ["hyb_tw1l", "r2ll"],
+        ["hyb_tw1l", "r4ll"],
+        ["hyb_tw1l", "r3ll"],
+        ["hyb_tw11", "r1ll"],
+        ["hyb_tw11", "r4ll"],
+        ["hyb_tw1l", "r1"],
+        ["hyb_tw1", "r1ll"],
+        ["hyb_tw1", "r4ll"],
+        ["hyb_tw2", "r1", {"beamSpring":2300150, "optional":true}],
+        ["hyb_tw1", "r1", {"beamSpring":2300150, "optional":true}],
+        {"breakGroup":"hyb_towRecv_R"},
+        ["hyb_tw1r", "r1rr"],
+        ["hyb_tw1r", "r2rr"],
+        ["hyb_tw1r", "r4rr"],
+        ["hyb_tw1r", "r3rr"],
+        ["hyb_tw1r", "r1"],
+        ["hyb_tw1", "r1rr"],
+        ["hyb_tw1", "r4rr"],
+        ["hyb_tw11", "r1rr"],
+        ["hyb_tw11", "r4rr"],
+        ["hyb_tw2", "r1", {"beamSpring":2300150, "optional":true}],
+        ["hyb_tw1", "r1", {"beamSpring":2300150, "optional":true}],
+        {"breakGroup":""},
+    ],
+    "triangles": [
+        ["id1:", "id2:", "id3:"],
+        {"group":"hyb_towhitch_recv"},
+        {"triangleType":"NORMALTYPE"},
+        {"dragCoef":11},
+        ["hyb_tw12", "hyb_tw2", "hyb_tw1r"],
+        ["hyb_tw12", "hyb_tw1l", "hyb_tw2"],
+        ["hyb_tw2", "hyb_tw1l", "hyb_tw1"],
+        ["hyb_tw1", "hyb_tw1r", "hyb_tw2"],
+        {"group":""},
+    ],
+},
+
+"etk854hybrid_towhitch_hd": {
+    "information":{
+        "authors":"Deuflhard",
+        "name":"ETK 854 Heavy Duty Tow Hitch (Reinforced 2 Inch Receiver, 3.5 t)",
+        "value":1900,
+    },
+    "slotType" : "etk800_towhitch",
+    // Verstaerkte US-2-Zoll-Aufnahme auf dem gleichen Karosserie-Knotengeruest
+    // (Rahmenenden r1/r2/r3/r4 + zusaetzlich r7-Reihe, r3/r4 Mitte).
+    // Werte vs. Stock: Karosseriebeams 2000150/60300/283000 -> 2800150/110000/650000,
+    // intern 1264150/90300/623000 -> 1764150/150000/1100000 (pickup_towhitch = 623000,
+    // alte ETK-Einteiler-AHK = 890000), Torsionbars 151000/351000 -> 251000/551000.
+    // Knotenmassen x1.5-1.75 gegenueber Stock, damit k/m (Integrator-Stabilitaet
+    // bei dt = 0.5 ms) auf Stock-Niveau bleibt. Receiver ~29 kg + Traeger ~15 kg.
+    // Meshes: common.zip towhitch/tow_hitch.dae (tow_beam_b, tow_mount_hz_*_wide,
+    // tow_reciever_b); Positionen aus fullsize_towhitch.jbeam:16-22 auf die ETK-Knoten
+    // umgerechnet (Rohr-Unterkante = hyb_tw1 z, Querrohr ueberlappt Rohr-Oberkante).
+    "slots2": [
+        ["name", "allowTypes", "denyTypes", "default", "description"],
+        ["etk854hybrid_towball_hd", ["etk854hybrid_towball_hd"], [], "etk854hybrid_towball_hd_rise2", "Ball Mount / Coupling", {"nodeMove2":{"x":0.00, "y":2.510, "z":0.435}}],
+    ],
+    "components":{
+        "hasDiffuserCutout":true,
+    },
+    "flexbodies": [
+        ["mesh", "[group]:", "nonFlexMaterials"],
+        ["tow_beam_b", ["hyb_towhitch_recv"], [], {"pos":{"x":0.000, "y":2.520, "z":0.590}, "scale":{"x":1.20, "y":1.00, "z":1.0}}],
+        ["tow_mount_hz_L_wide", ["hyb_towhitch_recv"], [], {"pos":{"x":0.000, "y":2.520, "z":0.590}, "scale":{"x":1.00, "y":1.00, "z":1.0}}],
+        ["tow_mount_hz_R_wide", ["hyb_towhitch_recv"], [], {"pos":{"x":0.000, "y":2.520, "z":0.590}, "scale":{"x":1.00, "y":1.00, "z":1.0}}],
+        ["tow_reciever_b", ["hyb_towhitch_recv"], [], {"pos":{"x":0.000, "y":2.600, "z":0.473}, "scale":{"x":1.00, "y":1.00, "z":1.0}}],
+    ],
+    "nodes": [
+        ["id", "posX", "posY", "posZ"],
+        {"collision":true},
+        {"frictionCoef":0.5},
+        {"selfCollision":true},
+        {"nodeMaterial":"|NM_METAL"},
+        {"group":["towhitchColide", "hyb_towhitch_recv"]},
+        {"nodeWeight":5.5},
+        ["hyb_tw1r", -0.50, 2.49, 0.625],
+        ["hyb_tw1l",  0.50, 2.49, 0.625],
+        {"nodeWeight":3.5},
+        ["hyb_tw1",   0.00, 2.40, 0.435],
+        ["hyb_tw2",   0.00, 2.70, 0.435, {"nodeWeight":5.0}],
+        ["hyb_tw11",  0.00, 2.40, 0.535],
+        ["hyb_tw12",  0.00, 2.70, 0.535],
+        {"group":["towhitchColide"]},
+        ["hyb_tw3",   0.00, 2.49, 0.625, {"collision":false, "nodeWeight":2.5}],
+        {"group":""},
+    ],
+    "torsionbars": [
+        ["id1:", "id2:", "id3:", "id4:"],
+        {"spring":251000, "damp":1, "deform":932000, "strength":150000},
+        ["hyb_tw2", "hyb_tw1", "hyb_tw1r", "r1rr", {"breakGroup":"hyb_towRecv_R"}],
+        ["hyb_tw2", "hyb_tw1", "hyb_tw1l", "r1ll", {"breakGroup":"hyb_towRecv_L"}],
+        ["hyb_tw12", "hyb_tw11", "hyb_tw1r", "r1rr", {"breakGroup":"hyb_towRecv_R"}],
+        ["hyb_tw12", "hyb_tw11", "hyb_tw1l", "r1ll", {"breakGroup":"hyb_towRecv_L"}],
+        {"spring":551000, "damp":1, "deform":932000, "strength":150000},
+        ["hyb_tw2", "hyb_tw1", "hyb_tw11", "hyb_tw1r", {"breakGroup":"hyb_towRecv_R"}],
+        ["hyb_tw2", "hyb_tw1", "hyb_tw11", "hyb_tw1l", {"breakGroup":"hyb_towRecv_L"}],
+    ],
+    "rails": {
+        "hyb_hitchRailT":{"links:":["hyb_tw1", "hyb_tw2"], "broken:":[], "looped":false, "capped":false},
+        "hyb_hitchRailB":{"links:":["hyb_tw11", "hyb_tw12"], "broken:":[], "looped":false, "capped":false},
+        "hyb_hitchBeam":{"links:":["hyb_tw1r", "hyb_tw1l"], "broken:":[], "looped":false, "capped":false},
+    },
+    "slidenodes": [
+        ["id:", "railName", "attached", "fixToRail", "tolerance", "spring", "strength", "capStrength"],
+        ["hyb_tw3", "hyb_hitchBeam", true, true, 0.0, 3500100, "FLT_MAX", "FLT_MAX"],
+    ],
+    "beams": [
+        ["id1:", "id2:"],
+        {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+        //--receiver tube + cross member--
+        {"beamSpring":1764150, "beamDamp":250.0},
+        {"beamDeform":150000, "beamStrength":1100000},
+        ["hyb_tw1", "hyb_tw2"],
+        ["hyb_tw1", "hyb_tw11"],
+        ["hyb_tw2", "hyb_tw12"],
+        ["hyb_tw2", "hyb_tw11"],
+        ["hyb_tw1", "hyb_tw12"],
+        ["hyb_tw1r", "hyb_tw1"],
+        ["hyb_tw1l", "hyb_tw1"],
+        ["hyb_tw1r", "hyb_tw2"],
+        ["hyb_tw1l", "hyb_tw2"],
+        ["hyb_tw1r", "hyb_tw11"],
+        ["hyb_tw1l", "hyb_tw11"],
+        ["hyb_tw1r", "hyb_tw12"],
+        ["hyb_tw1l", "hyb_tw12"],
+        {"beamSpring":1764150, "beamDamp":70},
+        ["hyb_tw3", "hyb_tw1"],
+        ["hyb_tw3", "hyb_tw2"],
+        ["hyb_tw3", "hyb_tw11"],
+        ["hyb_tw3", "hyb_tw12"],
+        {"beamSpring":1164150, "beamDamp":70},
+        ["hyb_tw3", "hyb_tw1r"],
+        ["hyb_tw3", "hyb_tw1l"],
+        //--attach receiver to the wagon rear frame (world coords after nodeOffset:
+        //  tw1r/l (-/+0.50, 2.19, 0.465), tw1 (0, 2.10, 0.275), tw2 (0, 2.40, 0.275))
+        {"beamSpring":2800150, "beamDamp":450},
+        {"beamDeform":110000, "beamStrength":650000},
+        {"breakGroup":"hyb_towRecv_L"},
+        ["hyb_tw1l", "r1ll"],
+        ["hyb_tw1l", "r2ll"],
+        ["hyb_tw1l", "r4ll"],
+        ["hyb_tw1l", "r3ll"],
+        ["hyb_tw11", "r1ll"],
+        ["hyb_tw11", "r4ll"],
+        ["hyb_tw1l", "r1"],
+        ["hyb_tw1", "r1ll"],
+        ["hyb_tw1", "r4ll"],
+        ["hyb_tw2", "r1", {"beamSpring":3200150, "optional":true}],
+        ["hyb_tw1", "r1", {"beamSpring":3200150, "optional":true}],
+        {"breakGroup":"hyb_towRecv_R"},
+        ["hyb_tw1r", "r1rr"],
+        ["hyb_tw1r", "r2rr"],
+        ["hyb_tw1r", "r4rr"],
+        ["hyb_tw1r", "r3rr"],
+        ["hyb_tw1r", "r1"],
+        ["hyb_tw1", "r1rr"],
+        ["hyb_tw1", "r4rr"],
+        ["hyb_tw11", "r1rr"],
+        ["hyb_tw11", "r4rr"],
+        ["hyb_tw2", "r1", {"beamSpring":3200150, "optional":true}],
+        ["hyb_tw1", "r1", {"beamSpring":3200150, "optional":true}],
+        //--HD: additional load paths into the rear sill (r7 row) and the centre
+        //  floor cross member (r3/r4) - spreads drawbar + tongue load so the
+        //  r1/r4 corners do not tear first (stock body beams 60300/283000 would
+        //  fail long before a 3e6 coupler). No links to rfl1l/rfl1r: those are
+        //  1.25 kg fender-liner flexbody helpers hung on 3500-deform beams
+        //  (etk800_body_wagon.jbeam:293-295, 1612-1625) - no structure there.
+        //  optional:true -> silently skipped on a body without these nodes.
+        {"beamSpring":2400150, "beamDamp":450},
+        {"beamDeform":110000, "beamStrength":650000},
+        {"breakGroup":"hyb_towRecv_L"},
+        ["hyb_tw1l", "r7ll", {"optional":true}],
+        {"breakGroup":"hyb_towRecv_R"},
+        ["hyb_tw1r", "r7rr", {"optional":true}],
+        //centreline links belong to BOTH receiver groups (beamstate.lua:1203
+        //accepts table breakGroups): whichever side lets go first frees them,
+        //so the receiver drops off like stock instead of hanging on 650 kN beams.
+        {"breakGroup":["hyb_towRecv_L", "hyb_towRecv_R"]},
+        ["hyb_tw11", "r7", {"optional":true}],
+        ["hyb_tw12", "r7", {"optional":true}],
+        ["hyb_tw1", "r3", {"optional":true}],
+        ["hyb_tw1", "r4", {"optional":true}],
+        ["hyb_tw2", "r4", {"optional":true}],
+        {"breakGroup":""},
+    ],
+    "triangles": [
+        ["id1:", "id2:", "id3:"],
+        {"group":"hyb_towhitch_recv"},
+        {"triangleType":"NORMALTYPE"},
+        {"dragCoef":11},
+        ["hyb_tw12", "hyb_tw2", "hyb_tw1r"],
+        ["hyb_tw12", "hyb_tw1l", "hyb_tw2"],
+        ["hyb_tw2", "hyb_tw1l", "hyb_tw1"],
+        ["hyb_tw1", "hyb_tw1r", "hyb_tw2"],
+        {"group":""},
+    ],
+},
+
+"etk854hybrid_towball_eu": {
+    "information":{
+        "authors":"Deuflhard",
+        "name":"ETK 854 EU Tow Ball (Detachable)",
+        "value":180,
+    },
+    "slotType" : "etk854hybrid_towball_eu",
+    // = stock tow_hitch_eu (common.zip towhitch_attachments.jbeam:1066-1198), hyb_-Namen.
+    // Kugel Welt (0, 2.544, 0.465). couplerStrength 2001000 = Stock-PKW-Wert.
+    "flexbodies": [
+        ["mesh", "[group]:", "nonFlexMaterials"],
+        ["eu_tow_hitch", ["hyb_towhitch_ball"], [], {"pos":{"x":0.0, "y":0.090, "z":0.055}, "rot":{"x":0, "y":0, "z":0}}],
+    ],
+    "slidenodes": [
+        ["id:", "railName", "attached", "fixToRail", "tolerance", "spring", "strength", "capStrength"],
+        ["hyb_tw41", "hyb_hitchRailB",  true, true, 0.0, 1500100, "FLT_MAX", "FLT_MAX"],
+        ["hyb_tw2",  "hyb_hitchRailB2", true, true, 0.0, 4000100, "FLT_MAX", "FLT_MAX"],
+        ["hyb_tw31", "hyb_hitchRailT",  true, true, 0.0, 1500100, "FLT_MAX", "FLT_MAX"],
+        ["hyb_tw12", "hyb_hitchRailT2", true, true, 0.0, 4000100, "FLT_MAX", "FLT_MAX"],
+        ["hyb_tw42", "hyb_towball",     true, true, 0.0, 1800100, "FLT_MAX", "FLT_MAX"],
+    ],
+    "rails": {
+        "hyb_hitchRailT2":{"links:":["hyb_tw42", "hyb_tw41"], "broken:":[], "looped":false, "capped":false},
+        "hyb_hitchRailB2":{"links:":["hyb_tw32", "hyb_tw31"], "broken:":[], "looped":false, "capped":false},
+        "hyb_towball":{"links:":["hyb_tw32", "hyb_twb"], "broken:":[], "looped":false, "capped":true},
+    },
+    "torsionbars": [
+        ["id1:", "id2:", "id3:", "id4:"],
+        {"spring":11000, "damp":2, "deform":932000, "strength":100000},
+        ["hyb_tw42", "hyb_tw32", "hyb_tw31", "hyb_tw41"],
+        ["hyb_tw32", "hyb_tw42", "hyb_tw41", "hyb_tw31"],
+    ],
+    "triggers2":[
+        ["id", "idRef:", "idX:", "idY:", "type", "size", "baseRotation", "rotation", "translation", "baseTranslation"],
+        ["hyb_towhitchAttach", "hyb_twb", "hyb_tw41", "hyb_tw42", "sphere", 0.04, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}],
+    ],
+    "triggerEventLinks2":[
+        ["triggerId:triggers2", "triggerInput", "inputAction"],
+        ["hyb_towhitchAttach", "action0", "towHitchToggle"],
+    ],
+    "actionsEnabled": [
+        ["id"],
+        ["towHitchToggle"],
+    ],
+    "nodes": [
+        ["id", "posX", "posY", "posZ"],
+        {"collision":true},
+        {"frictionCoef":0.5},
+        {"selfCollision":true},
+        {"nodeMaterial":"|NM_METAL"},
+        {"group":["towhitchColide", "hyb_towhitch_ball"]},
+        {"nodeWeight":1.5},
+        ["hyb_tw31", 0.0, 0.020, 0.0],
+        ["hyb_tw32", 0.0, 0.337, 0.0],
+        ["hyb_tw41", 0.0, 0.020, 0.1],
+        ["hyb_tw42", 0.0, 0.337, 0.1],
+        {"nodeWeight":4.0},
+        ["hyb_twb", 0.0, 0.337, 0.190, {"couplerTag":"tow_hitch", "couplerStrength":2001000, "couplerRadius":1, "selfCollision":false}],
+        {"group":""},
+    ],
+    "beams": [
+        ["id1:", "id2:"],
+        {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+        //--shank--
+        {"beamSpring":1464150, "beamDamp":70},
+        {"beamDeform":90300, "beamStrength":"FLT_MAX"},
+        ["hyb_tw31", "hyb_tw32"],
+        ["hyb_tw41", "hyb_tw42"],
+        ["hyb_tw31", "hyb_tw42"],
+        ["hyb_tw41", "hyb_tw32"],
+        ["hyb_tw31", "hyb_tw41"],
+        ["hyb_tw32", "hyb_tw42"],
+        //--ball--
+        {"beamSpring":5000150, "beamDamp":70},
+        ["hyb_twb", "hyb_tw32"],
+        ["hyb_twb", "hyb_tw42"],
+        ["hyb_twb", "hyb_tw31"],
+        ["hyb_twb", "hyb_tw41"],
+        //--locking pin: breaks when the shank is pulled out of the tube--
+        {"beamSpring":1264150, "beamDamp":100},
+        {"beamDeform":90300, "beamStrength":"FLT_MAX"},
+        {"breakGroup":"hyb_towPin"},
+        ["hyb_tw42", "hyb_tw3"],
+        ["hyb_tw32", "hyb_tw2", {"beamSpring":3564150}],
+        //pin break triggers (stock pattern, towhitch_attachments.jbeam:1152-1156)
+        {"beamPrecompression":1, "beamType":"|SUPPORT", "beamLongBound":0.3, "beamShortBound":1.0},
+        {"beamSpring":0, "beamDamp":0},
+        {"beamDeform":"FLT_MAX", "beamStrength":"FLT_MAX"},
+        ["hyb_tw42", "hyb_tw3"],
+        ["hyb_tw32", "hyb_tw2"],
+        {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+        //--dampen hitch (still in hyb_towPin like stock: they go with the pin)--
+        {"beamSpring":100, "beamDamp":50},
+        {"beamDeform":90300, "beamStrength":"FLT_MAX"},
+        ["hyb_tw42", "hyb_tw1r"],
+        ["hyb_tw42", "hyb_tw1l"],
+        ["hyb_tw41", "hyb_tw1r"],
+        ["hyb_tw41", "hyb_tw1l"],
+        ["hyb_tw32", "hyb_tw1r"],
+        ["hyb_tw32", "hyb_tw1l"],
+        ["hyb_tw31", "hyb_tw1r"],
+        ["hyb_tw31", "hyb_tw1l"],
+        ["hyb_twb", "hyb_tw1r"],
+        ["hyb_twb", "hyb_tw1l"],
+        {"breakGroup":"hyb_towPin_supportBeams"},
+        {"beamPrecompression":1, "beamType":"|SUPPORT", "beamLongBound":20},
+        {"beamSpring":1460460, "beamDamp":290},
+        {"beamDeform":25350, "beamStrength":1275000},
+        {"beamPrecompression":1.00001},
+        ["hyb_tw42", "hyb_tw11"],
+        ["hyb_tw32", "hyb_tw1"],
+        ["hyb_tw41", "hyb_tw11"],
+        ["hyb_tw31", "hyb_tw1"],
+        {"breakGroup":""},
+        {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+    ],
+    "triangles": [
+        ["id1:", "id2:", "id3:"],
+        {"group":"hyb_towhitch_ball"},
+        {"triangleType":"NORMALTYPE"},
+        {"dragCoef":5},
+        ["hyb_tw41", "hyb_tw42", "hyb_tw32"],
+        ["hyb_tw32", "hyb_tw31", "hyb_tw41"],
+        {"triangleType":"NONCOLLIDABLE"},
+        ["hyb_twb", "hyb_tw42", "hyb_tw41"],
+        {"triangleType":"NORMALTYPE"},
+        {"group":""},
+    ],
+    "ties":[
+        ["id1:", "maxLen", "rate", "short", "long", "group", "maxforce"],
+        ["hyb_twb", 0.75, 1, 1, 1, "towhitch", 10000000],
+    ],
+},
+
+"etk854hybrid_towball_hd_rise2": {
+    "information":{
+        "authors":"Deuflhard",
+        "name":"ETK 854 HD 2 Inch Riser Ball Mount (Standard, 3.5 t)",
+        "value":150,
+    },
+    "slotType" : "etk854hybrid_towball_hd",
+    // Geometrie = stock tow_hitch_riser_2 (towhitch_attachments.jbeam:406-537).
+    // Kugel Welt (0, 2.547, 0.435): 3 cm tiefer als EU - schwere Tandem-Anhaenger
+    // (cargotrailer, boxutility_large, tiltdeck) stehen damit waagerechter.
+    // couplerStrength 3001000 (Stock PKW 2001000, pintle 2801000).
+    "flexbodies": [
+        ["mesh", "[group]:", "nonFlexMaterials"],
+        ["tow_hitch_a", ["hyb_towhitch_ball"], [], {"pos":{"x":0.0, "y":0.100, "z":0.040}, "rot":{"x":0, "y":0, "z":0}}],
+        ["tow_ball", ["hyb_towhitch_ball"], [], {"pos":{"x":0.0, "y":0.100, "z":0.135}, "rot":{"x":0, "y":0, "z":0}}],
+    ],
+    "slidenodes": [
+        ["id:", "railName", "attached", "fixToRail", "tolerance", "spring", "strength", "capStrength"],
+        ["hyb_tw41", "hyb_hitchRailB",  true, true, 0.0, 2100100, "FLT_MAX", "FLT_MAX"],
+        ["hyb_tw2",  "hyb_hitchRailB2", true, true, 0.0, 5600100, "FLT_MAX", "FLT_MAX"],
+        ["hyb_tw31", "hyb_hitchRailT",  true, true, 0.0, 2100100, "FLT_MAX", "FLT_MAX"],
+        ["hyb_tw12", "hyb_hitchRailT2", true, true, 0.0, 5600100, "FLT_MAX", "FLT_MAX"],
+        ["hyb_tw42", "hyb_towball",     true, true, 0.0, 2500100, "FLT_MAX", "FLT_MAX"],
+    ],
+    "rails": {
+        "hyb_hitchRailT2":{"links:":["hyb_tw42", "hyb_tw41"], "broken:":[], "looped":false, "capped":false},
+        "hyb_hitchRailB2":{"links:":["hyb_tw32", "hyb_tw31"], "broken:":[], "looped":false, "capped":false},
+        "hyb_towball":{"links:":["hyb_tw32", "hyb_twb"], "broken:":[], "looped":false, "capped":true},
+    },
+    "torsionbars": [
+        ["id1:", "id2:", "id3:", "id4:"],
+        {"spring":16000, "damp":2, "deform":932000, "strength":100000},
+        ["hyb_tw42", "hyb_tw32", "hyb_tw31", "hyb_tw41"],
+        ["hyb_tw32", "hyb_tw42", "hyb_tw41", "hyb_tw31"],
+    ],
+    "triggers2":[
+        ["id", "idRef:", "idX:", "idY:", "type", "size", "baseRotation", "rotation", "translation", "baseTranslation"],
+        ["hyb_towhitchAttach", "hyb_twb", "hyb_tw41", "hyb_tw42", "sphere", 0.04, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}],
+    ],
+    "triggerEventLinks2":[
+        ["triggerId:triggers2", "triggerInput", "inputAction"],
+        ["hyb_towhitchAttach", "action0", "towHitchToggle"],
+    ],
+    "actionsEnabled": [
+        ["id"],
+        ["towHitchToggle"],
+    ],
+    "nodes": [
+        ["id", "posX", "posY", "posZ"],
+        {"collision":true},
+        {"frictionCoef":0.5},
+        {"selfCollision":true},
+        {"nodeMaterial":"|NM_METAL"},
+        {"group":["towhitchColide", "hyb_towhitch_ball"]},
+        {"nodeWeight":2.5},
+        ["hyb_tw31", 0.0, 0.020, 0.0],
+        ["hyb_tw32", 0.0, 0.337, 0.0],
+        ["hyb_tw41", 0.0, 0.020, 0.1],
+        ["hyb_tw42", 0.0, 0.337, 0.1],
+        {"nodeWeight":5.0},
+        ["hyb_twb", 0.0, 0.337, 0.160, {"couplerTag":"tow_hitch", "couplerStrength":3001000, "couplerRadius":1, "selfCollision":false}],
+        {"group":""},
+    ],
+    "beams": [
+        ["id1:", "id2:"],
+        {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+        //--shank--
+        {"beamSpring":2064150, "beamDamp":70},
+        {"beamDeform":150000, "beamStrength":"FLT_MAX"},
+        ["hyb_tw31", "hyb_tw32"],
+        ["hyb_tw41", "hyb_tw42"],
+        ["hyb_tw31", "hyb_tw42"],
+        ["hyb_tw41", "hyb_tw32"],
+        ["hyb_tw31", "hyb_tw41"],
+        ["hyb_tw32", "hyb_tw42"],
+        //--ball--
+        {"beamSpring":7000150, "beamDamp":70},
+        ["hyb_twb", "hyb_tw32"],
+        ["hyb_twb", "hyb_tw42"],
+        ["hyb_twb", "hyb_tw31"],
+        ["hyb_twb", "hyb_tw41"],
+        //--locking pin: breaks when the shank is pulled out of the tube--
+        {"beamSpring":1764150, "beamDamp":100},
+        {"beamDeform":150000, "beamStrength":"FLT_MAX"},
+        {"breakGroup":"hyb_towPin"},
+        ["hyb_tw42", "hyb_tw3"],
+        ["hyb_tw32", "hyb_tw2", {"beamSpring":4964150}],
+        //pin break triggers (stock pattern, towhitch_attachments.jbeam:1152-1156)
+        {"beamPrecompression":1, "beamType":"|SUPPORT", "beamLongBound":0.3, "beamShortBound":1.0},
+        {"beamSpring":0, "beamDamp":0},
+        {"beamDeform":"FLT_MAX", "beamStrength":"FLT_MAX"},
+        ["hyb_tw42", "hyb_tw3"],
+        ["hyb_tw32", "hyb_tw2"],
+        {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+        //--dampen hitch (still in hyb_towPin like stock: they go with the pin)--
+        {"beamSpring":100, "beamDamp":50},
+        {"beamDeform":90300, "beamStrength":"FLT_MAX"},
+        ["hyb_tw42", "hyb_tw1r"],
+        ["hyb_tw42", "hyb_tw1l"],
+        ["hyb_tw41", "hyb_tw1r"],
+        ["hyb_tw41", "hyb_tw1l"],
+        ["hyb_tw32", "hyb_tw1r"],
+        ["hyb_tw32", "hyb_tw1l"],
+        ["hyb_tw31", "hyb_tw1r"],
+        ["hyb_tw31", "hyb_tw1l"],
+        ["hyb_twb", "hyb_tw1r"],
+        ["hyb_twb", "hyb_tw1l"],
+        {"breakGroup":"hyb_towPin_supportBeams"},
+        {"beamPrecompression":1, "beamType":"|SUPPORT", "beamLongBound":20},
+        {"beamSpring":2040460, "beamDamp":400},
+        {"beamDeform":38000, "beamStrength":1900000},
+        {"beamPrecompression":1.00001},
+        ["hyb_tw42", "hyb_tw11"],
+        ["hyb_tw32", "hyb_tw1"],
+        ["hyb_tw41", "hyb_tw11"],
+        ["hyb_tw31", "hyb_tw1"],
+        {"breakGroup":""},
+        {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+    ],
+    "triangles": [
+        ["id1:", "id2:", "id3:"],
+        {"group":"hyb_towhitch_ball"},
+        {"triangleType":"NORMALTYPE"},
+        {"dragCoef":5},
+        ["hyb_tw41", "hyb_tw42", "hyb_tw32"],
+        ["hyb_tw32", "hyb_tw31", "hyb_tw41"],
+        {"triangleType":"NONCOLLIDABLE"},
+        ["hyb_twb", "hyb_tw42", "hyb_tw41"],
+        {"triangleType":"NORMALTYPE"},
+        {"group":""},
+    ],
+    "ties":[
+        ["id1:", "maxLen", "rate", "short", "long", "group", "maxforce"],
+        ["hyb_twb", 0.75, 1, 1, 1, "towhitch", 10000000],
+    ],
+},
+
+"etk854hybrid_towball_hd_rise4": {
+    "information":{
+        "authors":"Deuflhard",
+        "name":"ETK 854 HD 4 Inch Riser Ball Mount (High Tongue, 3.5 t)",
+        "value":160,
+    },
+    "slotType" : "etk854hybrid_towball_hd",
+    // Geometrie = stock tow_hitch_riser_4 (towhitch_attachments.jbeam:540-671).
+    // Kugel Welt (0, 2.547, 0.490) fuer Anhaenger mit hoher Deichsel (Caravan, tsfb).
+    "flexbodies": [
+        ["mesh", "[group]:", "nonFlexMaterials"],
+        ["tow_hitch_b", ["hyb_towhitch_ball"], [], {"pos":{"x":0.0, "y":0.100, "z":0.040}, "rot":{"x":0, "y":0, "z":0}}],
+        ["tow_ball", ["hyb_towhitch_ball"], [], {"pos":{"x":0.0, "y":0.100, "z":0.185}, "rot":{"x":0, "y":0, "z":0}}],
+    ],
+    "slidenodes": [
+        ["id:", "railName", "attached", "fixToRail", "tolerance", "spring", "strength", "capStrength"],
+        ["hyb_tw41", "hyb_hitchRailB",  true, true, 0.0, 2100100, "FLT_MAX", "FLT_MAX"],
+        ["hyb_tw2",  "hyb_hitchRailB2", true, true, 0.0, 5600100, "FLT_MAX", "FLT_MAX"],
+        ["hyb_tw31", "hyb_hitchRailT",  true, true, 0.0, 2100100, "FLT_MAX", "FLT_MAX"],
+        ["hyb_tw12", "hyb_hitchRailT2", true, true, 0.0, 5600100, "FLT_MAX", "FLT_MAX"],
+        ["hyb_tw42", "hyb_towball",     true, true, 0.0, 2500100, "FLT_MAX", "FLT_MAX"],
+    ],
+    "rails": {
+        "hyb_hitchRailT2":{"links:":["hyb_tw42", "hyb_tw41"], "broken:":[], "looped":false, "capped":false},
+        "hyb_hitchRailB2":{"links:":["hyb_tw32", "hyb_tw31"], "broken:":[], "looped":false, "capped":false},
+        "hyb_towball":{"links:":["hyb_tw32", "hyb_twb"], "broken:":[], "looped":false, "capped":true},
+    },
+    "torsionbars": [
+        ["id1:", "id2:", "id3:", "id4:"],
+        {"spring":16000, "damp":2, "deform":932000, "strength":100000},
+        ["hyb_tw42", "hyb_tw32", "hyb_tw31", "hyb_tw41"],
+        ["hyb_tw32", "hyb_tw42", "hyb_tw41", "hyb_tw31"],
+    ],
+    "triggers2":[
+        ["id", "idRef:", "idX:", "idY:", "type", "size", "baseRotation", "rotation", "translation", "baseTranslation"],
+        ["hyb_towhitchAttach", "hyb_twb", "hyb_tw41", "hyb_tw42", "sphere", 0.04, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}],
+    ],
+    "triggerEventLinks2":[
+        ["triggerId:triggers2", "triggerInput", "inputAction"],
+        ["hyb_towhitchAttach", "action0", "towHitchToggle"],
+    ],
+    "actionsEnabled": [
+        ["id"],
+        ["towHitchToggle"],
+    ],
+    "nodes": [
+        ["id", "posX", "posY", "posZ"],
+        {"collision":true},
+        {"frictionCoef":0.5},
+        {"selfCollision":true},
+        {"nodeMaterial":"|NM_METAL"},
+        {"group":["towhitchColide", "hyb_towhitch_ball"]},
+        {"nodeWeight":2.5},
+        ["hyb_tw31", 0.0, 0.020, 0.0],
+        ["hyb_tw32", 0.0, 0.337, 0.0],
+        ["hyb_tw41", 0.0, 0.020, 0.1],
+        ["hyb_tw42", 0.0, 0.337, 0.1],
+        {"nodeWeight":5.0},
+        ["hyb_twb", 0.0, 0.337, 0.215, {"couplerTag":"tow_hitch", "couplerStrength":3001000, "couplerRadius":1, "selfCollision":false}],
+        {"group":""},
+    ],
+    "beams": [
+        ["id1:", "id2:"],
+        {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+        //--shank--
+        {"beamSpring":2064150, "beamDamp":70},
+        {"beamDeform":150000, "beamStrength":"FLT_MAX"},
+        ["hyb_tw31", "hyb_tw32"],
+        ["hyb_tw41", "hyb_tw42"],
+        ["hyb_tw31", "hyb_tw42"],
+        ["hyb_tw41", "hyb_tw32"],
+        ["hyb_tw31", "hyb_tw41"],
+        ["hyb_tw32", "hyb_tw42"],
+        //--ball--
+        {"beamSpring":7000150, "beamDamp":70},
+        ["hyb_twb", "hyb_tw32"],
+        ["hyb_twb", "hyb_tw42"],
+        ["hyb_twb", "hyb_tw31"],
+        ["hyb_twb", "hyb_tw41"],
+        //--locking pin: breaks when the shank is pulled out of the tube--
+        {"beamSpring":1764150, "beamDamp":100},
+        {"beamDeform":150000, "beamStrength":"FLT_MAX"},
+        {"breakGroup":"hyb_towPin"},
+        ["hyb_tw42", "hyb_tw3"],
+        ["hyb_tw32", "hyb_tw2", {"beamSpring":4964150}],
+        //pin break triggers (stock pattern, towhitch_attachments.jbeam:1152-1156)
+        {"beamPrecompression":1, "beamType":"|SUPPORT", "beamLongBound":0.3, "beamShortBound":1.0},
+        {"beamSpring":0, "beamDamp":0},
+        {"beamDeform":"FLT_MAX", "beamStrength":"FLT_MAX"},
+        ["hyb_tw42", "hyb_tw3"],
+        ["hyb_tw32", "hyb_tw2"],
+        {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+        //--dampen hitch (still in hyb_towPin like stock: they go with the pin)--
+        {"beamSpring":100, "beamDamp":50},
+        {"beamDeform":90300, "beamStrength":"FLT_MAX"},
+        ["hyb_tw42", "hyb_tw1r"],
+        ["hyb_tw42", "hyb_tw1l"],
+        ["hyb_tw41", "hyb_tw1r"],
+        ["hyb_tw41", "hyb_tw1l"],
+        ["hyb_tw32", "hyb_tw1r"],
+        ["hyb_tw32", "hyb_tw1l"],
+        ["hyb_tw31", "hyb_tw1r"],
+        ["hyb_tw31", "hyb_tw1l"],
+        ["hyb_twb", "hyb_tw1r"],
+        ["hyb_twb", "hyb_tw1l"],
+        {"breakGroup":"hyb_towPin_supportBeams"},
+        {"beamPrecompression":1, "beamType":"|SUPPORT", "beamLongBound":20},
+        {"beamSpring":2040460, "beamDamp":400},
+        {"beamDeform":38000, "beamStrength":1900000},
+        {"beamPrecompression":1.00001},
+        ["hyb_tw42", "hyb_tw11"],
+        ["hyb_tw32", "hyb_tw1"],
+        ["hyb_tw41", "hyb_tw11"],
+        ["hyb_tw31", "hyb_tw1"],
+        {"breakGroup":""},
+        {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+    ],
+    "triangles": [
+        ["id1:", "id2:", "id3:"],
+        {"group":"hyb_towhitch_ball"},
+        {"triangleType":"NORMALTYPE"},
+        {"dragCoef":5},
+        ["hyb_tw41", "hyb_tw42", "hyb_tw32"],
+        ["hyb_tw32", "hyb_tw31", "hyb_tw41"],
+        {"triangleType":"NONCOLLIDABLE"},
+        ["hyb_twb", "hyb_tw42", "hyb_tw41"],
+        {"triangleType":"NORMALTYPE"},
+        {"group":""},
+    ],
+    "ties":[
+        ["id1:", "maxLen", "rate", "short", "long", "group", "maxforce"],
+        ["hyb_twb", 0.75, 1, 1, 1, "towhitch", 10000000],
+    ],
+},
+
+"etk854hybrid_towball_hd_pintle": {
+    "information":{
+        "authors":"Deuflhard",
+        "name":"ETK 854 HD Combination Ball + Pintle Hook (3.5 t)",
+        "value":260,
+    },
+    "slotType" : "etk854hybrid_towball_hd",
+    // 2in-Rise-Kugel wie _rise2 PLUS ein zweiter aktiver Koppelknoten hyb_twp mit
+    // couplerTag 'pintle' (ohne couplerLock -> auch per L-Taste loesbar) fuer
+    // Pintle-Anhaenger: dolly_single/dolly_double, tiltdeck 30ft_pintle
+    // (passive Tags: dolly_single.jbeam:116, tiltdeck_tongue.jbeam:698).
+    // Pintle Welt (0, 2.610, 0.545) = ~0.11 m UEBER der Kugel: Stock-Pintle-
+    // Deichseln tragen ihren Koppelknoten so viel hoeher als die Kugel-Deichsel
+    // desselben Rahmens (tiltdeck_tongue.jbeam:612 z0.569 vs :698 z0.678), sonst
+    // haengt der Anhaenger mit der Nase ~0.25 m zu tief. common.zip hat kein
+    // Pintle-Haken-Mesh -> optisch als Schaekel-Oese (tow_shackle) ueber dem
+    // Traegerende dargestellt.
+    "flexbodies": [
+        ["mesh", "[group]:", "nonFlexMaterials"],
+        ["tow_hitch_a", ["hyb_towhitch_ball"], [], {"pos":{"x":0.0, "y":0.100, "z":0.040}, "rot":{"x":0, "y":0, "z":0}}],
+        ["tow_ball", ["hyb_towhitch_ball"], [], {"pos":{"x":0.0, "y":0.100, "z":0.135}, "rot":{"x":0, "y":0, "z":0}}],
+        ["tow_shackle", ["hyb_towhitch_ball"], [], {"pos":{"x":0.0, "y":0.170, "z":0.270}, "rot":{"x":0, "y":0, "z":0}}],
+    ],
+    "slidenodes": [
+        ["id:", "railName", "attached", "fixToRail", "tolerance", "spring", "strength", "capStrength"],
+        ["hyb_tw41", "hyb_hitchRailB",  true, true, 0.0, 2100100, "FLT_MAX", "FLT_MAX"],
+        ["hyb_tw2",  "hyb_hitchRailB2", true, true, 0.0, 5600100, "FLT_MAX", "FLT_MAX"],
+        ["hyb_tw31", "hyb_hitchRailT",  true, true, 0.0, 2100100, "FLT_MAX", "FLT_MAX"],
+        ["hyb_tw12", "hyb_hitchRailT2", true, true, 0.0, 5600100, "FLT_MAX", "FLT_MAX"],
+        ["hyb_tw42", "hyb_towball",     true, true, 0.0, 2500100, "FLT_MAX", "FLT_MAX"],
+    ],
+    "rails": {
+        "hyb_hitchRailT2":{"links:":["hyb_tw42", "hyb_tw41"], "broken:":[], "looped":false, "capped":false},
+        "hyb_hitchRailB2":{"links:":["hyb_tw32", "hyb_tw31"], "broken:":[], "looped":false, "capped":false},
+        "hyb_towball":{"links:":["hyb_tw32", "hyb_twb"], "broken:":[], "looped":false, "capped":true},
+    },
+    "torsionbars": [
+        ["id1:", "id2:", "id3:", "id4:"],
+        {"spring":16000, "damp":2, "deform":932000, "strength":100000},
+        ["hyb_tw42", "hyb_tw32", "hyb_tw31", "hyb_tw41"],
+        ["hyb_tw32", "hyb_tw42", "hyb_tw41", "hyb_tw31"],
+    ],
+    "triggers2":[
+        ["id", "idRef:", "idX:", "idY:", "type", "size", "baseRotation", "rotation", "translation", "baseTranslation"],
+        ["hyb_towhitchAttach", "hyb_twb", "hyb_tw41", "hyb_tw42", "sphere", 0.04, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}],
+        ["hyb_pintleAttach", "hyb_twp", "hyb_tw41", "hyb_tw42", "sphere", 0.05, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}],
+    ],
+    "triggerEventLinks2":[
+        ["triggerId:triggers2", "triggerInput", "inputAction"],
+        ["hyb_towhitchAttach", "action0", "towHitchToggle"],
+        ["hyb_pintleAttach", "action0", "pintleHitchToggle"],
+    ],
+    "actionsEnabled": [
+        ["id"],
+        ["towHitchToggle"],
+        ["pintleHitchToggle"],
+    ],
+    "nodes": [
+        ["id", "posX", "posY", "posZ"],
+        {"collision":true},
+        {"frictionCoef":0.5},
+        {"selfCollision":true},
+        {"nodeMaterial":"|NM_METAL"},
+        {"group":["towhitchColide", "hyb_towhitch_ball"]},
+        {"nodeWeight":2.5},
+        ["hyb_tw31", 0.0, 0.020, 0.0],
+        ["hyb_tw32", 0.0, 0.337, 0.0],
+        ["hyb_tw41", 0.0, 0.020, 0.1],
+        ["hyb_tw42", 0.0, 0.337, 0.1],
+        {"nodeWeight":5.0},
+        ["hyb_twb", 0.0, 0.337, 0.160, {"couplerTag":"tow_hitch", "couplerStrength":3001000, "couplerRadius":1, "selfCollision":false}],
+        {"nodeWeight":3.5},
+        ["hyb_twp", 0.0, 0.400, 0.270, {"couplerTag":"pintle", "couplerStrength":3001000, "couplerRadius":1, "collision":false, "selfCollision":false}],
+        {"group":""},
+    ],
+    "beams": [
+        ["id1:", "id2:"],
+        {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+        //--shank--
+        {"beamSpring":2064150, "beamDamp":70},
+        {"beamDeform":150000, "beamStrength":"FLT_MAX"},
+        ["hyb_tw31", "hyb_tw32"],
+        ["hyb_tw41", "hyb_tw42"],
+        ["hyb_tw31", "hyb_tw42"],
+        ["hyb_tw41", "hyb_tw32"],
+        ["hyb_tw31", "hyb_tw41"],
+        ["hyb_tw32", "hyb_tw42"],
+        //--ball--
+        {"beamSpring":7000150, "beamDamp":70},
+        ["hyb_twb", "hyb_tw32"],
+        ["hyb_twb", "hyb_tw42"],
+        ["hyb_twb", "hyb_tw31"],
+        ["hyb_twb", "hyb_tw41"],
+        //--pintle node (0.11 m above and behind the ball: lunette-eye height)--
+        ["hyb_twp", "hyb_tw32"],
+        ["hyb_twp", "hyb_tw42"],
+        ["hyb_twp", "hyb_tw31"],
+        ["hyb_twp", "hyb_tw41"],
+        ["hyb_twp", "hyb_twb"],
+        //--locking pin: breaks when the shank is pulled out of the tube--
+        {"beamSpring":1764150, "beamDamp":100},
+        {"beamDeform":150000, "beamStrength":"FLT_MAX"},
+        {"breakGroup":"hyb_towPin"},
+        ["hyb_tw42", "hyb_tw3"],
+        ["hyb_tw32", "hyb_tw2", {"beamSpring":4964150}],
+        //pin break triggers (stock pattern, towhitch_attachments.jbeam:1152-1156)
+        {"beamPrecompression":1, "beamType":"|SUPPORT", "beamLongBound":0.3, "beamShortBound":1.0},
+        {"beamSpring":0, "beamDamp":0},
+        {"beamDeform":"FLT_MAX", "beamStrength":"FLT_MAX"},
+        ["hyb_tw42", "hyb_tw3"],
+        ["hyb_tw32", "hyb_tw2"],
+        {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+        //--dampen hitch (still in hyb_towPin like stock: they go with the pin)--
+        {"beamSpring":100, "beamDamp":50},
+        {"beamDeform":90300, "beamStrength":"FLT_MAX"},
+        ["hyb_tw42", "hyb_tw1r"],
+        ["hyb_tw42", "hyb_tw1l"],
+        ["hyb_tw41", "hyb_tw1r"],
+        ["hyb_tw41", "hyb_tw1l"],
+        ["hyb_tw32", "hyb_tw1r"],
+        ["hyb_tw32", "hyb_tw1l"],
+        ["hyb_tw31", "hyb_tw1r"],
+        ["hyb_tw31", "hyb_tw1l"],
+        ["hyb_twb", "hyb_tw1r"],
+        ["hyb_twb", "hyb_tw1l"],
+        ["hyb_twp", "hyb_tw1r"],
+        ["hyb_twp", "hyb_tw1l"],
+        {"breakGroup":"hyb_towPin_supportBeams"},
+        {"beamPrecompression":1, "beamType":"|SUPPORT", "beamLongBound":20},
+        {"beamSpring":2040460, "beamDamp":400},
+        {"beamDeform":38000, "beamStrength":1900000},
+        {"beamPrecompression":1.00001},
+        ["hyb_tw42", "hyb_tw11"],
+        ["hyb_tw32", "hyb_tw1"],
+        ["hyb_tw41", "hyb_tw11"],
+        ["hyb_tw31", "hyb_tw1"],
+        {"breakGroup":""},
+        {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+    ],
+    "triangles": [
+        ["id1:", "id2:", "id3:"],
+        {"group":"hyb_towhitch_ball"},
+        {"triangleType":"NORMALTYPE"},
+        {"dragCoef":5},
+        ["hyb_tw41", "hyb_tw42", "hyb_tw32"],
+        ["hyb_tw32", "hyb_tw31", "hyb_tw41"],
+        {"triangleType":"NONCOLLIDABLE"},
+        ["hyb_twb", "hyb_tw42", "hyb_tw41"],
+        {"triangleType":"NORMALTYPE"},
+        {"group":""},
+    ],
+    "ties":[
+        ["id1:", "maxLen", "rate", "short", "long", "group", "maxforce"],
+        ["hyb_twb", 0.75, 1, 1, 1, "towhitch", 10000000],
+    ],
+},
+}

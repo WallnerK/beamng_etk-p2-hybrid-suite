@@ -1,0 +1,24 @@
+{
+  "domElement": "<etk854-hybrid-actions></etk854-hybrid-actions>",
+  "directive": "etk854HybridActions",
+  "appName": "etk854HybridActions",
+  "name": "ETK 854 ActiveHybrid Actions",
+  "description": "Clickable vehicle actions for the ETK 854 ActiveHybrid: driving experience, EV mode, target SOC, recuperation, DSC/DTC, shift program, launch control, AWD/2WD, trailer mode.",
+  "author": "Deuflhard",
+  "version": "1.0",
+  "category": "Dashboard",
+  "types": [
+    "ui.apps.categories.vehicle_control"
+  ],
+  "css": {
+    "right": "330px",
+    "bottom": "318px",
+    "width": "290px",
+    "height": "250px"
+  },
+  "min-width": "200px",
+  "min-height": "170px",
+  "preserveAspectRatio": false,
+  "isAuxiliary": false,
+  "interactive": "yes"
+}

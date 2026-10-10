@@ -1,0 +1,27 @@
+{
+    "Configuration": "ActiveHybrid 30e (I4)",
+    "Author": "Deuflhard",
+    "useSubCluster": true,
+    "vehicleSelectorSubCluster": "ActiveHybrid",
+    "SubModel": "ActiveHybrid",
+    "vehicleSelectorSubGroup": "ActiveHybrid 30e - Gasoline I4",
+    "Population": 0,
+    "Body Style": "Wagon",
+    "Config Type": "Custom",
+    "Country": "Germany",
+    "Description": "ETK 854 ActiveHybrid 30e (I4) - entry model and original platform of the range: a P2 plug-in hybrid modeled on current premium plug-in hybrids, built around an 8HP-type transmission. 2.0 L inline-four turbo gasoline engine (188 kW / 255 PS, 362 Nm) + K0 disconnect clutch + 83 kW / 265 Nm P2 e-machine ahead of the torque converter, 8-speed automatic, rear-wheel drive via the stock transfer case, limited-slip rear differential with a 3.15 final drive. 13.5 kWh battery. System output 271 kW (368 PS) / 630 Nm. Driving Experience COMFORT / ECO PRO / SPORT and EV modes AUTO EV / MAX EV / BATTERY CONTROL, sailing, recuperation and all-electric pull-away. DSC/DTC and cooling package as on the six-cylinder models; delivered without a factory top-speed limiter.",
+    "Drivetrain": "RWD",
+    "Fuel Type": "Gasoline",
+    "Induction Type": "Turbo",
+    "Power": 368,
+    "Propulsion": "Hybrid",
+    "Torque": 630,
+    "Transmission": "Automatic",
+    "Value": 63500,
+    "Weight": 1765,
+    "Years": {
+        "min": 2024,
+        "max": 2026
+    },
+    "defaultPaintName1": "pearl_white"
+}

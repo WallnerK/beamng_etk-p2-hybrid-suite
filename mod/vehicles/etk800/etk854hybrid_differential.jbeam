@@ -1,0 +1,166 @@
+{
+// ============================================================================
+// ETK 854 ActiveHybrid - rear differential with an electronically SCHEDULED
+// multi-plate lock (production-style active rear diff lock philosophy, passive-first).
+//
+// Base: stock "etk800_differential_R" (content/vehicles/etk800.zip
+// vehicles/etk800/etk800_differential_R.jbeam, 0.39.4). slots2, section
+// values, node, beams and flexbody are copied 1:1 - only the powertrain row,
+// the default final drive (2.81 = every R6 config; the .pc files set it
+// anyway) and the controller list differ.
+//
+// PHYSICS = the stock LSD model (lua/vehicle/powertrain/differential.lua
+// LSDUpdateTorque :42-66, diffType "lsd"), evaluated in Lua every physics
+// step from the plain device table:
+//   lsdTorque = lsdPreload + min(coef,1)*|T_axle| + activeLockTorque*activeLockCoef
+//   coef = lsdLockCoef under drive, lsdRevLockCoef under coast
+// T_axle is already multiplied by the final drive, so coef 0.5 = capacity
+// T_axle/2 = one wheel may carry the whole axle torque = 100 % lock under
+// drive, in every gear, with converter multiplication and every boost stage.
+// The jbeam values below are the OPEN preset (all 0) = fail-safe if the
+// scheduler is missing: identical to the stock open diff except its
+// 0.034*|T| friction term (differential.lua:36-39, <= 0.34 % of T).
+//
+// lockTorque / lockSpring deliberately NOT set: lockSpringAutoCalc
+// (differential.lua:353, :235-238) then gives lockSpring = lockTorque =
+// 250^2 * min(child inertia), i.e. the stiff spring and a clamp far above any
+// lsdTorque. Setting lockTorque here would cap the lock AND soften the spring.
+// activeLockTorque must be explicit: otherwise it is copied from the
+// pre-autocalc lockTorque default (500, :346/:352).
+//
+// Single-string diffType: availableModes = {"lsd"} (:319-326), so there is no
+// powertrain UI toggle button and the stock "toggleDiffMode" action does
+// nothing - the lock follows Driving Experience x DSC x xAllrad only.
+//
+// Node "rdiff" is NOT hyb_-prefixed: it is the slot contract node referenced
+// by the stock driveshaft and halfshaft parts (etk800_differential_R.jbeam
+// driveshaft/halfshaft beams). Only one part occupies the slot, no collision
+// (same situation as "tcase" in etk854hybrid_transfercase.jbeam).
+// ============================================================================
+"etk854hybrid_differential_R": {
+    "information": {
+        "authors": "Deuflhard",
+        "name": "Multi-Plate Limited Slip Rear Differential (ActiveHybrid)",
+        "value": 3200
+    },
+    "slotType": "etk800_differential_R",
+    "slots2": [
+        ["name", "allowTypes", "denyTypes", "default", "description"],
+        ["etk800_driveshaft_R", ["etk800_driveshaft_R"], [], "etk800_driveshaft_R", "Rear Driveshaft"],
+        ["etk800_halfshafts_R", ["etk800_halfshafts_R"], [], "etk800_halfshafts_R", "Rear Halfshafts"],
+        ["etk_finaldrive_R", ["etk_finaldrive_R"], [], "etk_finaldrive_R_281", "Rear Final Drive", {"coreSlot": true}]
+    ],
+
+    // DISPLAY (lua/common/jbeam/variables.lua _sanitizeVars :208-256):
+    //   coefficients: unit "" + minDis/maxDis 0/100 -> the slider shows
+    //   0..100 % for 0..0.5 (stock race LSD pattern, etk800_differential_R.jbeam
+    //   $lsdlockcoef_R); stepDis 5 = 5 % steps (0.025).
+    //   switches: non-empty unit naming the encoding + minDis/maxDis/stepDis 1
+    //   (same as $etk854_awd_start2wd).
+    // Prefix $etk854_lsd_* - no clash with the stock $lsdpreload_R /
+    // $lsdlockcoef_R / $lsdlockcoefrev_R of the stock LSD parts.
+    "variables": [
+        ["name", "type", "unit", "category", "default", "min", "max", "title", "description"],
+        ["$etk854_lsd_sport_power", "range", "", "Differentials", 0.30, 0, 0.5, "Power Lock Rate (SPORT / DTC)", "Locking rate of the rear multi-plate differential under drive torque in SPORT and DTC. 100 % = fully locked under load.", {"minDis":0, "maxDis":100, "stepDis":5, "subCategory":"Rear"}],
+        ["$etk854_lsd_sport_coast", "range", "", "Differentials", 0.10, 0, 0.5, "Coast Lock Rate (SPORT / DTC)", "Locking rate on overrun (engine braking + recuperation) in SPORT and DTC.", {"minDis":0, "maxDis":100, "stepDis":5, "subCategory":"Rear"}],
+        ["$etk854_lsd_drift_power", "range", "", "Differentials", 0.50, 0, 0.5, "Power Lock Rate (DSC OFF, SPORT, RWD)", "Locking rate under drive torque with DSC OFF + SPORT + rear-wheel drive (RWD or xAllrad 2WD). 100 % = fully locked as soon as torque is applied.", {"minDis":0, "maxDis":100, "stepDis":5, "subCategory":"Rear"}],
+        ["$etk854_lsd_drift_coast", "range", "", "Differentials", 0.35, 0, 0.5, "Coast Lock Rate (DSC OFF, SPORT, RWD)", "Locking rate on overrun with DSC OFF + SPORT + rear-wheel drive.", {"minDis":0, "maxDis":100, "stepDis":5, "subCategory":"Rear"}],
+        ["$etk854_lsd_drift_preload", "range", "Nm", "Differentials", 150, 0, 400, "Pre-load Torque (DSC OFF, SPORT, RWD)", "Base locking torque without drive torque, with DSC OFF + SPORT + rear-wheel drive.", {"stepDis":10, "subCategory":"Rear"}],
+        ["$etk854_lsd_slip_hold", "range", "0=off/1=on", "Differentials", 1, 0, 1, "Slip Hold Lock (Drift)", "1 = at high axle slip, up to 1000 Nm of additional locking torque that is held even when the throttle is briefly lifted (gamepad). Only with DSC OFF + SPORT + rear-wheel drive.", {"minDis":0, "maxDis":1, "stepDis":1, "subCategory":"Rear"}],
+        ["$etk854_lsd_dtc_hold", "range", "0=off/1=on", "Differentials", 1, 0, 1, "Full Lock on Slip in DTC Too (RWD/2WD)", "1 = the slip hold lock also works in SPORT + DTC with rear-wheel drive (RWD or xAllrad 2WD). It opens immediately whenever DSC brakes a wheel and is then inhibited for 0.5 s.", {"minDis":0, "maxDis":1, "stepDis":1, "subCategory":"Rear"}]
+    ],
+
+    "controller": [
+        ["fileName"],
+        // Stock brake-based EDL, SAME name and type as on the stock open diff:
+        // diffControl (etk_DSE) resolves it by name "lockRear" and type
+        // electronicDiffLock (diffControl.lua:183-211) and fades it out on
+        // oversteer in DSC/DTC exactly as today. Switched per preset by the
+        // scheduler (OPEN/SPORT on, TRACK/DRIFT off): its inner/outer guess
+        // comes from the steering sign and is wrong while countersteering.
+        ["drivingDynamics/actuators/electronicDiffLock", {"name": "lockRear", "differentialName": "differential_R"}],
+        // Own name/type on purpose: diffControl ignores it (no stock typeName),
+        // so it is never opened by the stock oversteer logic.
+        ["etk854hybrid_diffLock", {"name": "etk854hybrid_diffLock", "differentialName": "differential_R", "edlName": "lockRear", "slipHold": "$etk854_lsd_slip_hold", "dtcHold": "$etk854_lsd_dtc_hold"}]
+    ],
+
+    // Merged into the controller's jbeamData (controller.lua init:
+    // tableMergeRecursive(row, v.data[name])). Lock % = 200 * coefficient.
+    "etk854hybrid_diffLock": {
+        "presets": {
+            "OPEN":  {"preload": 0,   "power": 0.0,  "coast": 0.0,  "edl": true,  "hold": false},
+            "SPORT": {"preload": 60,  "power": "$etk854_lsd_sport_power", "coast": "$etk854_lsd_sport_coast", "edl": true, "hold": false},
+            "TRACK": {"preload": 100, "power": 0.40, "coast": 0.20, "edl": false, "hold": false},
+            "DRIFT": {"preload": "$etk854_lsd_drift_preload", "power": "$etk854_lsd_drift_power", "coast": "$etk854_lsd_drift_coast", "edl": false, "hold": true}
+        },
+        // slews of the capacity (closing, and opening on a mode change)
+        "rampPowerPerS": 1.0,
+        "rampCoastPerS": 1.0,
+        "rampPreloadNmPerS": 300,
+        // opening for ABS / DSC yaw braking: x10 (0.5 -> 0 in 50 ms)
+        "openRateFactor": 10,
+        // ABS or DSC yaw braking: preload <= 20 Nm, coast 0; yaw braking also
+        // caps the drive coefficient at 0.05
+        "interventionPreloadNm": 20,
+        "ycPowerMax": 0.05,
+        // slip hold: s = (rear mean - front mean) / max(front mean, 5 m/s)
+        "holdSlipLo": 0.06,
+        "holdSlipHi": 0.15,
+        "holdAttackPerS": 6.0,
+        "holdReleasePerS": 2.0,
+        "holdHardOpenPerS": 10.0,
+        "holdTimeS": 0.25,
+        "holdMinRefSpeed": 4.0,
+        "holdBrakeMax": 0.3,
+        "holdYcLockoutS": 0.5,
+        "driftHandbrakeFreeze": true,
+        "trailerCapPreset": "SPORT"
+    },
+
+    "powertrain": [
+        ["type", "name", "inputName", "inputIndex"],
+        ["differential", "differential_R", "driveshaft", 1, {"deformGroups":["differential_R"], "diffType":"lsd", "lsdPreload":0, "lsdLockCoef":0, "lsdRevLockCoef":0, "activeLockTorque":1000, "uiName":"Rear Differential", "defaultVirtualInertia":0.25}]
+    ],
+    "differential_R": {
+        "friction": 3.92,
+        "dynamicFriction": 0.00184,
+        "torqueLossCoef": 0.03,
+        "visualPositionRelativeChildren": [[-0.6, 0, 0]]
+    },
+    "flexbodies": [
+         ["mesh", "[group]:", "nonFlexMaterials"],
+         ["etk800_diff", ["etk800_subframe_R", "etk800_body"]]
+    ],
+    "nodes": [
+         ["id", "posX", "posY", "posZ"],
+         {"selfCollision": false},
+         {"collision": false},
+         {"nodeMaterial": "|NM_METAL"},
+         {"frictionCoef": 0.5},
+         {"group": "etk800_diff_R"},
+         // 40 kg like the stock OPEN diff (stock LSD parts use 45): keeps the
+         // rear axle mass, ride height and the self-leveling baselines
+         // (QA T26) identical to today.
+         {"nodeWeight": 40},
+         ["rdiff", 0, 1.41, 0.26],
+         {"group": ""}
+    ],
+    "beams": [
+          ["id1:", "id2:"],
+          {"beamType": "|NORMAL", "beamLongBound": 1.0, "beamShortBound": 1.0},
+          {"beamSpring": 4800600, "beamDamp": 138},
+          {"beamDeform": 27000, "beamStrength": "FLT_MAX"},
+          {"deformGroup": "differential_R", "deformationTriggerRatio": 0.001},
+          ["rdiff", "rx2r"],
+          ["rdiff", "rx2l"],
+          ["rdiff", "rx1r"],
+          ["rdiff", "rx1l"],
+          ["rdiff", "rx4r"],
+          ["rdiff", "rx4l"],
+          ["rdiff", "rx5r"],
+          ["rdiff", "rx5l"],
+          {"deformGroup": "", "deformationTriggerRatio": ""},
+          {"beamPrecompression": 1, "beamType": "|NORMAL", "beamLongBound": 1.0, "beamShortBound": 1.0}
+    ]
+}
+}

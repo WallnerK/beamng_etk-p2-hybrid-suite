@@ -1,0 +1,59 @@
+/* ETK 854 ActiveHybrid - instrument cluster page (512 x 256 emissive texture)
+ * Black = unlit. The visible area is cut out by the stock opacity mask
+ * etk800_gauges_screen_o (centre column between the dials, the bowl inside
+ * the rev counter and a strip along the bottom edge).
+ */
+@font-face {
+  font-family: "Etk854Cond";
+  src: url(/ui/common/RobotoCondensed-Regular.ttf);
+  font-weight: 400;
+}
+@font-face {
+  font-family: "Etk854Cond";
+  src: url(/ui/common/RobotoCondensed-Bold.ttf);
+  font-weight: 700;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 512px;
+  height: 256px;
+  overflow: hidden;
+  background: #000;
+}
+
+#etk-cluster {
+  display: block;
+  width: 512px;
+  height: 256px;
+  font-family: "Etk854Cond", "Roboto Condensed", "Arial Narrow", sans-serif;
+  text-rendering: geometricPrecision;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#etk-cluster text {
+  font-family: "Etk854Cond", "Roboto Condensed", "Arial Narrow", sans-serif;
+}
+
+.b { font-weight: 700; }
+
+/* --- energy-flow links: moving dashes, direction by class --------------- */
+/* NO CSS animations / transitions on this page (2026-10): BeamNG's vehicle
+ * HTML texture (genericGauges, 0.39.4) stopped showing ANY later DOM update
+ * once an infinite CSS animation ran (the energy-flow dashes start as soon
+ * as the car drives): the cluster froze with the last gear / mode / chips,
+ * a blinking chip kept blinking. The dashes (stroke-dashoffset) and the
+ * blinks (opacity) are driven from the page script per data frame instead
+ * (etk854hybrid_gauges_screen.js animate()). */
+.flow {
+  fill: none;
+  stroke-width: 2.2;
+  stroke-linecap: butt;
+  stroke-dasharray: 3 3;
+}
+.flow.idle {
+  stroke: #262c36;
+  stroke-dasharray: 1.5 2.5;
+}

@@ -1,0 +1,376 @@
+{
+// =============================================================================
+//  ETK 854 ActiveHybrid - cockpit displays (instrument cluster + centre screen)
+// =============================================================================
+//  Documentation: plans/PLAN_COCKPIT_VISUALISIERUNG.md
+//
+//  INSTRUMENT CLUSTER (slot "skin_gauges")
+//  ---------------------------------------
+//  The stock ETK 800 dash (etk800_interior.jbeam, parts etk800_dash*) declares
+//  the base-game controller gauges/genericGauges named "gauge", its
+//  "gauge" section (configuration + displayData) and the core slot
+//  "skin_gauges" (default etk800_gauges_imperial). The skin parts in
+//  etk800_gauges.jbeam only add gauge.configuration_units, the needle props
+//  and the dial-face skinName.
+//
+//  The parts below replace such a skin part:
+//    * skinName      = the stock dial face (metric / metric_diesel /
+//                      imperial / imperial_diesel) - no new textures
+//    * gauge.configuration_units      same as the stock skin part
+//    * gauge.configuration_etk854hybrid
+//                      points the existing web view "@etk800_gauges_screen"
+//                      (same material, same 512x256 size, same opacity mask)
+//                      at our page. genericGauges merges every
+//                      "configuration_*" key over "configuration"
+//                      (genericGauges.lua:165-173); the keys do not overlap
+//                      with configuration_units, so the pairs() order does
+//                      not matter.
+//    * gauge.displayData
+//                      REPLACES the dash's displayData completely (jbeam
+//                      merges a dict section key by key, the child part wins:
+//                      slotSystem.lua:119-158), so it lists everything our
+//                      page reads.
+//      The air channels (etk854hybrid_air*, trailerSpringCoef, parkingbrake)
+//      come from etk854hybrid_airCompressor (trunk compressor load part);
+//      without that part they arrive as 0 and the AIR chip stays hidden
+//      (etk854hybrid_airTrlValve 0 = trailer protection valve shut: amber
+//      outline on the plain AIR chip).
+//      ECO PRO pedal map v3 (etk854hybridControl.lua mapPedal / load
+//      integral): etk854hybrid_pedalZone / _pedalEvFrac / _pedalBandFrac /
+//      _pedalIceJoin / _evZoneOpen / _iceDeficitS / _iceDeficitOnS drive
+//      the demand caret outside the power-meter arc (ECO PRO + AUTO EV)
+//      and grey the EV zone above the ECO EV speed ceiling.
+//      customModules "fuel" = the on-board computer (tank litres, fuel range,
+//      instantaneous / trip-average consumption, electric average), header
+//      item 10 of etk854hybrid_gaugeData.lua.
+//    * controller    appends the custom module
+//                      gauges/customModules/etk854hybrid_gaugeData. NO custom
+//                      "name": genericGauges looks it up as
+//                      getController("gauges/customModules/<moduleName>").
+//                      Row options (see the module header):
+//                        gearStyle "number" -> D1..D8 (engaged gear),
+//                                  "plain"  -> D without number;
+//                                  both: P/R/N plain, S<n>/M<n> with number
+//                        lampTfMax / lampOnS / lampHoldS  qualified DSC lamp
+//                        dseIceK0Gate  ICE traction-control group sees no
+//                                  throttle while K0 is open
+//                        dseStockLampQualified  stock ESC / TCS dial decals
+//                                  (electrics esc / tcs) follow the qualified
+//                                  lamp instead of every raw DSE didAct
+//                        gearHintOnS / gearHintOnManualS / gearHintOffS
+//                                  debounce of the OEM-style shift
+//                                  recommendation (etk854hybrid_gearHint:
+//                                  triangle + gear next to the engaged gear;
+//                                  defaults 0.25 / 0.10 / 0.20 s)
+//    * props         the four stock needles. The rev counter needle reads
+//                      etk854hybrid_tachoRpm (written by the module) instead
+//                      of rpm, so it can rest on the READY / OFF bracket that
+//                      the stock dial face already prints below 0 rpm:
+//                      0 = READY, -500 = OFF (min lowered from 0 to -500).
+//                      Everything else is a 1:1 copy of etk800_gauges.jbeam.
+//
+//  CENTRE SCREEN (slot "gps", empty in the stock dash)
+//  --------------------------------------------------
+//  etk854hybrid_navi_energyflow re-targets the dash's own beamNavigator
+//  controller "etk800_navi" through a top-level section of the same name
+//  (controller.lua:499: tableMergeRecursive(row, v.data[name])): our page,
+//  512x256 instead of 256x128. etk854hybrid_screenData streams the hybrid
+//  state into that web view. Leaving the slot empty restores the stock map.
+//
+//  Nothing here overrides a base-game file; every new name is prefixed
+//  etk854hybrid_.
+// =============================================================================
+
+"etk854hybrid_gauges": {
+    "information":{
+        "authors":"Deuflhard",
+        "name":"ActiveHybrid Instrument Cluster (km/h, Gasoline)",
+        "description":"Instrument cluster with hybrid displays: power meter CHARGE / EV / POWER, battery state of charge with target SOC, EV range, energy flow including the K0 clutch, driving modes, gear and shift program. The tachometer shows READY while the combustion engine is stopped.",
+        "value":900
+    },
+    "slotType" : "skin_gauges",
+    "gauge": {
+        "configuration_units": {
+            "unit": "metric"
+        },
+        "configuration_etk854hybrid": {
+            "materialName": "@etk800_gauges_screen",
+            "htmlPath": "local://local/vehicles/etk800/etk854hybrid_gauges_screen/etk854hybrid_gauges_screen.html",
+            "displayWidth": 512,
+            "displayHeight": 256,
+            "hasPopupMessageSupport": true
+        },
+        "displayData": {
+            "electrics": [
+                "gear", "gearIndex", "odometer", "ignitionLevel", "wheelspeed",
+                "etk854hybrid_batterySoc", "etk854hybrid_targetSoc", "etk854hybrid_batteryBand",
+                "etk854hybrid_phase", "etk854hybrid_deMode", "etk854hybrid_edriveMode",
+                "etk854hybrid_evPower", "etk854hybrid_icePower", "etk854hybrid_iceState",
+                "etk854hybrid_iceEngageState", "etk854hybrid_k0ClutchRatio",
+                "etk854hybrid_regenLevel", "etk854hybrid_onePedalHold", "etk854hybrid_boostStage",
+                "etk854hybrid_shiftProgram", "etk854hybrid_evAvailable", "etk854hybrid_evPowerFraction",
+                "etk854hybrid_sailActive", "etk854hybrid_chargeMode",
+                "etk854hybrid_awdMode", "etk854hybrid_trailerMode", "etk854hybrid_levelState",
+                "etk854hybrid_dscMode", "etk854hybrid_tcActive", "etk854hybrid_fanStage",
+                "etk854hybrid_dscLamp", "etk854hybrid_gearActual", "etk854hybrid_gearHint",
+                "etk854hybrid_airState", "etk854hybrid_airPressureBar", "etk854hybrid_airCompressor",
+                "etk854hybrid_airInhibit", "etk854hybrid_airTrailer", "etk854hybrid_trailerSpringCoef",
+                "etk854hybrid_airTrlValve", "parkingbrake",
+                "etk854hybrid_pedalZone", "etk854hybrid_pedalEvFrac", "etk854hybrid_pedalBandFrac",
+                "etk854hybrid_pedalIceJoin", "etk854hybrid_evZoneOpen",
+                "etk854hybrid_iceDeficitS", "etk854hybrid_iceDeficitOnS"
+            ],
+            "powertrain": [
+                ["deviceName", "property"]
+            ],
+            "customModules": [
+                ["moduleName", "property"],
+                ["environmentData", "temperatureEnv"],
+                ["environmentData", "time"],
+                ["etk854hybrid_gaugeData", "range"],
+                ["etk854hybrid_gaugeData", "scale"],
+                ["etk854hybrid_gaugeData", "gear"],
+                ["etk854hybrid_gaugeData", "fuel"]
+            ]
+        }
+    },
+    "controller": [
+        ["fileName"],
+        ["gauges/customModules/etk854hybrid_gaugeData", {"socFloor": 0.10, "defaultConsumption": 21.0, "gearStyle": "number", "lampTfMax": 0.90, "lampOnS": 0.25, "lampHoldS": 1.0, "dseIceK0Gate": true, "dseStockLampQualified": true}]
+    ],
+    "props": [
+        ["func"      , "mesh"              , "idRef:", "idX:", "idY:"            , "baseRotation"        , "rotation"                 , "translation"        , "min", "max", "offset", "multiplier"],
+        //needles (etk800_gauges.jbeam "etk800_gauges_metric", rev counter re-targeted)
+        ["wheelspeed", "etk800_needle_speedo", "dsh2", "dsh2l", "dsh1", {"x":-87, "y":0, "z":0}, {"x":0, "y":0, "z":-3.25}     , {"x":0, "y":0, "z":0}, 0, 72.222, -35.7, 1],
+        ["etk854hybrid_tachoRpm", "etk800_needle_tacho", "dsh2", "dsh2l", "dsh1", {"x":-87, "y":0, "z":0}, {"x":0, "y":0, "z":-0.03}     , {"x":0, "y":0, "z":0}, -500, 7500, -3500, 1],
+        ["fuel",         "etk800_needle_fuel", "dsh2", "dsh2l", "dsh1", {"x":-87, "y":0, "z":0}, {"x":0, "y":0, "z":-95}     , {"x":0, "y":0, "z":0}, 0, 1, -0.49, 1],
+        ["oiltemp",      "etk800_needle_temp", "dsh2", "dsh2l", "dsh1", {"x":-87, "y":0, "z":0}, {"x":0, "y":0, "z":-1.0}     , {"x":0, "y":0, "z":0}, 71, 171, -120, 1]
+    ],
+    "skinName" : "metric"
+},
+
+"etk854hybrid_gauges_diesel": {
+    "information":{
+        "authors":"Deuflhard",
+        "name":"ActiveHybrid Instrument Cluster (km/h, Diesel)",
+        "description":"Same as the gasoline cluster, with a diesel tachometer scale (6000 rpm). Power meter, battery, EV range, energy flow, driving modes; the tachometer shows READY while the combustion engine is stopped.",
+        "value":900
+    },
+    "slotType" : "skin_gauges",
+    "gauge": {
+        "configuration_units": {
+            "unit": "metric"
+        },
+        "configuration_etk854hybrid": {
+            "materialName": "@etk800_gauges_screen",
+            "htmlPath": "local://local/vehicles/etk800/etk854hybrid_gauges_screen/etk854hybrid_gauges_screen.html",
+            "displayWidth": 512,
+            "displayHeight": 256,
+            "hasPopupMessageSupport": true
+        },
+        "displayData": {
+            "electrics": [
+                "gear", "gearIndex", "odometer", "ignitionLevel", "wheelspeed",
+                "etk854hybrid_batterySoc", "etk854hybrid_targetSoc", "etk854hybrid_batteryBand",
+                "etk854hybrid_phase", "etk854hybrid_deMode", "etk854hybrid_edriveMode",
+                "etk854hybrid_evPower", "etk854hybrid_icePower", "etk854hybrid_iceState",
+                "etk854hybrid_iceEngageState", "etk854hybrid_k0ClutchRatio",
+                "etk854hybrid_regenLevel", "etk854hybrid_onePedalHold", "etk854hybrid_boostStage",
+                "etk854hybrid_shiftProgram", "etk854hybrid_evAvailable", "etk854hybrid_evPowerFraction",
+                "etk854hybrid_sailActive", "etk854hybrid_chargeMode",
+                "etk854hybrid_awdMode", "etk854hybrid_trailerMode", "etk854hybrid_levelState",
+                "etk854hybrid_dscMode", "etk854hybrid_tcActive", "etk854hybrid_fanStage",
+                "etk854hybrid_dscLamp", "etk854hybrid_gearActual", "etk854hybrid_gearHint",
+                "etk854hybrid_airState", "etk854hybrid_airPressureBar", "etk854hybrid_airCompressor",
+                "etk854hybrid_airInhibit", "etk854hybrid_airTrailer", "etk854hybrid_trailerSpringCoef",
+                "etk854hybrid_airTrlValve", "parkingbrake",
+                "etk854hybrid_pedalZone", "etk854hybrid_pedalEvFrac", "etk854hybrid_pedalBandFrac",
+                "etk854hybrid_pedalIceJoin", "etk854hybrid_evZoneOpen",
+                "etk854hybrid_iceDeficitS", "etk854hybrid_iceDeficitOnS"
+            ],
+            "powertrain": [
+                ["deviceName", "property"]
+            ],
+            "customModules": [
+                ["moduleName", "property"],
+                ["environmentData", "temperatureEnv"],
+                ["environmentData", "time"],
+                ["etk854hybrid_gaugeData", "range"],
+                ["etk854hybrid_gaugeData", "scale"],
+                ["etk854hybrid_gaugeData", "gear"],
+                ["etk854hybrid_gaugeData", "fuel"]
+            ]
+        }
+    },
+    "controller": [
+        ["fileName"],
+        ["gauges/customModules/etk854hybrid_gaugeData", {"socFloor": 0.10, "defaultConsumption": 21.0, "gearStyle": "number", "lampTfMax": 0.90, "lampOnS": 0.25, "lampHoldS": 1.0, "dseIceK0Gate": true, "dseStockLampQualified": true}]
+    ],
+    "props": [
+        ["func"      , "mesh"              , "idRef:", "idX:", "idY:"            , "baseRotation"        , "rotation"                 , "translation"        , "min", "max", "offset", "multiplier"],
+        //needles (etk800_gauges.jbeam "etk800_gauges_metric_diesel", rev counter re-targeted)
+        ["wheelspeed", "etk800_needle_speedo", "dsh2", "dsh2l", "dsh1", {"x":-87, "y":0, "z":0}, {"x":0, "y":0, "z":-3.25}     , {"x":0, "y":0, "z":0}, 0, 72.222, -35.7, 1],
+        ["etk854hybrid_tachoRpm", "etk800_needle_tacho", "dsh2", "dsh2l", "dsh1", {"x":-87, "y":0, "z":0}, {"x":0, "y":0, "z":-0.035}     , {"x":0, "y":0, "z":0}, -500, 6000, -2750, 1],
+        ["fuel",         "etk800_needle_fuel", "dsh2", "dsh2l", "dsh1", {"x":-87, "y":0, "z":0}, {"x":0, "y":0, "z":-95}     , {"x":0, "y":0, "z":0}, 0, 1, -0.49, 1],
+        ["oiltemp",      "etk800_needle_temp", "dsh2", "dsh2l", "dsh1", {"x":-87, "y":0, "z":0}, {"x":0, "y":0, "z":-1.0}     , {"x":0, "y":0, "z":0}, 71, 171, -120, 1]
+    ],
+    "skinName" : "metric_diesel"
+},
+
+"etk854hybrid_gauges_imperial": {
+    "information":{
+        "authors":"Deuflhard",
+        "name":"ActiveHybrid Instrument Cluster (mph, Gasoline)",
+        "description":"ActiveHybrid instrument cluster with mph speedometer (gasoline tachometer scale). Display units follow the game setting.",
+        "value":900
+    },
+    "slotType" : "skin_gauges",
+    "gauge": {
+        "configuration_units": {
+            "unit": "imperial"
+        },
+        "configuration_etk854hybrid": {
+            "materialName": "@etk800_gauges_screen",
+            "htmlPath": "local://local/vehicles/etk800/etk854hybrid_gauges_screen/etk854hybrid_gauges_screen.html",
+            "displayWidth": 512,
+            "displayHeight": 256,
+            "hasPopupMessageSupport": true
+        },
+        "displayData": {
+            "electrics": [
+                "gear", "gearIndex", "odometer", "ignitionLevel", "wheelspeed",
+                "etk854hybrid_batterySoc", "etk854hybrid_targetSoc", "etk854hybrid_batteryBand",
+                "etk854hybrid_phase", "etk854hybrid_deMode", "etk854hybrid_edriveMode",
+                "etk854hybrid_evPower", "etk854hybrid_icePower", "etk854hybrid_iceState",
+                "etk854hybrid_iceEngageState", "etk854hybrid_k0ClutchRatio",
+                "etk854hybrid_regenLevel", "etk854hybrid_onePedalHold", "etk854hybrid_boostStage",
+                "etk854hybrid_shiftProgram", "etk854hybrid_evAvailable", "etk854hybrid_evPowerFraction",
+                "etk854hybrid_sailActive", "etk854hybrid_chargeMode",
+                "etk854hybrid_awdMode", "etk854hybrid_trailerMode", "etk854hybrid_levelState",
+                "etk854hybrid_dscMode", "etk854hybrid_tcActive", "etk854hybrid_fanStage",
+                "etk854hybrid_dscLamp", "etk854hybrid_gearActual", "etk854hybrid_gearHint",
+                "etk854hybrid_airState", "etk854hybrid_airPressureBar", "etk854hybrid_airCompressor",
+                "etk854hybrid_airInhibit", "etk854hybrid_airTrailer", "etk854hybrid_trailerSpringCoef",
+                "etk854hybrid_airTrlValve", "parkingbrake",
+                "etk854hybrid_pedalZone", "etk854hybrid_pedalEvFrac", "etk854hybrid_pedalBandFrac",
+                "etk854hybrid_pedalIceJoin", "etk854hybrid_evZoneOpen",
+                "etk854hybrid_iceDeficitS", "etk854hybrid_iceDeficitOnS"
+            ],
+            "powertrain": [
+                ["deviceName", "property"]
+            ],
+            "customModules": [
+                ["moduleName", "property"],
+                ["environmentData", "temperatureEnv"],
+                ["environmentData", "time"],
+                ["etk854hybrid_gaugeData", "range"],
+                ["etk854hybrid_gaugeData", "scale"],
+                ["etk854hybrid_gaugeData", "gear"],
+                ["etk854hybrid_gaugeData", "fuel"]
+            ]
+        }
+    },
+    "controller": [
+        ["fileName"],
+        ["gauges/customModules/etk854hybrid_gaugeData", {"socFloor": 0.10, "defaultConsumption": 21.0, "gearStyle": "number", "lampTfMax": 0.90, "lampOnS": 0.25, "lampHoldS": 1.0, "dseIceK0Gate": true, "dseStockLampQualified": true}]
+    ],
+    "props": [
+        ["func"      , "mesh"              , "idRef:", "idX:", "idY:"            , "baseRotation"        , "rotation"                 , "translation"        , "min", "max", "offset", "multiplier"],
+        //needles (etk800_gauges.jbeam "etk800_gauges_imperial", rev counter re-targeted)
+        ["wheelspeed", "etk800_needle_speedo", "dsh2", "dsh2l", "dsh1", {"x":-87, "y":0, "z":0}, {"x":0, "y":0, "z":-3.38}     , {"x":0, "y":0, "z":0}, 0, 75, -35.2, 1],
+        ["etk854hybrid_tachoRpm", "etk800_needle_tacho", "dsh2", "dsh2l", "dsh1", {"x":-87, "y":0, "z":0}, {"x":0, "y":0, "z":-0.03}     , {"x":0, "y":0, "z":0}, -500, 7500, -3500, 1],
+        ["fuel",         "etk800_needle_fuel", "dsh2", "dsh2l", "dsh1", {"x":-87, "y":0, "z":0}, {"x":0, "y":0, "z":-95}     , {"x":0, "y":0, "z":0}, 0, 1, -0.49, 1],
+        ["oiltemp",      "etk800_needle_temp", "dsh2", "dsh2l", "dsh1", {"x":-87, "y":0, "z":0}, {"x":0, "y":0, "z":-1.0}     , {"x":0, "y":0, "z":0}, 71, 171, -120, 1]
+    ],
+    "skinName" : "imperial"
+},
+
+"etk854hybrid_gauges_imperial_diesel": {
+    "information":{
+        "authors":"Deuflhard",
+        "name":"ActiveHybrid Instrument Cluster (mph, Diesel)",
+        "description":"ActiveHybrid instrument cluster with mph speedometer and diesel tachometer scale. Display units follow the game setting.",
+        "value":900
+    },
+    "slotType" : "skin_gauges",
+    "gauge": {
+        "configuration_units": {
+            "unit": "imperial"
+        },
+        "configuration_etk854hybrid": {
+            "materialName": "@etk800_gauges_screen",
+            "htmlPath": "local://local/vehicles/etk800/etk854hybrid_gauges_screen/etk854hybrid_gauges_screen.html",
+            "displayWidth": 512,
+            "displayHeight": 256,
+            "hasPopupMessageSupport": true
+        },
+        "displayData": {
+            "electrics": [
+                "gear", "gearIndex", "odometer", "ignitionLevel", "wheelspeed",
+                "etk854hybrid_batterySoc", "etk854hybrid_targetSoc", "etk854hybrid_batteryBand",
+                "etk854hybrid_phase", "etk854hybrid_deMode", "etk854hybrid_edriveMode",
+                "etk854hybrid_evPower", "etk854hybrid_icePower", "etk854hybrid_iceState",
+                "etk854hybrid_iceEngageState", "etk854hybrid_k0ClutchRatio",
+                "etk854hybrid_regenLevel", "etk854hybrid_onePedalHold", "etk854hybrid_boostStage",
+                "etk854hybrid_shiftProgram", "etk854hybrid_evAvailable", "etk854hybrid_evPowerFraction",
+                "etk854hybrid_sailActive", "etk854hybrid_chargeMode",
+                "etk854hybrid_awdMode", "etk854hybrid_trailerMode", "etk854hybrid_levelState",
+                "etk854hybrid_dscMode", "etk854hybrid_tcActive", "etk854hybrid_fanStage",
+                "etk854hybrid_dscLamp", "etk854hybrid_gearActual", "etk854hybrid_gearHint",
+                "etk854hybrid_airState", "etk854hybrid_airPressureBar", "etk854hybrid_airCompressor",
+                "etk854hybrid_airInhibit", "etk854hybrid_airTrailer", "etk854hybrid_trailerSpringCoef",
+                "etk854hybrid_airTrlValve", "parkingbrake",
+                "etk854hybrid_pedalZone", "etk854hybrid_pedalEvFrac", "etk854hybrid_pedalBandFrac",
+                "etk854hybrid_pedalIceJoin", "etk854hybrid_evZoneOpen",
+                "etk854hybrid_iceDeficitS", "etk854hybrid_iceDeficitOnS"
+            ],
+            "powertrain": [
+                ["deviceName", "property"]
+            ],
+            "customModules": [
+                ["moduleName", "property"],
+                ["environmentData", "temperatureEnv"],
+                ["environmentData", "time"],
+                ["etk854hybrid_gaugeData", "range"],
+                ["etk854hybrid_gaugeData", "scale"],
+                ["etk854hybrid_gaugeData", "gear"],
+                ["etk854hybrid_gaugeData", "fuel"]
+            ]
+        }
+    },
+    "controller": [
+        ["fileName"],
+        ["gauges/customModules/etk854hybrid_gaugeData", {"socFloor": 0.10, "defaultConsumption": 21.0, "gearStyle": "number", "lampTfMax": 0.90, "lampOnS": 0.25, "lampHoldS": 1.0, "dseIceK0Gate": true, "dseStockLampQualified": true}]
+    ],
+    "props": [
+        ["func"      , "mesh"              , "idRef:", "idX:", "idY:"            , "baseRotation"        , "rotation"                 , "translation"        , "min", "max", "offset", "multiplier"],
+        //needles (etk800_gauges.jbeam "etk800_gauges_imperial_diesel", rev counter re-targeted)
+        ["wheelspeed", "etk800_needle_speedo", "dsh2", "dsh2l", "dsh1", {"x":-87, "y":0, "z":0}, {"x":0, "y":0, "z":-3.38}     , {"x":0, "y":0, "z":0}, 0, 75, -35.2, 1],
+        ["etk854hybrid_tachoRpm", "etk800_needle_tacho", "dsh2", "dsh2l", "dsh1", {"x":-87, "y":0, "z":0}, {"x":0, "y":0, "z":-0.035}     , {"x":0, "y":0, "z":0}, -500, 6000, -2750, 1],
+        ["fuel",         "etk800_needle_fuel", "dsh2", "dsh2l", "dsh1", {"x":-87, "y":0, "z":0}, {"x":0, "y":0, "z":-95}     , {"x":0, "y":0, "z":0}, 0, 1, -0.49, 1],
+        ["oiltemp",      "etk800_needle_temp", "dsh2", "dsh2l", "dsh1", {"x":-87, "y":0, "z":0}, {"x":0, "y":0, "z":-1.0}     , {"x":0, "y":0, "z":0}, 71, 171, -120, 1]
+    ],
+    "skinName" : "imperial_diesel"
+},
+
+"etk854hybrid_navi_energyflow": {
+    "information":{
+        "authors":"Deuflhard",
+        "name":"ActiveHybrid Center Display: Energy Flow",
+        "description":"Replaces the map on the center display with an ActiveHybrid page: animated energy flow (engine, K0, e-machine, transmission, axles, battery), state of charge, EV range, power readings and consumption history. Leave the slot empty for the stock navigation.",
+        "value":400
+    },
+    "slotType" : "gps",
+    // Re-targets the dash's beamNavigator "etk800_navi" (see header).
+    "etk800_navi": {
+        "htmlFilePath": "local://local/vehicles/etk800/etk854hybrid_navi_screen/etk854hybrid_navi_screen.html",
+        "textureWidth": 512,
+        "textureHeight": 256,
+        "textureFPS": 30
+    },
+    "controller": [
+        ["fileName"],
+        ["etk854hybrid_screenData", {"name": "etk854hybrid_screenData", "screenTag": "@etk800_screen", "rateHz": 15}]
+    ]
+}
+}
