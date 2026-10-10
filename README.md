@@ -8,7 +8,7 @@
 
 ## Quick start
 
-1. **Get the mod:** download `etk_p2_hybrid_suite.zip` from the [latest release](https://github.com/WallnerK/beamng_etk-p2-hybrid-suite/releases/latest) and move it into your mods folder (`%LOCALAPPDATA%\BeamNG\BeamNG.drive\current\mods`) without unpacking it, or subscribe to it in the in-game repository.
+1. **Get the mod:** download `etk_p2_hybrid_suite.zip` from the [latest release](https://github.com/WallnerK/beamng_etk-p2-hybrid-suite/releases/latest) and move it into your mods folder without unpacking it, or subscribe to it in the in-game repository.
 2. **Activate it** in the mod manager.
 3. **Optional, but recommended:** add the two UI apps **ETK 854 ActiveHybrid Cockpit** and **ETK 854 ActiveHybrid Actions** to your UI.
 4. **Spawn** one of the seven configurations from the **ETK ActiveHybrid** tile in the vehicle selector (Ctrl+E) and enjoy.
@@ -167,7 +167,7 @@ All actions can be rebound under Options > Controls ("ETK 854: ..."), and almost
 
 **BeamNG.drive 0.39.4**, no other mods needed.
 
-1. Subscribe in the repository, or copy **etk_p2_hybrid_suite.zip** into `%LOCALAPPDATA%\BeamNG\BeamNG.drive\current\mods` **without unpacking it**. Updates keep this name; remove older forum versions (etk854_activehybrid_v1.0.x.zip).
+1. Subscribe in the repository, or copy **etk_p2_hybrid_suite.zip** into your mods folder **without unpacking it**. Updates keep this name; remove older forum versions (etk854_activehybrid_v1.0.x.zip).
 2. Enable the mod in the mod manager (a game update disables all mods once).
 3. Vehicle selector (Ctrl+E) → tile **"ETK ActiveHybrid"**.
 4. The UI layout loads automatically. If an app is missing, add "ETK 854 ActiveHybrid Cockpit" or "ETK 854 ActiveHybrid Actions" from the app menu.
