@@ -6,6 +6,15 @@
 
 *ETK 854 ActiveHybrid at a glance: the exterior, the Actions app, the hybrid instrument cluster and the cockpit HUD*
 
+> **Branch `feature/rear-axle-steering` (preview, not released):** this branch adds an optional active rear-axle
+> steering part and two new models in the vehicle selector, *40e Performance xAllrad Rear-Axle Steering* and
+> *35d Performance xAllrad Rear-Axle Steering*. Below about 60 km/h the rear wheels steer opposite to the front wheels
+> (up to 3°, turning circle about 0.6 m smaller), above it in the same direction (up to 1.5°). The stability control
+> knows the rear angle, and an experimental stability assist lets the rear wheels counter beginning oversteer before the
+> stability control trims torque or brakes. I have only checked it offline and on my own test drives so far; the
+> release on `main` does not contain it. To try it, use the files under `mod/` from this branch (zip the contents of
+> `mod/` so that `vehicles/` sits at the top level of the zip).
+
 ## Quick start
 
 1. **Get the mod:** download `etk_p2_hybrid_suite.zip` from the [latest release](https://github.com/WallnerK/beamng_etk-p2-hybrid-suite/releases/latest) and move it into your mods folder (`%LOCALAPPDATA%\BeamNG\BeamNG.drive\current\mods`) without unpacking it, or subscribe to it in the in-game repository.

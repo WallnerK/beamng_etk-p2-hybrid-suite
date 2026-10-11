@@ -1,0 +1,709 @@
+{
+// ============================================================================
+// ETK 854 ActiveHybrid - independent rear suspension with active rear-axle
+// steering. Optional part for the existing slot "etk800_suspension_R".
+//
+// BASE: a copy of part "etk800_suspension_R" from the base game file
+// content/vehicles/etk800.zip -> vehicles/etk800/etk800_suspension_R.jbeam
+// (game 0.39.4, md5 62d35357ddf640df7bbcc17b0604d6a5, lines 2-551), built by
+// script, CRLF converted to LF.
+//
+// THE ONLY FUNCTIONAL DIFFERENCES to the stock part:
+//   1. The two toe links (stock beams rx3r-rh2r and rx3l-rh2l, "tie rod arm
+//      toe adjust") are hydros on one command channel (section "hydros").
+//   2. Four tuning variables $etk854_ras_* (category "Chassis",
+//      sub-category "Rear-Axle Steering").
+//   3. The controller etk854hybrid_rearSteer and its calibration section
+//      "etk854hybrid_rearSteer".
+//   4. Six added commas, after the modifier rows {"nodeWeight":4.0},
+//      {"dampCutoffHz":500} and the four {"deformGroup":...} rows. The stock
+//      file relies on BeamNG's tolerance for missing commas; tools/prevalidate.py
+//      (strict JSON after removing comments and trailing commas) has none.
+// Apart from the part key and "information", everything else (slots,
+// flexbodies, nodes, torsionbars, all other beams, triangles, pressureWheels)
+// is identical to the stock part: no new nodes, no mass change.
+//
+// TOE MAPPING (both hydros read the same command):
+//   cmd = electrics.values.etk854hybrid_rasCmd in [-1, 1], + = rear wheels RIGHT
+//   ratio_L = $toe_RR + 0.0167*cmd   (left link lengthens for right steer)
+//   ratio_R = $toe_RR - 0.0167*cmd
+//   0.0167 = link length ratio per command unit: 2.10 mm per degree on the
+//   440.5 mm toe link = 0.476 % per degree, i.e. about 3.5 deg per unit. It
+//   must equal the controller parameter linkRatioPerUnit (checked live).
+//   inputCenter sits at the ratio-1 point and the input window is symmetric
+//   around it, so hydros.init computes centre = 1, multIn = multOut = +-0.0167
+//   and cIn = cOut = $toe_RR (lua/vehicle/hydros.lua init :640-678, update
+//   :471-481). Command 0 therefore gives exactly the static toe even if the
+//   controller never runs, and the first hydros.updateGFX always writes the
+//   toe ratio (state starts at centre 1, not at $toe_RR). The right hydro is
+//   mirrored (inLimit > outLimit); only the Lua side uses these limits.
+//   Rules from the code: no "factor" / "extentFactor" key (nodeBeam.lua
+//   processHydros :58-66 would overwrite inLimit, outLimit and inputFactor);
+//   inputSource is always set (the default "steering" makes a force-feedback
+//   steering hydro, hydros.lua :680-689); explicit rates 0.12 per second
+//   (about 25 deg/s at the wheel; the default 2 per second would cross the
+//   whole travel in about 17 ms); no beamPrecompression and no
+//   beamPrecompressionTime (beamstate.lua update :742-765 ramps the ratio of
+//   every beam with a precompression time for 0.5 s); no deformGroup and no
+//   deformationTriggerRatio on the actuated beams.
+//   Stiffness, damping, deform, strength and limits = the stock toe link.
+//
+// CONTRACT NODES: the stock node ids rx* / rh* stay unprefixed on purpose.
+// They are the attachment contract of the child and neighbouring parts (rear
+// wheel data, springs, shocks, sway bar, rear differential, exhausts). Only
+// one part can occupy the slot, so there is no id collision (same situation
+// as "rdiff" in etk854hybrid_differential.jbeam).
+//
+// $toe_RR keeps its stock meaning, range and slider (static rear toe); it is
+// built into the hydro mapping instead of a beam precompression. The phase
+// logic (rear wheels opposite to the front wheels at low speed, same
+// direction above about 60 km/h, above about 40 km/h in trailer mode) is a
+// documented parameter set in the calibration section below; there is no
+// public phase or crossover option.
+//
+// The $etk854_ras_maxAngle slider (1.0-3.0 deg) ends at the top of the
+// counterCapDeg tables (3.0 deg; 1.0 deg in trailer mode). The controller uses
+// min(slider, table), so a slider value above the table top would have no
+// effect: keep both in step.
+// ============================================================================
+"etk854hybrid_suspension_R_ras": {
+    "information":{
+        "authors":"Deuflhard",
+        "name":"Independent Rear Suspension with Active Rear-Axle Steering (ActiveHybrid)",
+        "value":2800,
+    },
+    "slotType" : "etk800_suspension_R",
+    "slots2": [
+        ["name",                  "allowTypes",              "denyTypes", "default",               "description"],
+        ["etk800_brake_R",        ["etk800_brake_R"],        [],          "etk800_brake_R",        "Rear Brakes"],
+        ["etk800_differential_R", ["etk800_differential_R"], [],          "etk800_differential_R", "Rear Differential"],
+        //The case() is for backwards compatibility for old configs that use "trackwidth_R" variable.
+        //To change the base track width, edit the trackoffset_R offset in the expression.
+        ["wheel_R_5",             ["wheel_R_5"],             [],          "etk_wheel_03a_18x9_R",  "Rear Wheels",       {"nodeOffset":{"x":"$=case($trackwidth_R == nil, $trackoffset_R+0.275, $trackwidth_R)", "y":1.41, "z":0.33}}],
+        ["etk800_wheeldata_R",    ["etk800_wheeldata_R"],    [],          "etk800_wheeldata_R",    "Rear Spindles",     {"coreSlot":true}],
+        ["etk800_spring_R",       ["etk800_spring_R"],       [],          "etk800_spring_R",       "Rear Springs"],
+        ["etk800_shock_R",        ["etk800_shock_R"],        [],          "etk800_shock_R",        "Rear Shocks"],
+        ["etk800_swaybar_R",      ["etk800_swaybar_R"],      [],          "etk800_swaybar_R",      "Rear Sway Bar"],
+    ],
+    "flexbodies": [
+         ["mesh", "[group]:", "nonFlexMaterials"],
+         //rear running gear
+         ["etk800_lowerarm_R", ["etk800_lowerarm_R"]],
+         ["etk800_tierod_R", ["etk800_tierod_R"]],
+         ["etk800_hub_R", ["etk800_hub_R"]],
+         ["etk800_upperarm_R", ["etk800_upperarm_R"]],
+         ["etk800_subframe_R", ["etk800_subframe_R"]],
+    ],
+    "variables": [
+        ["name", "type", "unit", "category", "default", "min", "max", "title", "description"],
+        ["$camber_RR", "range", "", "Wheel Alignment", 0.984, 0.95, 1.05, "Camber Adjust", "Adjusts the wheel camber angles", {"subCategory":"Rear"}],
+        ["$toe_RR", "range", "", "Wheel Alignment", 0.9975, 0.99, 1.01, "Toe Adjust", "Adjusts the wheel toe-in angle", {"subCategory":"Rear"}],
+        ["$trackoffset_R", "range", "+m", "Wheels", 0.0,-0.02, 0.05, "Wheel Offset", "Spacing of the wheel from the hub", {"stepDis":0.001,"subCategory":"Rear"}],
+        ["$etk854_ras_enable", "range", "0=off/1=on", "Chassis", 1, 0, 1, "Active Rear-Axle Steering", "1 = the rear wheels steer: opposite to the front wheels up to about 60 km/h (smaller turning circle, more agile), in the same direction above (calmer lane changes). 0 = rear wheels held straight (static toe only).", {"minDis":0, "maxDis":1, "stepDis":1, "subCategory":"Rear-Axle Steering"}],
+        ["$etk854_ras_maxAngle", "range", "deg", "Chassis", 3.0, 1.0, 3.0, "Max. Rear Steering Angle", "Largest opposite-direction rear wheel angle at low speed and full steering lock (approached smoothly, the wheels stay just below it). 3.0 deg reduces the turning circle by about 0.6 m. Trailer mode is limited to 1.0 deg.", {"stepDis":0.5, "subCategory":"Rear-Axle Steering"}],
+        ["$etk854_ras_inPhase", "range", "", "Chassis", 1.0, 0, 1.5, "Same-Direction Steering at Speed", "Scales the same-direction rear steering above about 60 km/h (40 km/h in trailer mode). 100 % = default, 0 % = rear wheels stay straight at speed.", {"minDis":0, "maxDis":150, "stepDis":10, "subCategory":"Rear-Axle Steering"}],
+        ["$etk854_ras_assist", "range", "0=off/1=on", "Chassis", 0, 0, 1, "Stability Assist via Rear Steering (Experimental)", "1 = with DSC or DTC on, the rear wheels also counter beginning oversteer before the stability control trims torque or brakes. Off by default until verified in game. No effect with DSC OFF.", {"minDis":0, "maxDis":1, "stepDis":1, "subCategory":"Rear-Axle Steering"}],
+    ],
+    "nodes": [
+         ["id",   "posX", "posY", "posZ"],
+         //--REAR RUNNING GEAR--
+         {"collision":true},
+         {"selfCollision":true},
+         {"nodeMaterial":"|NM_METAL"},
+         {"frictionCoef":0.5},
+
+         //--REAR SUBFRAME--
+         {"nodeWeight":4.5},
+         {"group":"etk800_subframe_R"},
+         //multilink suspension
+         //control arm 1
+         {"nodeWeight":7.25},
+         ["rx1r",-0.231,  1.573,  0.2511, {"tag":"rideheight_RR", "group":["etk800_lowerarm_R","etk800_tierod_R","etk800_subframe_R"]}],
+         //["rx1", 0.0, 1.59, 0.27, {"group":["etk800_lowerarm_R","etk800_tierod_R","etk800_subframe_R"], "selfCollision":false}],
+         ["rx1l", 0.231,  1.573,  0.2511, {"tag":"rideheight_RL", "group":["etk800_lowerarm_R","etk800_tierod_R","etk800_subframe_R"]}],
+         //control arm 2
+         ["rx2r",-0.386,  1.183,  0.2825, {"group":["etk800_lowerarm_R","etk800_subframe_R"]}],
+         ["rx2l", 0.386,  1.183,  0.2825, {"group":["etk800_lowerarm_R","etk800_subframe_R"]}],
+         //toe arm
+         ["rx3r",-0.2196, 1.638,  0.3194, {"group":["etk800_tierod_R","etk800_subframe_R"]}],
+         ["rx3l", 0.2196, 1.638,  0.3194, {"group":["etk800_tierod_R","etk800_subframe_R"]}],
+         //upper wishbone
+         ["rx4r",-0.42,   1.2315, 0.4173, {"group":["etk800_upperarm_R","etk800_subframe_R"],"selfCollision":false}],
+         ["rx4l", 0.42,   1.2315, 0.4173, {"group":["etk800_upperarm_R","etk800_subframe_R"],"selfCollision":false}],
+         ["rx5r",-0.3682, 1.446,  0.4715, {"group":["etk800_upperarm_R","etk800_subframe_R","etk800_spring_R"],"selfCollision":false}],
+         ["rx5l", 0.3682, 1.446,  0.4715, {"group":["etk800_upperarm_R","etk800_subframe_R","etk800_spring_R"],"selfCollision":false}],
+         //structure
+         {"nodeWeight":4.5},
+         {"selfCollision":false},
+         ["rx6r",-0.415,  1.803,  0.43],
+         ["rx6l", 0.415,  1.803,  0.43],
+         {"nodeWeight":4.5},
+         ["rx7r",-0.52,   1.07,   0.34],
+         ["rx7l", 0.52,   1.07,   0.34],
+
+         //rigidifier
+         {"nodeWeight":4.0},
+         {"collision":false},
+         {"selfCollision":false},
+         ["rx6",  0.0,    1.362,  0.7,    {"group":""}],
+
+         //--REAR INDEPENDENT SUSPENSION--
+         {"collision":true},
+         {"selfCollision":false},
+         //rear hub
+         {"nodeWeight":6.5},
+         {"group":"etk800_lowerarm_R"},
+         {"selfCollision":true},
+         ["rh1r",-0.6281, 1.4498, 0.2356, {"group":["etk800_hub_R","etk800_lowerarm_R","etk800_tierod_R","etk800_swaybar_R","etk800_spring_R"]}],
+         ["rh1l", 0.6281, 1.4498, 0.2356, {"group":["etk800_hub_R","etk800_lowerarm_R","etk800_tierod_R","etk800_swaybar_R","etk800_spring_R"]}],
+         {"nodeWeight":5.25},
+         {"group":"etk800_tierod_R"},
+         ["rh2r",-0.6507, 1.5495, 0.3006, {"group":["etk800_hub_R","etk800_tierod_R","etk800_swaybar_R"]}],
+         ["rh2l", 0.6507, 1.5495, 0.3006, {"group":["etk800_hub_R","etk800_tierod_R","etk800_swaybar_R"]}],
+         {"group":"etk800_lowerarm_R"},
+         ["rh3r",-0.6516, 1.3536, 0.1974, {"group":["etk800_hub_R","etk800_lowerarm_R"]}],
+         ["rh3l", 0.6516, 1.3536, 0.1974, {"group":["etk800_hub_R","etk800_lowerarm_R"]}],
+         {"selfCollision":false},
+         {"group":"etk800_upperarm_R"},
+         ["rh4r",-0.6552, 1.404,  0.4659, {"group":["etk800_hub_R","etk800_upperarm_R","etk800_swaybar_R"]}],
+         ["rh4l", 0.6552, 1.404,  0.4659, {"group":["etk800_hub_R","etk800_upperarm_R","etk800_swaybar_R"]}],
+         {"group":"etk800_upperarm_R"},
+         ["rh6r",-0.63,   1.3515, 0.4113, {"group":["etk800_hub_R","etk800_upperarm_R"]}],
+         ["rh6l", 0.63,   1.3515, 0.4113, {"group":["etk800_hub_R","etk800_upperarm_R"]}],
+         {"nodeWeight":5},
+         {"group":"etk800_hub_R"},
+         ["rh5r",-0.74,   1.24,   0.33],
+         ["rh5l", 0.74,   1.24,   0.33],
+
+         {"group":""},
+         //["test123", 0.79, 1.51, 0.32],
+
+         {"group":""},
+    ],
+    "torsionbars": [
+        ["id1:", "id2:", "id3:", "id4:"],
+        {"spring":150000, "damp":0, "deform":35000, "strength":100000},
+        //rigidify steering arm
+        //["rw1rr", "rw1r", "rh3r", "rh2r"],
+        //["rw1ll", "rw1l", "rh3l", "rh2l"],
+        //["rw1rr", "rw1r", "rh1r", "rh2r"],
+        //["rw1ll", "rw1l", "rh1l", "rh2l"],
+        //rigidify front subframe mount
+        {"spring":200000, "damp":1, "deform":35000, "strength":100000},
+        ["rx1r", "rx2r", "rx2l", "rx7r"],
+        ["rx1l", "rx2l", "rx2r", "rx7l"],
+        //rigidify rear subframe mount
+        {"spring":100000, "damp":100, "deform":5000, "strength":50000},
+        ["r6rr", "rx4r", "rx4l", "rx6r"],
+        ["r6ll", "rx4l", "rx4r", "rx6l"],
+        //hub torsion damping
+        {"spring":0, "damp":100, "deform":5000, "strength":50000},
+        ["rh5r", "rh2r", "rx2l", "rx1r"],
+        ["rh5l", "rh2l", "rx2r", "rx1l"],
+    ],
+    "beams": [
+          ["id1:",  "id2:"],
+
+          //--REAR SUBFRAME--
+          {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1, "beamShortBound":1},
+          {"beamSpring":11001000,"beamDamp":120},
+          {"beamDeform":25000,"beamStrength":"FLT_MAX"},
+          //main shape
+          {"deformLimitExpansion":1.2},
+          ["rx1l",  "rx1r"],
+          ["rx2r",  "rx2l"],
+          ["rx4r",  "rx4l"],
+          ["rx5l",  "rx5r"],
+          ["rx3r",  "rx3l"],
+
+          {"beamSpring":6001000,"beamDamp":180},
+          ["rx6l",  "rx5l"],
+          ["rx4l",  "rx7l"],
+          ["rx6r",  "rx5r"],
+          ["rx4r",  "rx7r"],
+          ["rx7r",  "rx2r"],
+          ["rx7l",  "rx2l"],
+          ["rx6l",  "rx1l"],
+          ["rx6r",  "rx1r"],
+          ["rx7r",  "rx1r"],
+          ["rx7l",  "rx1l"],
+
+          {"beamSpring":6001000,"beamDamp":180},
+          ["rx5l",  "rx4l"],
+          ["rx5r",  "rx4r"],
+          ["rx4r",  "rx2r"],
+          ["rx4l",  "rx2l"],
+          ["rx1l",  "rx2l"],
+          ["rx1r",  "rx2r"],
+          ["rx1l",  "rx3l"],
+          ["rx3l",  "rx5l"],
+          ["rx3r",  "rx5r"],
+
+          //crossing
+          {"deformLimitExpansion":""},
+          {"beamDeform":20000,"beamStrength":"FLT_MAX"},
+          {"beamSpring":6001000,"beamDamp":180},
+          ["rx5r",  "rx1r"],
+          ["rx5l",  "rx1l"],
+          ["rx4r",  "rx1r"],
+          ["rx5r",  "rx2r"],
+          ["rx2l",  "rx5l"],
+          ["rx4l",  "rx1l"],
+          ["rx1l",  "rx2r"],
+          ["rx1r",  "rx2l"],
+          ["rx4l",  "rx2r",  {"beamSpring":12001000,"beamDamp":120}],
+          ["rx4r",  "rx2l",  {"beamSpring":12001000,"beamDamp":120}],
+          ["rx5l",  "rx1r",  {"beamSpring":12001000,"beamDamp":120}],
+          ["rx5r",  "rx1l",  {"beamSpring":12001000,"beamDamp":120}],
+          ["rx4l",  "rx1r"],
+          ["rx5l",  "rx2r"],
+          ["rx4r",  "rx1l"],
+          ["rx5r",  "rx2l"],
+          ["rx3l",  "rx1r"],
+          ["rx3r",  "rx1l"],
+          ["rx3l",  "rx5r"],
+          ["rx3r",  "rx5l"],
+
+          {"beamSpring":5001000,"beamDamp":180},
+          ["rx6l",  "rx1r"],
+          ["rx6l",  "rx5r"],
+          ["rx6r",  "rx1l"],
+          ["rx6r",  "rx5l"],
+          ["rx3l",  "rx6l"],
+          ["rx3r",  "rx6r"],
+          ["rx3l",  "rx6r"],
+          ["rx3r",  "rx6l"],
+          ["rx7l",  "rx2r"],
+          ["rx7l",  "rx4r"],
+          ["rx7r",  "rx2l"],
+          ["rx7r",  "rx4l"],
+
+          //rigids
+          {"beamDeform":10000,"beamStrength":"FLT_MAX"},
+          ["rx7l",  "rx7r"],
+          ["rx6l",  "rx6r"],
+
+          //rigidifier
+          {"beamSpring":5001000,"beamDamp":180},
+          {"beamDeform":15000,"beamStrength":"FLT_MAX"},
+          ["rx6",   "rx1r"],
+          ["rx6",   "rx2r"],
+          ["rx6",   "rx2l"],
+          ["rx6",   "rx1l"],
+          ["rx6",   "rx3r"],
+          ["rx6",   "rx3l"],
+          ["rx6",   "rx7r"],
+          ["rx6",   "rx7l"],
+          ["rx6",   "rx6r"],
+          ["rx6",   "rx6l"],
+          ["rx6",   "rx4l"],
+          ["rx6",   "rx5l"],
+          ["rx6",   "rx4r"],
+          ["rx6",   "rx5r"],
+
+          //attach to body
+          {"beamPrecompression":1.0, "beamType":"|BOUNDED", "beamLongBound":1, "beamShortBound":1},
+          {"beamSpring":501000,"beamDamp":2000},
+          {"beamLimitSpring":2501000,"beamLimitDamp":500},
+          {"beamDeform":20000,"beamStrength":180000},
+          {"longBoundRange":0.00,"shortBoundRange":0.00,"boundZone":0.002},
+          //rear
+          {"dampCutoffHz":500},
+          {"breakGroup":"subframemount_RRR"},
+          ["rx6r",  "r5rr"],
+          ["rx6r",  "r6rr"],
+          ["rx6r",  "r2rr"],
+          ["rx6r",  "r3rr"],
+          ["rx6r",  "r3"],
+          ["rx6r",  "r6"],
+          ["rx6r",  "r5"],
+          {"breakGroup":"subframemount_RRL"},
+          ["rx6l",  "r5ll"],
+          ["rx6l",  "r6ll"],
+          ["rx6l",  "r2ll"],
+          ["rx6l",  "r3ll"],
+          ["rx6l",  "r3"],
+          ["rx6l",  "r6"],
+          ["rx6l",  "r5"],
+          //front
+          {"breakGroup":"subframemount_RFR"},
+          ["rx7l",  "f4l",   {"beamSpring":2501000,"beamDamp":500}],
+          ["rx7l",  "f9l",   {"beamSpring":2501000,"beamDamp":500}],
+          ["rx7l",  "f4ll"],
+          ["rx7l",  "r1ll"],
+          ["rx7l",  "q5l"],
+          ["rx7l",  "f3l"],
+          ["rx7l",  "f8l"],
+          {"breakGroup":"subframemount_RFL"},
+          ["rx7r",  "f4r",   {"beamSpring":2501000,"beamDamp":500}],
+          ["rx7r",  "f9r",   {"beamSpring":2501000,"beamDamp":500}],
+          ["rx7r",  "f4rr"],
+          ["rx7r",  "r1rr"],
+          ["rx7r",  "q5r"],
+          ["rx7r",  "f3r"],
+          ["rx7r",  "f8r"],
+          {"dampCutoffHz":""},
+          {"longBoundRange":"","shortBoundRange":"","boundZone":""},
+          {"breakGroup":""},
+
+          //limiter
+          {"beamPrecompression":0.96, "beamType":"|SUPPORT", "beamLongBound":2},
+          {"beamSpring":2001000,"beamDamp":180},
+          {"beamDeform":15000,"beamStrength":80000},
+          {"deformLimitExpansion":""},
+          ["rx2r",  "f9r"],
+          ["rx2r",  "r1rr"],
+          ["rx2r",  "r1"],
+          ["rx2r",  "f3r"],
+          ["rx2r",  "f3l"],
+          ["rx2r",  "f4rr"],
+          ["rx2l",  "f4ll"],
+          ["rx2l",  "f9l"],
+          ["rx2l",  "r1ll"],
+          ["rx2l",  "r1"],
+          ["rx2l",  "f3l"],
+          ["rx2l",  "f3r"],
+
+          ["rx1r",  "r5rr"],
+          ["rx1r",  "r5"],
+          ["rx1r",  "r1rr"],
+
+          ["rx1l",  "r5ll"],
+          ["rx1l",  "r5"],
+          ["rx1l",  "r1ll"],
+
+          //ripperonis
+          {"beamSpring":1001000,"beamDamp":180},
+          {"beamDeform":15000,"beamStrength":60000},
+          {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+          //["rx4r", "f9l"],
+          //["rx4l", "f9r"],
+          //["rx5r", "r1ll"],
+          //["rx5l", "r1rr"],
+          //["rx5l", "r1"],
+          //["rx5r", "r1"],
+          //["rx6r", "r5ll"],
+          //["rx6l", "r5rr"],
+
+          //--REAR RUNNING GEAR--
+          //multilink suspension
+          {"beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+          {"beamDeform":105000,"beamStrength":350000},
+          {"beamSpring":8001000,"beamDamp":100},
+          //rear hub
+          {"deformLimitExpansion":1.1},
+          {"deformGroup":"suspensionR", "deformationTriggerRatio":0.01},
+          ["rh1r",  "rh2r"],
+          ["rh1l",  "rh2l"],
+          ["rh1r",  "rh3r",  {"beamSpring":5001000,"beamDamp":70}],
+          ["rh1l",  "rh3l",  {"beamSpring":5001000,"beamDamp":70}],
+          ["rh2r",  "rh3r"],
+          ["rh2l",  "rh3l"],
+          ["rh2r",  "rh4r"],
+          ["rh2l",  "rh4l"],
+          ["rh3r",  "rh4r"],
+          ["rh3l",  "rh4l"],
+          ["rh1r",  "rh4r"],
+          ["rh1l",  "rh4l"],
+
+          ["rh1r",  "rh6r"],
+          ["rh1l",  "rh6l"],
+          ["rh2r",  "rh6r"],
+          ["rh2l",  "rh6l"],
+          ["rh3r",  "rh6r"],
+          ["rh3l",  "rh6l"],
+          ["rh4r",  "rh6r",  {"beamSpring":5001000,"beamDamp":70}],
+          ["rh4l",  "rh6l",  {"beamSpring":5001000,"beamDamp":70}],
+          ["rh5r",  "rh6r"],
+          ["rh5l",  "rh6l"],
+
+          {"beamSpring":6001000,"beamDamp":100},
+          ["rh1r",  "rh5r"],
+          ["rh1l",  "rh5l"],
+          ["rh2r",  "rh5r"],
+          ["rh2l",  "rh5l"],
+          ["rh3r",  "rh5r"],
+          ["rh3l",  "rh5l"],
+          ["rh4r",  "rh5r"],
+          ["rh4l",  "rh5l"],
+          {"deformGroup":"", "deformationTriggerRatio":""},
+
+          //attach to wheel
+          {"beamSpring":8001000,"beamDamp":100},
+          {"beamDeform":75000,"beamStrength":205000},
+          {"optional":true},
+          {"breakGroup":"wheel_RR"},
+          ["rh1r",  "rw1r"],
+          ["rh2r",  "rw1r"],
+          ["rh3r",  "rw1r"],
+          ["rh4r",  "rw1r"],
+          ["rh5r",  "rw1r",  {"name":"axle_RR"}],
+          ["rh6r",  "rw1r"],
+
+          ["rh1r",  "rw1rr"],
+          ["rh2r",  "rw1rr"],
+          ["rh3r",  "rw1rr"],
+          ["rh4r",  "rw1rr"],
+          ["rh5r",  "rw1rr"],
+          ["rh6r",  "rw1rr"],
+
+          {"breakGroup":"wheel_RL"},
+          ["rh1l",  "rw1l"],
+          ["rh2l",  "rw1l"],
+          ["rh3l",  "rw1l"],
+          ["rh4l",  "rw1l"],
+          ["rh5l",  "rw1l",  {"name":"axle_RL"}],
+          ["rh6l",  "rw1l"],
+
+          ["rh1l",  "rw1ll"],
+          ["rh2l",  "rw1ll"],
+          ["rh4l",  "rw1ll"],
+          ["rh3l",  "rw1ll"],
+          ["rh5l",  "rw1ll"],
+          ["rh6l",  "rw1ll"],
+          {"breakGroup":""},
+          {"optional":false},
+
+          //lower arms
+          {"beamSpring":15001000,"beamDamp":1500},
+          {"beamDeform":65000,"beamStrength":550000},
+          {"deformGroup":"suspensionR", "deformationTriggerRatio":0.01},
+          ["rx1r",  "rh1r",  {"dampCutoffHz":500}],
+          ["rx1l",  "rh1l",  {"dampCutoffHz":500}],
+          {"beamSpring":15001000,"beamDamp":1500},
+          ["rx2r",  "rh3r",  {"dampCutoffHz":500}],
+          ["rx2l",  "rh3l",  {"dampCutoffHz":500}],
+
+          //tie rod arm toe adjust: actuated, see "hydros" (etk854hybrid_rasToe_RR / _RL)
+          {"beamSpring":15001000,"beamDamp":1500},
+
+          //upper arms
+          //camber
+          {"beamSpring":15001000,"beamDamp":1500},
+          ["rx4r",  "rh6r",  {"beamPrecompression":"$camber_RR","beamPrecompressionTime":0.5,"dampCutoffHz":500}],
+          ["rx4l",  "rh6l",  {"beamPrecompression":"$camber_RR","beamPrecompressionTime":0.5,"dampCutoffHz":500}],
+          {"beamSpring":15001000,"beamDamp":1500},
+          ["rx5r",  "rh4r",  {"beamPrecompression":"$camber_RR","beamPrecompressionTime":0.5,"dampCutoffHz":500}],
+          ["rx5l",  "rh4l",  {"beamPrecompression":"$camber_RR","beamPrecompressionTime":0.5,"dampCutoffHz":500}],
+          {"deformGroup":"", "deformationTriggerRatio":""},
+
+          //bushing damping
+          {"beamSpring":0,"beamDamp":3500},
+          {"beamDeform":15000,"beamStrength":55000},
+          ["f4l",   "rh1l",  {"dampCutoffHz":250}],
+          ["f4r",   "rh1r",  {"dampCutoffHz":250}],
+          ["f9l",   "rh4l",  {"dampCutoffHz":250}],
+          ["f9r",   "rh4r",  {"dampCutoffHz":250}],
+
+          ["rx3l",  "rh5l",  {"dampCutoffHz":250}],
+          ["rx3r",  "rh5r",  {"dampCutoffHz":250}],
+
+          //rear limiters
+          {"deformLimitExpansion":""},
+          {"beamPrecompression":1, "beamType":"|BOUNDED", "beamLongBound":0.25, "beamShortBound":0.25},
+          {"beamSpring":0,"beamDamp":0,"beamDeform":30000,"beamStrength":400000},
+          {"beamLimitSpring":3001000,"beamLimitDamp":500},
+          {"breakGroupType":1},
+          {"breakGroup":"wheel_RR"},
+          ["rw1rr", "f4rr",  {"optional":true}],
+          ["rh2r",  "f4rr"],
+          ["rh2r",  "f4r"],
+          ["rh1r",  "f4r"],
+          {"breakGroup":"wheel_RL"},
+          ["rw1ll", "f4ll",  {"optional":true}],
+          ["rh2l",  "f4ll"],
+          ["rh2l",  "f4l"],
+          ["rh1l",  "f4l"],
+          {"breakGroupType":0},
+          {"breakGroup":""},
+
+          //upper arm anti-invert
+          {"beamPrecompression":1, "beamType":"|BOUNDED", "beamLongBound":0.5, "beamShortBound":0.5},
+          {"beamSpring":0,"beamDamp":0,"beamDeform":45000,"beamStrength":450000},
+          {"beamLimitSpring":3001000,"beamLimitDamp":500},
+          ["rh4r",  "rx1r"],
+          ["rh4r",  "rx2r"],
+          ["rh4l",  "rx1l"],
+          ["rh4l",  "rx2l"],
+          {"beamPrecompression":1, "beamType":"|BOUNDED", "beamLongBound":0.1, "beamShortBound":0.2},
+          ["rh4l",  "rx4r"],
+          ["rh4l",  "rx5r"],
+          ["rh4r",  "rx4l"],
+          ["rh4r",  "rx5l"],
+
+          //lower arm anti-invert
+          {"beamPrecompression":1, "beamType":"|BOUNDED", "beamLongBound":0.24, "beamShortBound":0.24},
+          ["rh3r",  "rx5r"],
+          ["rh1r",  "rx4r"],
+          ["rh3l",  "rx5l"],
+          ["rh1l",  "rx4l"],
+
+          //hub anti-invert
+          {"beamPrecompression":1, "beamType":"|BOUNDED", "beamLongBound":0.1, "beamShortBound":0.1},
+          ["rh3r",  "rx1r"],
+          ["rh1r",  "rx2r"],
+          ["rh3l",  "rx1l"],
+          ["rh1l",  "rx2l"],
+          ["rh5r",  "rx5r"],
+          ["rh5l",  "rx5l"],
+          ["rh2r",  "rx1r"],
+          ["rh2l",  "rx1l"],
+
+          //suspension travel hard limit
+          {"beamPrecompression":1, "beamType":"|BOUNDED", "beamLongBound":1, "beamShortBound":1},
+          {"beamSpring":0,"beamDamp":0,"beamDeform":15000,"beamStrength":150000},
+          {"beamLimitSpring":1001000,"beamLimitDamp":1000},
+          ["rh1r",  "r1rr",  {"longBoundRange":0.11,"shortBoundRange":0.10,"boundZone":0.025,"beamLimitDampRebound":0,"dampCutoffHz":500}],
+          ["rh1l",  "r1ll",  {"longBoundRange":0.11,"shortBoundRange":0.10,"boundZone":0.025,"beamLimitDampRebound":0,"dampCutoffHz":500}],
+          {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+          {"deformLimitExpansion":1.1},
+    ],
+    "triangles": [
+          ["id1:", "id2:", "id3:"],
+          //rear subframe
+          {"dragCoef":3.5},
+          ["rx7l", "rx2l", "rx4l"],
+          ["rx2r", "rx7r", "rx4r"],
+          ["rx2r", "rx2l", "rx7l"],
+          ["rx7l", "rx7r", "rx2r"],
+          ["rx2l", "rx5l", "rx4l"],
+          ["rx2l", "rx1l", "rx5l"],
+          ["rx1r", "rx2r", "rx4r"],
+          ["rx4r", "rx5r", "rx1r"],
+          ["rx3r", "rx1r", "rx5r"],
+          ["rx3r", "rx5r", "rx6r"],
+          ["rx5l", "rx1l", "rx3l"],
+          ["rx3l", "rx6l", "rx5l"],
+          ["rx1l", "rx1r", "rx3r"],
+          ["rx3r", "rx3l", "rx1l"],
+          ["rx1l", "rx2l", "rx2r"],
+          ["rx2r", "rx1r", "rx1l"],
+          ["rx3l", "rx3r", "rx6r"],
+          ["rx6r", "rx6l", "rx3l"],
+
+          {"triangleType":"NONCOLLIDABLE"},
+          ["rh6r", "rh4r", "rh3r"],
+          ["rh5r", "rh6r", "rh3r"],
+          ["rh1r", "rh3r", "rh4r"],
+          ["rh2r", "rh1r", "rh4r"],
+          ["rh1r", "rx2r", "rh3r"],
+          ["rx1r", "rh3r", "rh1r"],
+          ["rh5r", "rh2r", "rx3r"],
+          ["rh6r", "rx4r", "rx5r"],
+          ["rx5r", "rh4r", "rx4r"],
+          ["rx1r", "f4r",  "rx2r"],
+
+          ["rh4l", "rh6l", "rh3l"],
+          ["rh6l", "rh5l", "rh3l"],
+          ["rh3l", "rh1l", "rh4l"],
+          ["rh1l", "rh2l", "rh4l"],
+          ["rx2l", "rh1l", "rh3l"],
+          ["rh3l", "rx1l", "rh1l"],
+          ["rh2l", "rh5l", "rx3l"],
+          ["rx4l", "rh6l", "rx5l"],
+          ["rh4l", "rx5l", "rx4l"],
+          ["f4l",  "rx1l", "rx2l"],
+          {"triangleType":"NORMALTYPE"},
+    ],
+    "pressureWheels": [
+            ["name","hubGroup","group","node1:","node2:","nodeS","nodeArm:","wheelDir"],
+            //cancel out brake properties
+            {"brakeTorque":0},
+            {"parkingTorque":0},
+            {"enableBrakeThermals":false},
+            {"brakeDiameter":false},
+            {"brakeMass":false},
+            {"brakeType":false},
+            {"rotorMaterial":false},
+            {"brakeVentingCoef":false},
+    ],
+    // Toe links as actuators (active rear-axle steering). ONE command for both sides:
+    // etk854hybrid_rasCmd in [-1, 1], + = rear wheels steer RIGHT.
+    // ratio_L = $toe_RR + 0.0167*cmd, ratio_R = $toe_RR - 0.0167*cmd (0.0167 = ~3.5 deg per unit).
+    // The static toe $toe_RR is part of the mapping: cmd 0 gives ratio $toe_RR even without
+    // the controller. inputCenter sits at the ratio-1 point, so the hydro centre equals the
+    // jbeam rest length (1.0) and the first hydros.updateGFX always writes the toe ratio
+    // (hydros.lua init :640-678, update :471-481). No beamPrecompression / ramp on these beams
+    // (beamstate.lua:742-765 would write them for 0.5 s), no deformGroup (actuated beam).
+    // Stiffness, damping, deform, strength, limits = the stock toe link.
+    "hydros": [
+        ["id1:", "id2:"],
+        {"beamPrecompression":1.0, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
+        {"beamSpring":15001000, "beamDamp":1500, "beamDeform":65000, "beamStrength":550000},
+        {"beamLimitSpring":2501000, "beamLimitDamp":500},
+        {"deformLimitExpansion":1.1},
+        {"breakGroup":"", "optional":false},
+        ["rx3l", "rh2l", {"name":"etk854hybrid_rasToe_RL", "inputSource":"etk854hybrid_rasCmd",
+            "inputCenter":"$=(1-$toe_RR)/0.0167",
+            "inputInLimit":"$=(1-$toe_RR)/0.0167 - 1 - abs(1-$toe_RR)/0.0167",
+            "inputOutLimit":"$=(1-$toe_RR)/0.0167 + 1 + abs(1-$toe_RR)/0.0167",
+            "inLimit":"$=1 - 0.0167 - abs(1-$toe_RR)",
+            "outLimit":"$=1 + 0.0167 + abs(1-$toe_RR)",
+            "inRate":0.12, "outRate":0.12, "autoCenterRate":0.12, "dampCutoffHz":500}],
+        ["rx3r", "rh2r", {"name":"etk854hybrid_rasToe_RR", "inputSource":"etk854hybrid_rasCmd",
+            "inputCenter":"$=($toe_RR-1)/0.0167",
+            "inputInLimit":"$=($toe_RR-1)/0.0167 - 1 - abs(1-$toe_RR)/0.0167",
+            "inputOutLimit":"$=($toe_RR-1)/0.0167 + 1 + abs(1-$toe_RR)/0.0167",
+            "inLimit":"$=1 + 0.0167 + abs(1-$toe_RR)",
+            "outLimit":"$=1 - 0.0167 - abs(1-$toe_RR)",
+            "inRate":0.12, "outRate":0.12, "autoCenterRate":0.12, "dampCutoffHz":500}],
+        {"deformLimitExpansion":""},
+        {"beamPrecompression":1.0, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0}
+    ],
+    "controller": [
+        ["fileName"],
+        // Own name/type (not under drivingDynamics/): the CMU all-active rule
+        // (CMU.lua:363-380) never applies to it. It registers a DSC yaw provider
+        // (and, with the assist on, a silent yaw component) itself.
+        ["etk854hybrid_rearSteer", {
+            "name": "etk854hybrid_rearSteer",
+            "enabled": "$etk854_ras_enable",
+            "assist": "$etk854_ras_assist",
+            "maxCounterDeg": "$etk854_ras_maxAngle",
+            "inPhaseGain": "$etk854_ras_inPhase",
+            "toeRatio": "$toe_RR",
+            "inputSource": "etk854hybrid_rasCmd",
+            "hydroNameL": "etk854hybrid_rasToe_RL",
+            "hydroNameR": "etk854hybrid_rasToe_RR",
+            "linkRatioPerUnit": 0.0167,
+            "actuatorDegPerUnit": 3.5
+        }]
+    ],
+    // Merged into etk854hybrid_rearSteer's jbeamData (controller.lua init: tableMergeRecursive).
+    // Tables {"kmh":[...],"val":[...]}: kmh strictly increasing, linear interpolation, held at both ends.
+    // gain = rear/front road-wheel angle ratio k, + = same direction (in-phase), - = opposite.
+    "etk854hybrid_rearSteer": {
+        "frontAngleLinDeg": 33.67, "frontAngleCubDeg": 3.63, "frontRackFactorRef": 0.14,
+        "gain": {
+            "NORMAL":  {"kmh":[0,20,30,40,50,60,70,80,100,130], "val":[-0.12,-0.12,-0.11,-0.08,-0.04,0,0.04,0.07,0.10,0.12]},
+            "SPORT":   {"kmh":[0,20,30,40,50,60,70,80,100,130], "val":[-0.15,-0.15,-0.14,-0.10,-0.05,0,0.03,0.05,0.07,0.08]},
+            "TRAILER": {"kmh":[0,20,30,40,50,60,80,100,130],    "val":[-0.05,-0.05,-0.03,0,0.04,0.08,0.12,0.14,0.15]}
+        },
+        "counterCapDeg": {
+            "NORMAL":  {"kmh":[0,25,40,60], "val":[3.0,3.0,1.5,0.5]},
+            "SPORT":   {"kmh":[0,25,40,60], "val":[3.0,3.0,1.5,0.5]},
+            "TRAILER": {"kmh":[0,25,40],    "val":[1.0,1.0,0.5]}
+        },
+        "inPhaseCapDeg": {"NORMAL":1.5, "SPORT":1.0, "TRAILER":1.5},
+        "inPhaseTauS":   {"NORMAL":0.12, "SPORT":0.08, "TRAILER":0.15},
+        "rateDegS":      {"NORMAL":15, "SPORT":20, "TRAILER":10},
+        "frontTauS": 0.03, "blendS": 1.0, "totalMaxDeg": 3.5, "totalRateDegS": 20,
+        "hardBrake": {"minKmh":30, "lo":0.4, "hi":0.8, "scale":0.5},
+        "freezeKmh": 1.0, "freezeFullKmh": 2.0,
+        "reverseFadeKmh": 15, "reverseMaxKmh": 20,
+        "centreRateDegS": 3, "faultRateDegS": 5, "limitRateDegS": 4, "limitHoldS": 0.3,
+        "slide": {"minKmh":15, "beta":0.065, "yawExcess":{"dsc":0.25, "dtc":0.35, "off":0.35},
+                  "csYawMin":0.15, "csFrontMinDeg":1.0, "csOnS":0.10, "excessOnS":0.05, "destabOnS":0.05,
+                  "offS":0.8, "fadeOutPerS":8, "destabFadeOutPerS":20, "fadeInPerS":1.0, "fadeRateDegS":20},
+        "yawRef": {"enabled":true, "providerOrder":10, "minDeg":0.05, "tauS":0.15,
+                   "consDownS":0.05, "consUpS":0.5, "consHoldS":0.5, "noProviderScale":0.5, "refreshS":1.0},
+        "fb": {"componentOrder":5, "kn":{"dsc":0.5, "dtc":0.35}, "db":{"dsc":0.08, "dtc":0.14},
+               "kpMaxS":0.12, "maxDeg":1.5, "minKmh":20, "fullKmh":30, "betaGate":0.06, "tauS":0.08,
+               "rateDegS":20, "requireDirCheck":true},
+        "dirCheck": {"minKmh":8, "maxKmh":30, "minSteer":0.15, "minRearDeg":1.0, "maxLatAcc":3.0,
+                     "maxSteerRate":0.5, "windowS":1.0, "windows":3, "yawSignFrac":0.9},
+        "faultCheckS": 0.25,
+        "defaults": {"wheelbase":2.81, "charSpeed":55.0, "maxLatAcc":9.5}
+    }
+},
+}
