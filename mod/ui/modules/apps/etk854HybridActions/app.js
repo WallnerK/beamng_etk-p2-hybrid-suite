@@ -25,7 +25,10 @@
 //     COMFORT / AUTO EV / MED, so an optimistic local copy would lie.
 //   * Optional features (AWD, trailer, shift program, trunk air compressor)
 //     appear only while their electrics channel exists, i.e. while the
-//     owning controller is part of the spawned config.
+//     owning controller is part of the spawned config. The rear-axle
+//     steering row (R-STEER, optional part etk854hybrid_suspension_R_ras)
+//     is hidden as a WHOLE row, label included, while
+//     etk854hybrid_rasSel is not a string.
 //   * Clicks are ignored while the focused vehicle is not an ActiveHybrid:
 //     stock vehicles have a driveModes controller too, and a DSC click must
 //     not change a foreign car's drive mode.
@@ -68,6 +71,9 @@ angular.module('beamng.apps')
   // etk854hybrid_load_compressor); cell visible only while its controller
   // publishes etk854hybrid_airState
   const AIR  = "controller.getControllerSafe('etk854hybrid_airCompressor')"
+  // active rear-axle steering (optional part etk854hybrid_suspension_R_ras);
+  // setMode('OFF'|'DSC'|'NODSC'), the controller publishes etk854hybrid_rasSel
+  const RAS  = "controller.getControllerSafe('etk854hybrid_rearSteer')"
 
   // The custom 8HP shift logic is not a controller: vehicleController.lua
   // (init, l.1117-1123) require()s "controller/vehicleController/shiftLogic/
@@ -126,6 +132,12 @@ angular.module('beamng.apps')
       { id: 'aw2', text: '2WD',     lua: AWD + ".setMode('2WD')",       tip: 'Rear-wheel drive only' },
       { id: 'trl', text: 'TRAILER', lua: SUSP + '.toggleTrailerMode()', tip: 'Trailer mode (leveling)', grow: 1.3 },
       { id: 'air', text: 'COMPR', lua: AIR + '.toggle()', tip: 'Electric air compressor (trailer air supply) on/off', grow: 1.4 }
+    ] },
+    // opt: row starts hidden; shown only while etk854hybrid_rasSel is a string
+    { id: 'rRs', label: 'R-STEER', opt: true, cells: [
+      { id: 'rsO', text: 'OFF',       lua: RAS + ".setMode('OFF')",   tip: 'Rear-axle steering off - rear wheels straight, as without the system' },
+      { id: 'rsD', text: 'ON + DSC',  lua: RAS + ".setMode('DSC')",   tip: 'Rear-axle steering on with stability assist (default)', grow: 1.35 },
+      { id: 'rsN', text: 'ON NO DSC', lua: RAS + ".setMode('NODSC')", tip: 'Rear-axle steering on without steering assist - rear wheels return to straight while DSC intervenes', grow: 1.45 }
     ] }
   ]
   const BY_ID = {}
@@ -140,6 +152,9 @@ angular.module('beamng.apps')
   const DSC_BTN = [['dsD', 'DSC', C.blue], ['dsT', 'DTC', C.red], ['dsO', 'OFF', C.amber]]
   const SP_BTN  = [['spE', 'ECO'], ['spC', 'COMFORT'], ['spS', 'SPORT'], ['spM', 'MANUAL']]
   const AWD_BTN = [['awA', 'AWD'], ['aw2', '2WD']]
+  // rear-axle steering mirrors the DSC row: the "off" state is lit amber
+  const RS_BTN  = [['rsO', 'OFF', C.amber], ['rsD', 'DSC', C.blue], ['rsN', 'NODSC', C.blueLt]]
+  const RS_OFF_TIP = ' - inactive while DSC OFF'
   const LC_LABEL = { IDLE: 'LAUNCH', ARMED: 'LC ARMED', READY: 'LC READY', ACTIVE: 'LC GO' }
 
   const num = v => (v === undefined || v === null || v === '' || isNaN(Number(v))) ? null : Number(v)
@@ -158,8 +173,9 @@ angular.module('beamng.apps')
     return '<div ' + attr + ' title="' + (c.tip || '') + '" style="' + base + look + '">' + c.text + '</div>'
   }
   function rowHtml(r) {
-    return '<div data-r="' + r.id + '" style="flex:1 1 0;min-height:0;display:flex;align-items:stretch;gap:0.35em;">' +
-      '<div style="flex:none;width:4.6em;display:flex;align-items:center;font-size:0.7em;letter-spacing:0.14em;color:' + C.muted + ';">' +
+    return '<div data-r="' + r.id + '" style="flex:1 1 0;min-height:0;display:' + (r.opt ? 'none' : 'flex') + ';align-items:stretch;gap:0.35em;">' +
+      // nowrap: 'R-STEER' must not break at its hyphen when the font falls back
+      '<div style="flex:none;width:4.6em;display:flex;align-items:center;font-size:0.7em;letter-spacing:0.14em;white-space:nowrap;color:' + C.muted + ';">' +
       r.label + '</div>' + r.cells.map(cellHtml).join('') + '</div>'
   }
   const TPL =
@@ -306,6 +322,11 @@ angular.module('beamng.apps')
           memo.hybrid = hybrid
           root.style.opacity = hybrid ? '1' : '0.4'
         }
+        // rear-axle steering row: before the early return so a foreign
+        // vehicle (no channel) hides it too
+        const rasRaw = e.etk854hybrid_rasSel
+        const hasRas = typeof rasRaw === 'string'
+        vis('rRs', hasRas)
         if (!hybrid) { txt('hdr', 'NO ACTIVEHYBRID'); return }
 
         // ------------------------------------------------ mode groups
@@ -405,6 +426,20 @@ angular.module('beamng.apps')
             (typeof inh === 'string' && inh !== 'NONE' ? ', inhibit ' + inh : '') +
             (trlAir ? (trlShut ? ', trailer air coupled - supply valve shut until 6.0 bar' : ', trailer air coupled') : '') +
             ' - click: on/off')
+        }
+
+        // ------------------------------------------------ rear-steer row
+        // selection lit from etk854hybrid_rasSel only; DSC OFF disables the
+        // system in every selection -> cells faded (selection stays lit),
+        // clicks still pass (the controller keeps the choice for later)
+        if (hasRas) {
+          group(RS_BTN, rasRaw.toUpperCase())
+          const rsDscOff = dsc === 'OFF'
+          for (let i = 0; i < RS_BTN.length; i++) {
+            const id = RS_BTN[i][0]
+            fade(id, rsDscOff)
+            tip(id, BY_ID[id].tip + (rsDscOff ? RS_OFF_TIP : ''))
+          }
         }
       })
     }

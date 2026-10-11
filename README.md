@@ -11,7 +11,9 @@
 > *35d Performance xAllrad Rear-Axle Steering*. Below about 60 km/h the rear wheels steer opposite to the front wheels
 > (up to 3°, turning circle about 0.6 m smaller), above it in the same direction (up to 1.5°). The stability control
 > knows the rear angle, and an experimental stability assist lets the rear wheels counter beginning oversteer before the
-> stability control trims torque or brakes. I have only checked it offline and on my own test drives so far; the
+> stability control trims torque or brakes. A new R-STEER row in the Actions app selects OFF, ON + DSC (default) or
+> ON NO DSC (no steering assist; the rear wheels return to straight while the stability control intervenes); with
+> DSC OFF the rear-axle steering is always off. I have only checked it offline and on my own test drives so far; the
 > release on `main` does not contain it. To try it, use the files under `mod/` from this branch (zip the contents of
 > `mod/` so that `vehicles/` sits at the top level of the zip).
 

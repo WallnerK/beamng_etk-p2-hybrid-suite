@@ -23,6 +23,25 @@
 -- lagged front angle (front first, rear follows); a set change cross-fades
 -- over 1 s.
 --
+-- Driver selection (Actions app row R-STEER, setMode / cycleMode), kept across
+-- a vehicle reset and serialised across a reload; the default at spawn comes
+-- from the jbeam ($etk854_ras_enable 0 -> OFF, else $etk854_ras_assist 1 ->
+-- DSC, 0 -> NODSC):
+--   OFF    rear wheels straight (3 deg/s, also at a standstill), feed-forward
+--          and assist off, the DSC yaw provider answers nil (stock reference):
+--          the car drives like the model without rear-axle steering.
+--   DSC    feed-forward + stability assist (silent yaw component) + corrected
+--          DSC yaw reference; DSC / ABS braking -> NO_INCREASE (unchanged).
+--   NODSC  feed-forward + corrected reference, no assist. While the DSC
+--          intervenes (escActive / tcsActive / isYCBrakeActive /
+--          isTCBrakeActive) and for 0.5 s after its last frame the rear wheels
+--          return to straight at 10 deg/s (feed-forward gated, freeze
+--          ignored), then the normal law and rates resume. ABS alone ->
+--          NO_INCREASE as before.
+--   DSC OFF (drive mode "off" or yawControl disabled) overrides every
+--   selection: exactly like OFF. Priority: FAULT > numeric dev override >
+--   OFF / DSC OFF > NODSC neutral > launch / CENTRE / NO_INCREASE.
+--
 -- Safe states: rear wheels centre in P, with the ignition off and in the
 -- launch-control hold (3 deg/s); no motion below 1 km/h (no tyre wind-up);
 -- ABS / DSC braking -> the angle may only shrink (NO_INCREASE); a confirmed
@@ -46,7 +65,8 @@
 --     the smaller counter-phase yaw demand for oversteer. It answers nil (=
 --     stock STMEstimate in the same step) when the rear is centred, on any
 --     fault, when the live replica of STMEstimate disagrees with the real
---     one, or once the direction check has latched a negative result
+--     one, with the selection OFF or DSC OFF, or once the direction check has
+--     latched a negative result
 --     (rasDirCheck -1 rear steer direction / -2 yaw-rate sign implausible).
 --     In doubt stock: with a negative dirCheck the provider also counts as
 --     not in service (rasDse bit 256), so the feed-forward caps drop to
@@ -58,10 +78,13 @@
 --     uses the rear-steer-corrected reference. The answer is
 --     rStm + w * (rCorr - rStm); w falls to 0 within 50 ms in a slide and
 --     returns to 1 over 0.5 s after a 0.5 s hold.
---   * Optional silent yaw component (componentOrderYawControl 5, only with
---     $etk854_ras_assist = 1): requests an oversteer-only rear angle from
---     yawControl's own yaw difference (yawControl.lua:77-86) and always
---     returns false, so the DSC lamp and escActive stay untouched.
+--   * Silent yaw component (componentOrderYawControl 5): requests an
+--     oversteer-only rear angle from yawControl's own yaw difference
+--     (yawControl.lua:77-86) and always returns false, so the DSC lamp and
+--     escActive stay untouched. Registered whenever yawControl and
+--     STMEstimate are usable (independent of the jbeam defaults, so the
+--     driver can select DSC at run time); inert unless the selection is DSC
+--     (or the dev override setAssistEnabled(true)).
 --   * Both are registered only if the CMU's yawControl and STMEstimate exist
 --     and are active: a lone provider that returns nil crashes
 --     yawControl.lua:70 (measuredYaw * expectedYaw). This controller does not
@@ -104,11 +127,15 @@
 --   etk854hybrid_rasFbDeg     slewed feedback share [deg] (0 without the assist)
 --   etk854hybrid_rasGain      blended k (+ = in-phase)
 --   etk854hybrid_rasState     OFF | READY | ACTIVE | HOLD | LIMIT | FAULT
+--                             (OFF also with the selection OFF or DSC OFF,
+--                             unless a numeric dev override drives the axle)
+--   etk854hybrid_rasSel       OFF | DSC | NODSC driver selection
 --   etk854hybrid_rasMode      NORMAL | SPORT | TRAILER
 --   etk854hybrid_rasFault     none | BROKEN | SOFTWARE | CONFIG
 --   etk854hybrid_rasLimit     bits 1 FREEZE 2 CENTRE 4 FADE 8 NO_INCREASE
 --                             16 REVERSE_FADE 32 OVERRIDE 64 HARD_BRAKE
 --                             128 HALF_CAPS 256 LAUNCH_ACTIVE
+--                             512 SEL_OFF 1024 DSC_OFF 2048 DSC_NEUTRAL
 --   etk854hybrid_rasDse       bits 1 provider registered 2 component registered
 --                             4 provider answered since the last frame
 --                             8 |fb| >= 0.01 deg 16 conservative weight < 1
@@ -119,6 +146,7 @@
 --   etk854hybrid_rasDirCheck  1 | 0 | -1 | -2 direction / yaw-sign plausibility
 --                             (< 0: stock DSC reference, caps x noProviderScale)
 --
+-- Driver API: setMode("OFF"|"DSC"|"NODSC"|"ON"), getMode(), cycleMode().
 -- Dev / QA API: getState(), setOverride(nil|"OFF"|deg), setYawRefEnabled(b),
 -- setAssistEnabled(b), measureWheelAngles(), getParams().
 
@@ -254,6 +282,8 @@ local function defaults()
     freezeKmh = 1.0, freezeFullKmh = 2.0,
     reverseFadeKmh = 15, reverseMaxKmh = 20,
     centreRateDegS = 3, faultRateDegS = 5, limitRateDegS = 4, limitHoldS = 0.3,
+    -- selection NODSC: rear wheels straight while the DSC intervenes (+ hold)
+    dscNeutralRateDegS = 10, dscNeutralHoldS = 0.5,
     slide = {
       minKmh = 15, beta = 0.065, yawExcess = {dsc = 0.25, dtc = 0.35, off = 0.35},
       csYawMin = 0.15, csFrontMinDeg = 1.0, csOnS = 0.10, excessOnS = 0.05, destabOnS = 0.05,
@@ -325,12 +355,31 @@ local function parseInto(def, src, path)
   return def
 end
 
+-- driver selection: OFF | DSC | NODSC (messages per selection, cycle order)
+local SEL_TEXT = {
+  OFF = "Rear-axle steering: OFF",
+  DSC = "Rear-axle steering: ON + DSC",
+  NODSC = "Rear-axle steering: ON (no DSC steering assist)"
+}
+local SEL_NEXT = {OFF = "DSC", DSC = "NODSC", NODSC = "OFF"}
+local SEL_ALIAS = {OFF = "OFF", DSC = "DSC", NODSC = "NODSC", ON = "DSC"}
+
+-- selection at spawn from the jbeam defaults ($etk854_ras_enable / _assist)
+local function defaultSel()
+  if not CFG.enabled then return "OFF" end
+  return CFG.assist and "DSC" or "NODSC"
+end
+
 local function newState()
   local d = CFG.defaults
   local wb = d.wheelbase > 0.5 and d.wheelbase or 2.81
   local vch = d.charSpeed > 1 and d.charSpeed or 55
+  local sel = defaultSel()
   return {
+    -- enabled = jbeam default only (informational); sel is what acts
     enabled = CFG.enabled, configOK = false, mapFound = false, liveOK = false,
+    sel = sel, dscOffActive = false, rasOff = (sel == "OFF"), dscInt = false, dnT = 0, dscNeutral = false,
+    ffOn = (sel ~= "OFF"),
     hL = nil, hR = nil, whl = nil, rackScale = 1, wb = wb, invWB = 1 / wb, invSq = 1 / (vch * vch),
     override = nil, yawRefForce = nil, assistForce = nil, handBack = false, dm = nil,
     -- inputs (per frame)
@@ -376,9 +425,20 @@ local function provInService()
   return REG.provReg and not REG.off and not ((ST.dirCheck or 0) < 0)
 end
 
+-- DSC OFF in force: drive-mode key "off" or yawControl disabled
+local function dscOffNow()
+  return ST.dscKey == "off" or ST.dscOn == false
+end
+
+-- rear axle held straight: driver selection OFF or DSC OFF
+local function rasOffNow()
+  return ST.sel == "OFF" or dscOffNow()
+end
+
+-- feedback armed: dev override if set, else the selection DSC
 local function assistOn()
   if ST.assistForce ~= nil then return ST.assistForce end
-  return CFG.assist
+  return ST.sel == "DSC"
 end
 
 local function faultName()
@@ -431,6 +491,7 @@ local function provCore(dt)
     g.w = min(1, g.w + dt / yr.consUpS)
   end
   if s.fault ~= "none" or not s.configOK or s.yawRefForce == false or not g.ycPresent then return nil end
+  if rasOffNow() then return nil end -- selection OFF / DSC OFF: stock
   if (s.dirCheck or 0) < 0 then return nil end -- direction check negative: stock (in doubt stock)
   if abs(g.drRef) < yr.minDeg then return nil end -- stock, bit-identical
   local cmu = g.cmu
@@ -496,7 +557,7 @@ local function compCore(r, yd)
   local s, c, g = ST, CFG, REG
   g.compCalls = g.compCalls + 1
   local key = s.dscKey
-  if not (assistOn() and s.dscOn and key ~= "off") then
+  if not assistOn() or rasOffNow() then -- inert unless selection DSC, never with DSC OFF
     s.fbReqDeg = 0
     return
   end
@@ -616,9 +677,23 @@ local function readInputs(dt)
   s.absOn = flag(ev.etk854hybrid_absQualified) or (flag(ev.absActive) and s.brake > 0.1)
   s.dscAct = flag(ev.isYCBrakeActive) or flag(ev.escActive)
   s.tcsOn = flag(ev.tcsActive)
+  s.dscInt = s.dscAct or s.tcsOn or flag(ev.isTCBrakeActive) -- "DSC intervenes" (NODSC neutral)
   local ls = ev.etk854hybrid_launchState
   s.launchHold = ls == "ARMED" or ls == "READY"
   s.launchActive = ls == "ACTIVE"
+end
+
+-- 2: driver selection and DSC state: OFF / DSC OFF hold the axle straight;
+-- NODSC goes straight while the DSC intervenes and dscNeutralHoldS after its
+-- last frame; the feed-forward is gated in both cases (it ramps back at its
+-- own rate afterwards)
+local function selStep(dt)
+  local s = ST
+  s.dscOffActive = dscOffNow()
+  s.rasOff = s.sel == "OFF" or s.dscOffActive
+  if s.dscInt then s.dnT = CFG.dscNeutralHoldS else s.dnT = max(0, s.dnT - dt) end
+  s.dscNeutral = s.sel == "NODSC" and not s.rasOff and (s.dscInt or s.dnT > 0)
+  s.ffOn = not (s.rasOff or s.dscNeutral)
 end
 
 -- 2: calibration set and 1 s cross-fade
@@ -717,10 +792,19 @@ local function slideStep(dt)
 end
 
 -- 6a: feed-forward slew
+-- While gated the feed-forward goes to 0 no faster than the gate centres the
+-- command (limitStep), so ffOut stays with cmd and a short gate (DSC key
+-- passing OFF, OFF -> ON in the app) resumes bumpless: no swing of cmd
+-- toward 0 and back out.
 local function ffSlewStep(dt)
-  local s = ST
-  s.ffTargetDeg = s.gFF * s.ffBlend
-  local rate = s.fade and CFG.slide.fadeRateDegS or s.rateFF
+  local s, c = ST, CFG
+  s.ffTargetDeg = s.ffOn and s.gFF * s.ffBlend or 0 -- gated: selection OFF / DSC OFF / NODSC neutral
+  local rate = s.fade and c.slide.fadeRateDegS or s.rateFF
+  if s.rasOff then
+    rate = min(rate, c.centreRateDegS)
+  elseif s.dscNeutral then
+    rate = min(rate, c.dscNeutralRateDegS)
+  end
   s.ffOut = slew(s.ffOut, s.ffTargetDeg, rate * dt)
 end
 
@@ -734,6 +818,7 @@ local function fbGfxStep(dt)
     and (not fb.requireDirCheck or s.dirCheck == 1) and not s.reverse and s.kmh >= fb.minKmh
     and not s.fadeByCs and not betaGate and not s.launchHold and not s.launchActive
     and not s.park and not s.ignOff and s.fault == "none" and s.override == nil
+    and not s.rasOff and not s.dscNeutral
     and cmu ~= nil and cmu.systemState == "normal"
   s.fbAllowed = allowed and true or false
   local tgt = 0
@@ -751,7 +836,7 @@ local function limitStep(dt)
   if raw ~= raw or raw == huge or raw == -huge then error("non-finite rear steer target") end
   local tgt, rate, freeze = clamp(raw, -tm, tm), c.totalRateDegS, true
   local bits = 0
-  if not s.enabled or s.override == "OFF" then tgt = 0 end
+  if s.override == "OFF" then tgt = 0 end
   if s.launchActive then
     tgt = 0
     bits = bits + 256
@@ -773,6 +858,16 @@ local function limitStep(dt)
     rate = min(rate, c.limitRateDegS)
     bits = bits + 8
   end
+  -- selection NODSC: straight while the DSC intervenes (+ hold), freeze ignored
+  if s.dscNeutral then
+    tgt, rate, freeze = 0, c.dscNeutralRateDegS, false
+    bits = bits + 2048
+  end
+  -- selection OFF / DSC OFF: straight at the centring rate, freeze ignored
+  if s.sel == "OFF" then bits = bits + 512 end
+  if s.dscOffActive then bits = bits + 1024 end
+  if s.rasOff then tgt, rate, freeze = 0, c.centreRateDegS, false end
+  -- a numeric dev override wins over the selection / DSC states (QA), FAULT over everything
   local ov = s.override
   if type(ov) == "number" then tgt, rate, freeze = clamp(ov, -tm, tm), c.rateDegS[s.mode], false end
   if ov ~= nil then bits = bits + 32 end
@@ -915,8 +1010,9 @@ end
 local function stateName()
   local s = ST
   if s.fault ~= "none" then return "FAULT" end
-  if not s.configOK or not s.enabled then return "OFF" end
-  if s.fade or s.noIncrease then return "LIMIT" end
+  if not s.configOK then return "OFF" end
+  if s.rasOff and type(s.override) ~= "number" then return "OFF" end -- selection OFF / DSC OFF
+  if s.fade or s.noIncrease or s.dscNeutral then return "LIMIT" end
   local big = abs(s.cmdDeg) >= 0.05
   if s.freezeOn and big then return "HOLD" end
   if big then return "ACTIVE" end
@@ -947,6 +1043,7 @@ local function publish()
   ev.etk854hybrid_rasFbDeg = fin(s.fbOut)
   ev.etk854hybrid_rasGain = fin(s.k)
   ev.etk854hybrid_rasState = stateName()
+  ev.etk854hybrid_rasSel = s.sel
   ev.etk854hybrid_rasMode = s.mode
   ev.etk854hybrid_rasFault = faultName()
   ev.etk854hybrid_rasLimit = s.limitBits
@@ -965,6 +1062,7 @@ local function publishOff()
   ev.etk854hybrid_rasFbDeg = 0
   ev.etk854hybrid_rasGain = 0
   ev.etk854hybrid_rasState = "OFF"
+  ev.etk854hybrid_rasSel = ST.sel
   ev.etk854hybrid_rasMode = ST.mode or "NORMAL"
   ev.etk854hybrid_rasFault = "CONFIG"
   ev.etk854hybrid_rasLimit = 0
@@ -982,6 +1080,7 @@ local function core(dt)
   if not (dt > 0) then return end
   healthStep(dt)       -- 1
   readInputs(dt)       -- 2
+  selStep(dt)
   modeStep(dt)
   frontStep(dt)        -- 3
   ffStep()             -- 4
@@ -1008,6 +1107,7 @@ local function faultCore(dt)
   ev.etk854hybrid_rasCmd = clamp(x / c.actuatorDegPerUnit, -1, 1)
   ev.etk854hybrid_rasState = "FAULT"
   ev.etk854hybrid_rasFault = s.fault
+  ev.etk854hybrid_rasSel = s.sel
 end
 
 -- secondary channels in the fault path (a failure here is ignored)
@@ -1128,9 +1228,11 @@ end
 
 -- discovery + registration (CMU 50 -> yawControl 60 -> STMEstimate 80 -> us 87;
 -- yawControl sorts providers / components only in its initLastStage)
+-- $etk854_ras_enable / _assist are only the selection at spawn: the hooks are
+-- registered regardless, so the driver can switch at run time
 local function discover()
   local s, c, g = ST, CFG, REG
-  if not s.enabled or not s.mapFound then return end
+  if not s.mapFound then return end
   local list = controller.getControllersByType("drivingDynamics/CMU")
   local cmu = (type(list) == "table" and list[1]) or controller.getController("CMU")
   local yc = cmu and cmu.getSupervisor and cmu.getSupervisor("yawControl")
@@ -1145,7 +1247,7 @@ local function discover()
       g.provReg = true
       g.provCount = g.provCount + 1
     end
-    if g.maxLat and c.assist and not g.compReg then
+    if g.maxLat and not g.compReg then -- inert unless assistOn() (selection DSC)
       yc.registerComponent(COMP)
       g.compReg = true
       g.compCount = g.compCount + 1
@@ -1220,9 +1322,9 @@ local function initLastStage(jbeamData)
   if g.cmu and (g.cmu.systemState == "offline" or not (g.yc and g.yc.isActive == true)) then g.ycPresent = false end
   if s.configOK then
     log("I", "etk854hybrid_rearSteer", string.format(
-      "rear-axle steering ready: toe=%.4f F=%.4f deg/unit=%.2f rack=%.3f yawRef=%s comp=%s assist=%s mode=%s",
+      "rear-axle steering ready: toe=%.4f F=%.4f deg/unit=%.2f rack=%.3f yawRef=%s comp=%s sel=%s (default %s) mode=%s",
       num(s.hL.cOut, CFG.toeRatio), CFG.linkRatioPerUnit, CFG.actuatorDegPerUnit, s.rackScale,
-      tostring(g.provReg), tostring(g.compReg), tostring(CFG.assist), s.mode))
+      tostring(g.provReg), tostring(g.compReg), tostring(s.sel), defaultSel(), s.mode))
   end
   electrics.values.etk854hybrid_rasCmd = 0
   publishAny()
@@ -1240,8 +1342,9 @@ local function reset(jbeamData)
   s.fault, s.swFault, s.swErr, s.handBack, s.msgShown = "none", false, nil, false, false
   s.modePrev, s.blendW = s.mode, 1
   s.uPrev, s.uRate = nil, huge
+  s.dnT, s.dscNeutral = 0, false
   s.dcN, s.dcT = 0, 0 -- open window discarded; the latch is a hardware property
-  -- kept: override, yawRefForce, assistForce, dirCheck, configOK, mapFound
+  -- kept: sel (driver selection), override, yawRefForce, assistForce, dirCheck, configOK, mapFound
   g.drRef, g.w, g.mismatch, g.answered = 0, 1, 0, false
   -- kept: provReg, compReg, the counts and the off latches (never re-register)
   electrics.values.etk854hybrid_rasCmd = 0
@@ -1292,6 +1395,7 @@ local function getState()
   end
   return {
     enabled = s.enabled, configOK = s.configOK, state = s.swFault and "FAULT" or stateName(), fault = faultName(),
+    sel = s.sel, dscOffActive = s.dscOffActive, dscNeutral = s.dscNeutral,
     mode = s.mode, modePrev = s.modePrev, blendW = s.blendW, dscKey = s.dscKey, dscOn = s.dscOn,
     kmh = s.kmh, reverse = s.reverse, u = s.u, dfDeg = s.dfModel, k = s.k,
     ffTargetDeg = s.ffTargetDeg, ffOutDeg = s.ffOut, fbReqDeg = s.fbReqDeg, fbOutDeg = s.fbOut,
@@ -1333,10 +1437,52 @@ local function setYawRefEnabled(b)
   return ST.yawRefForce
 end
 
--- runtime A/B of the feedback (only effective with the component registered)
+-- runtime A/B of the feedback (only effective with the component registered);
+-- nil = follow the driver selection (DSC arms it)
 local function setAssistEnabled(b)
   if b == true or b == false then ST.assistForce = b else ST.assistForce = nil end
   return (assistOn() and REG.compReg) and true or false
+end
+
+-- ---------------------------------------------------------------------------
+-- driver selection (Actions app row R-STEER)
+-- ---------------------------------------------------------------------------
+
+local function selMessage()
+  local txt = SEL_TEXT[ST.sel]
+  local ok, key = pcall(dscKeyOf) -- fresh: the UI may call between frames
+  if (ok and key == "off") or ST.dscOn == false then txt = txt .. " - inactive while DSC OFF" end
+  guihooks.message(txt, 3, "vehicle.etk854hybrid.ras")
+end
+
+-- "OFF" | "DSC" | "NODSC" (case-insensitive, "ON" = "DSC"); anything else
+-- changes nothing. One message per actual change. Returns the selection in
+-- force. Survives a vehicle reset; serialised across a reload.
+local function setMode(x)
+  local sel = (type(x) == "string") and SEL_ALIAS[x:upper()] or nil
+  if sel and sel ~= ST.sel then
+    ST.sel = sel
+    pcall(selMessage)
+  end
+  return ST.sel
+end
+
+local function getMode()
+  return ST.sel
+end
+
+-- OFF -> DSC -> NODSC -> OFF
+local function cycleMode()
+  return setMode(SEL_NEXT[ST.sel] or "DSC")
+end
+
+-- vehicle state serialisation (controller.lua onSerialize / onDeserialize)
+local function serialize()
+  return {sel = ST.sel}
+end
+
+local function deserialize(data)
+  if type(data) == "table" and type(data.sel) == "string" and SEL_TEXT[data.sel] then ST.sel = data.sel end
 end
 
 -- signed road-wheel angles [deg, + = wheel heading rotated RIGHT]; dev / QA
@@ -1370,8 +1516,9 @@ local function getParams()
   p.F = CFG.linkRatioPerUnit
   p.degPerUnit = CFG.actuatorDegPerUnit
   p.rackScale = ST.rackScale
-  p.assist = CFG.assist
+  p.assist = CFG.assist   -- jbeam default (selection at spawn), not the live state
   p.enabled = CFG.enabled
+  p.defaultSel = defaultSel()
   return p
 end
 
@@ -1381,6 +1528,12 @@ M.initLastStage = initLastStage
 M.reset = reset
 M.resetLastStage = resetLastStage
 M.updateGFX = updateGFX
+M.serialize = serialize
+M.deserialize = deserialize
+
+M.setMode = setMode
+M.getMode = getMode
+M.cycleMode = cycleMode
 
 M.getState = getState
 M.setOverride = setOverride
