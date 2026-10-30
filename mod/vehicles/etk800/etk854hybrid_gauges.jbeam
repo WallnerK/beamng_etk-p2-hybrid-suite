@@ -2,83 +2,38 @@
 // =============================================================================
 //  ETK 854 ActiveHybrid - cockpit displays (instrument cluster + centre screen)
 // =============================================================================
-//  Documentation: plans/PLAN_COCKPIT_VISUALISIERUNG.md
-//
 //  INSTRUMENT CLUSTER (slot "skin_gauges")
-//  ---------------------------------------
-//  The stock ETK 800 dash (etk800_interior.jbeam, parts etk800_dash*) declares
-//  the base-game controller gauges/genericGauges named "gauge", its
-//  "gauge" section (configuration + displayData) and the core slot
-//  "skin_gauges" (default etk800_gauges_imperial). The skin parts in
-//  etk800_gauges.jbeam only add gauge.configuration_units, the needle props
-//  and the dial-face skinName.
-//
-//  The parts below replace such a skin part:
-//    * skinName      = the stock dial face (metric / metric_diesel /
-//                      imperial / imperial_diesel) - no new textures
-//    * gauge.configuration_units      same as the stock skin part
-//    * gauge.configuration_etk854hybrid
-//                      points the existing web view "@etk800_gauges_screen"
-//                      (same material, same 512x256 size, same opacity mask)
-//                      at our page. genericGauges merges every
-//                      "configuration_*" key over "configuration"
-//                      (genericGauges.lua:165-173); the keys do not overlap
-//                      with configuration_units, so the pairs() order does
-//                      not matter.
-//    * gauge.displayData
-//                      REPLACES the dash's displayData completely (jbeam
-//                      merges a dict section key by key, the child part wins:
-//                      slotSystem.lua:119-158), so it lists everything our
-//                      page reads.
-//      The air channels (etk854hybrid_air*, trailerSpringCoef, parkingbrake)
-//      come from etk854hybrid_airCompressor (trunk compressor load part);
-//      without that part they arrive as 0 and the AIR chip stays hidden
-//      (etk854hybrid_airTrlValve 0 = trailer protection valve shut: amber
-//      outline on the plain AIR chip).
-//      ECO PRO pedal map v3 (etk854hybridControl.lua mapPedal / load
-//      integral): etk854hybrid_pedalZone / _pedalEvFrac / _pedalBandFrac /
-//      _pedalIceJoin / _evZoneOpen / _iceDeficitS / _iceDeficitOnS drive
-//      the demand caret outside the power-meter arc (ECO PRO + AUTO EV)
-//      and grey the EV zone above the ECO EV speed ceiling.
-//      customModules "fuel" = the on-board computer (tank litres, fuel range,
-//      instantaneous / trip-average consumption, electric average), header
-//      item 10 of etk854hybrid_gaugeData.lua.
-//    * controller    appends the custom module
-//                      gauges/customModules/etk854hybrid_gaugeData. NO custom
-//                      "name": genericGauges looks it up as
-//                      getController("gauges/customModules/<moduleName>").
-//                      Row options (see the module header):
-//                        gearStyle "number" -> D1..D8 (engaged gear),
-//                                  "plain"  -> D without number;
-//                                  both: P/R/N plain, S<n>/M<n> with number
-//                        lampTfMax / lampOnS / lampHoldS  qualified DSC lamp
-//                        dseIceK0Gate  ICE traction-control group sees no
-//                                  throttle while K0 is open
-//                        dseStockLampQualified  stock ESC / TCS dial decals
-//                                  (electrics esc / tcs) follow the qualified
-//                                  lamp instead of every raw DSE didAct
-//                        gearHintOnS / gearHintOnManualS / gearHintOffS
-//                                  debounce of the OEM-style shift
-//                                  recommendation (etk854hybrid_gearHint:
-//                                  triangle + gear next to the engaged gear;
-//                                  defaults 0.25 / 0.10 / 0.20 s)
-//    * props         the four stock needles. The rev counter needle reads
-//                      etk854hybrid_tachoRpm (written by the module) instead
-//                      of rpm, so it can rest on the READY / OFF bracket that
-//                      the stock dial face already prints below 0 rpm:
-//                      0 = READY, -500 = OFF (min lowered from 0 to -500).
-//                      Everything else is a 1:1 copy of etk800_gauges.jbeam.
+//  The stock dash declares the genericGauges controller "gauge" and its section;
+//  these parts take the place of a stock skin part:
+//    * skinName        stock dial face, no new textures
+//    * gauge.configuration_units   as in the stock skin part
+//    * gauge.configuration_etk854hybrid   points the stock web view
+//                      "@etk800_gauges_screen" at our page (genericGauges merges
+//                      every configuration_* key over "configuration")
+//    * gauge.displayData   REPLACES the dash's displayData (dict sections merge
+//                      key by key): it lists every channel the page reads in game.
+//                      Channels of missing optional parts arrive as 0 (air ->
+//                      no AIR chip, clusterView -> HYBRID view); pedal* /
+//                      evZoneOpen / iceDeficitS drive the ECO PRO demand caret;
+//                      customModules "fuel" = on-board computer.
+//    * controller      custom module etk854hybrid_gaugeData without a custom
+//                      "name" (genericGauges resolves it by path). Row options
+//                      (rest: see the module): gearStyle "number" (D1..D8) |
+//                      "plain" (D); lampTfMax / lampOnS / lampHoldS qualified DSC
+//                      lamp; dseIceK0Gate no ICE TC trim with K0 open;
+//                      dseStockLampQualified stock ESC / TCS decals follow it
+//    * props           the four stock needles; the rev counter reads
+//                      etk854hybrid_tachoRpm (min -500) to rest on the READY (0)
+//                      / OFF (-500) marks the dial face prints below 0 rpm
 //
 //  CENTRE SCREEN (slot "gps", empty in the stock dash)
-//  --------------------------------------------------
-//  etk854hybrid_navi_energyflow re-targets the dash's own beamNavigator
-//  controller "etk800_navi" through a top-level section of the same name
-//  (controller.lua:499: tableMergeRecursive(row, v.data[name])): our page,
-//  512x256 instead of 256x128. etk854hybrid_screenData streams the hybrid
-//  state into that web view. Leaving the slot empty restores the stock map.
-//
-//  Nothing here overrides a base-game file; every new name is prefixed
-//  etk854hybrid_.
+//  etk854hybrid_navi_energyflow re-targets the dash's beamNavigator "etk800_navi"
+//  through a top-level section of the same name (our page, 512x256);
+//  etk854hybrid_screenData streams the data. An empty slot restores the stock map.
+//  etk854hybrid_cockpitPanel owns the views (centre ENERGY / MAP / TRAILER + MENU
+//  panel, cluster view with AUTO = driving experience). Inputs: 26 touch boxes
+//  over the glass, the etk854hybrid_cd* / _clusterViewNext actions (default keys
+//  in inputmaps/keyboard_etk854hybrid.json) and the DISPLAY row of the Actions app.
 // =============================================================================
 
 "etk854hybrid_gauges": {
@@ -109,16 +64,17 @@
                 "etk854hybrid_iceEngageState", "etk854hybrid_k0ClutchRatio",
                 "etk854hybrid_regenLevel", "etk854hybrid_onePedalHold", "etk854hybrid_boostStage",
                 "etk854hybrid_shiftProgram", "etk854hybrid_evAvailable", "etk854hybrid_evPowerFraction",
-                "etk854hybrid_sailActive", "etk854hybrid_chargeMode",
+                "etk854hybrid_sailActive",
                 "etk854hybrid_awdMode", "etk854hybrid_trailerMode", "etk854hybrid_levelState",
-                "etk854hybrid_dscMode", "etk854hybrid_tcActive", "etk854hybrid_fanStage",
+                "etk854hybrid_dscMode", "etk854hybrid_fanStage",
                 "etk854hybrid_dscLamp", "etk854hybrid_gearActual", "etk854hybrid_gearHint",
                 "etk854hybrid_airState", "etk854hybrid_airPressureBar", "etk854hybrid_airCompressor",
                 "etk854hybrid_airInhibit", "etk854hybrid_airTrailer", "etk854hybrid_trailerSpringCoef",
                 "etk854hybrid_airTrlValve", "parkingbrake",
                 "etk854hybrid_pedalZone", "etk854hybrid_pedalEvFrac", "etk854hybrid_pedalBandFrac",
                 "etk854hybrid_pedalIceJoin", "etk854hybrid_evZoneOpen",
-                "etk854hybrid_iceDeficitS", "etk854hybrid_iceDeficitOnS"
+                "etk854hybrid_iceDeficitS",
+                "etk854hybrid_clusterView"
             ],
             "powertrain": [
                 ["deviceName", "property"]
@@ -177,16 +133,17 @@
                 "etk854hybrid_iceEngageState", "etk854hybrid_k0ClutchRatio",
                 "etk854hybrid_regenLevel", "etk854hybrid_onePedalHold", "etk854hybrid_boostStage",
                 "etk854hybrid_shiftProgram", "etk854hybrid_evAvailable", "etk854hybrid_evPowerFraction",
-                "etk854hybrid_sailActive", "etk854hybrid_chargeMode",
+                "etk854hybrid_sailActive",
                 "etk854hybrid_awdMode", "etk854hybrid_trailerMode", "etk854hybrid_levelState",
-                "etk854hybrid_dscMode", "etk854hybrid_tcActive", "etk854hybrid_fanStage",
+                "etk854hybrid_dscMode", "etk854hybrid_fanStage",
                 "etk854hybrid_dscLamp", "etk854hybrid_gearActual", "etk854hybrid_gearHint",
                 "etk854hybrid_airState", "etk854hybrid_airPressureBar", "etk854hybrid_airCompressor",
                 "etk854hybrid_airInhibit", "etk854hybrid_airTrailer", "etk854hybrid_trailerSpringCoef",
                 "etk854hybrid_airTrlValve", "parkingbrake",
                 "etk854hybrid_pedalZone", "etk854hybrid_pedalEvFrac", "etk854hybrid_pedalBandFrac",
                 "etk854hybrid_pedalIceJoin", "etk854hybrid_evZoneOpen",
-                "etk854hybrid_iceDeficitS", "etk854hybrid_iceDeficitOnS"
+                "etk854hybrid_iceDeficitS",
+                "etk854hybrid_clusterView"
             ],
             "powertrain": [
                 ["deviceName", "property"]
@@ -245,16 +202,17 @@
                 "etk854hybrid_iceEngageState", "etk854hybrid_k0ClutchRatio",
                 "etk854hybrid_regenLevel", "etk854hybrid_onePedalHold", "etk854hybrid_boostStage",
                 "etk854hybrid_shiftProgram", "etk854hybrid_evAvailable", "etk854hybrid_evPowerFraction",
-                "etk854hybrid_sailActive", "etk854hybrid_chargeMode",
+                "etk854hybrid_sailActive",
                 "etk854hybrid_awdMode", "etk854hybrid_trailerMode", "etk854hybrid_levelState",
-                "etk854hybrid_dscMode", "etk854hybrid_tcActive", "etk854hybrid_fanStage",
+                "etk854hybrid_dscMode", "etk854hybrid_fanStage",
                 "etk854hybrid_dscLamp", "etk854hybrid_gearActual", "etk854hybrid_gearHint",
                 "etk854hybrid_airState", "etk854hybrid_airPressureBar", "etk854hybrid_airCompressor",
                 "etk854hybrid_airInhibit", "etk854hybrid_airTrailer", "etk854hybrid_trailerSpringCoef",
                 "etk854hybrid_airTrlValve", "parkingbrake",
                 "etk854hybrid_pedalZone", "etk854hybrid_pedalEvFrac", "etk854hybrid_pedalBandFrac",
                 "etk854hybrid_pedalIceJoin", "etk854hybrid_evZoneOpen",
-                "etk854hybrid_iceDeficitS", "etk854hybrid_iceDeficitOnS"
+                "etk854hybrid_iceDeficitS",
+                "etk854hybrid_clusterView"
             ],
             "powertrain": [
                 ["deviceName", "property"]
@@ -313,16 +271,17 @@
                 "etk854hybrid_iceEngageState", "etk854hybrid_k0ClutchRatio",
                 "etk854hybrid_regenLevel", "etk854hybrid_onePedalHold", "etk854hybrid_boostStage",
                 "etk854hybrid_shiftProgram", "etk854hybrid_evAvailable", "etk854hybrid_evPowerFraction",
-                "etk854hybrid_sailActive", "etk854hybrid_chargeMode",
+                "etk854hybrid_sailActive",
                 "etk854hybrid_awdMode", "etk854hybrid_trailerMode", "etk854hybrid_levelState",
-                "etk854hybrid_dscMode", "etk854hybrid_tcActive", "etk854hybrid_fanStage",
+                "etk854hybrid_dscMode", "etk854hybrid_fanStage",
                 "etk854hybrid_dscLamp", "etk854hybrid_gearActual", "etk854hybrid_gearHint",
                 "etk854hybrid_airState", "etk854hybrid_airPressureBar", "etk854hybrid_airCompressor",
                 "etk854hybrid_airInhibit", "etk854hybrid_airTrailer", "etk854hybrid_trailerSpringCoef",
                 "etk854hybrid_airTrlValve", "parkingbrake",
                 "etk854hybrid_pedalZone", "etk854hybrid_pedalEvFrac", "etk854hybrid_pedalBandFrac",
                 "etk854hybrid_pedalIceJoin", "etk854hybrid_evZoneOpen",
-                "etk854hybrid_iceDeficitS", "etk854hybrid_iceDeficitOnS"
+                "etk854hybrid_iceDeficitS",
+                "etk854hybrid_clusterView"
             ],
             "powertrain": [
                 ["deviceName", "property"]
@@ -357,7 +316,7 @@
     "information":{
         "authors":"Deuflhard",
         "name":"ActiveHybrid Center Display: Energy Flow",
-        "description":"Replaces the map on the center display with an ActiveHybrid page: animated energy flow (engine, K0, e-machine, transmission, axles, battery), state of charge, EV range, power readings and consumption history. Leave the slot empty for the stock navigation.",
+        "description":"Replaces the map on the center display with an ActiveHybrid page: animated energy flow (engine, K0, e-machine, transmission, axles, battery), state of charge, EV range, power readings and consumption history. Selectable views (energy flow, map, trailer) and an on-screen settings panel, operated by touch (click on the display) or by controller keys. Leave the slot empty for the stock navigation.",
         "value":400
     },
     "slotType" : "gps",
@@ -370,7 +329,141 @@
     },
     "controller": [
         ["fileName"],
-        ["etk854hybrid_screenData", {"name": "etk854hybrid_screenData", "screenTag": "@etk800_screen", "rateHz": 15}]
+        ["etk854hybrid_screenData", {"name": "etk854hybrid_screenData", "screenTag": "@etk800_screen", "rateHz": 15}],
+        // cockpit panel (all keys optional, values = defaults). In the trigger
+        // frame below: screenTL = top-left glass corner, screenW / screenH =
+        // page x / y edge vectors; touchRay maps a hit to page px with them.
+        ["etk854hybrid_cockpitPanel", {"name": "etk854hybrid_cockpitPanel", "screenTag": "@etk800_screen",
+            "menuTimeoutS": 30, "keepaliveS": 1.0, "pushHz": 15, "clusterViewDefault": "AUTO", "centreViewDefault": "ENERGY",
+            "frameNodes": ["dsh2", "dsh2l", "dsh1"],
+            "screenTL": {"x": 0.11499, "y": 0.17887, "z": 0.01332},
+            "screenW": {"x": -0.18240, "y": -0.00911, "z": 0.02417},
+            "screenH": {"x": 0.00238, "y": -0.08026, "z": 0.00452},
+            "pageW": 512, "pageH": 256}]
+    ],
+    // Touch surface: one thin box per button slot of the panel grid (K.grid in
+    // etk854hybrid_cockpitPanel.lua): hyb_cdClose, hyb_cdTab1..5, hyb_cdB11..B45.
+    // A box only catches the click and shows the hover highlight; the page point
+    // comes from the camera ray (etk854hybrid_cdTouch -> cockpitPanel.touchRay).
+    // Unused slots of a tab hit nothing; with the panel closed any slot opens it.
+    // Frame (as core/vehicle/triggerLabelPlacement.lua, stock dash nodes):
+    //   nx = norm(dsh2l - dsh2)              +X = driver's left
+    //   nz = norm(cross(dsh1 - dsh2, nx))    towards the cabin
+    //   up = cross(nx, nz)
+    //   baseTranslation (x/nx, y/up, z/nz) is the MIN corner; size x = width
+    //   along nx, y = depth along nz, z = height along up.
+    // Generated rows: run  python tools/etk854hybrid_cockpit_slots.py --write
+    // after changing K.grid or screenTL / screenW / screenH (--check verifies).
+    // Boxes are the slot rects inset by 1 px and stay clear of other slots with
+    // the head moved up to 10 cm (the glass is rolled and yawed against the
+    // frame, hence the 10 px gap between the tabs); none overlaps another box or
+    // the stock dash triggers.
+    // Colour row before, "" after: slotSystem appends the rows of later parts to
+    // this table, and a colour left set would tint their triggers too (the ""
+    // row is dropped before the triggers are built).
+    "triggers2":[
+        ["id", "idRef:", "idX:", "idY:", "type", "size", "baseRotation", "rotation", "translation", "baseTranslation"],
+        {"color":[0.55, 0.78, 1.0, 0.10]},
+        // >>> etk854hybrid_cockpit_slots: triggers (generated, do not edit by hand)
+        ["hyb_cdClose", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02512, "y":0.00566, "z":0.00752}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":-0.06416, "y":0.16208, "z":0.03285}],
+        ["hyb_cdTab1", "dsh2", "dsh2l", "dsh1", "box", {"x":0.03876, "y":0.00765, "z":0.01164}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0.07365, "y":0.15547, "z":0.01340}],
+        ["hyb_cdTab2", "dsh2", "dsh2l", "dsh1", "box", {"x":0.03876, "y":0.00765, "z":0.01164}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0.07405, "y":0.14199, "z":0.01416}],
+        ["hyb_cdTab3", "dsh2", "dsh2l", "dsh1", "box", {"x":0.03876, "y":0.00765, "z":0.01164}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0.07445, "y":0.12851, "z":0.01492}],
+        ["hyb_cdTab4", "dsh2", "dsh2l", "dsh1", "box", {"x":0.03876, "y":0.00765, "z":0.01164}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0.07485, "y":0.11503, "z":0.01568}],
+        ["hyb_cdTab5", "dsh2", "dsh2l", "dsh1", "box", {"x":0.03876, "y":0.00765, "z":0.01164}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0.07525, "y":0.10154, "z":0.01644}],
+        ["hyb_cdB11", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0.04353, "y":0.14957, "z":0.01955}],
+        ["hyb_cdB12", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0.01681, "y":0.14823, "z":0.02309}],
+        ["hyb_cdB13", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":-0.00991, "y":0.14690, "z":0.02663}],
+        ["hyb_cdB14", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":-0.03663, "y":0.14556, "z":0.03017}],
+        ["hyb_cdB15", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":-0.06335, "y":0.14423, "z":0.03371}],
+        ["hyb_cdB21", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0.04402, "y":0.13295, "z":0.02049}],
+        ["hyb_cdB22", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0.01730, "y":0.13162, "z":0.02403}],
+        ["hyb_cdB23", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":-0.00942, "y":0.13028, "z":0.02757}],
+        ["hyb_cdB24", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":-0.03613, "y":0.12895, "z":0.03111}],
+        ["hyb_cdB25", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":-0.06285, "y":0.12761, "z":0.03465}],
+        ["hyb_cdB31", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0.04451, "y":0.11633, "z":0.02142}],
+        ["hyb_cdB32", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0.01780, "y":0.11500, "z":0.02496}],
+        ["hyb_cdB33", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":-0.00892, "y":0.11367, "z":0.02850}],
+        ["hyb_cdB34", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":-0.03564, "y":0.11233, "z":0.03205}],
+        ["hyb_cdB35", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":-0.06236, "y":0.11100, "z":0.03559}],
+        ["hyb_cdB41", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0.04501, "y":0.09972, "z":0.02236}],
+        ["hyb_cdB42", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0.01829, "y":0.09838, "z":0.02590}],
+        ["hyb_cdB43", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":-0.00843, "y":0.09705, "z":0.02944}],
+        ["hyb_cdB44", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":-0.03515, "y":0.09572, "z":0.03298}],
+        ["hyb_cdB45", "dsh2", "dsh2l", "dsh1", "box", {"x":0.02484, "y":0.00575, "z":0.01001}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":0, "y":0, "z":0}, {"x":-0.06187, "y":0.09438, "z":0.03652}],
+        // <<< etk854hybrid_cockpit_slots: triggers
+        {"color":""}
+    ],
+    // left click = touch at the clicked page point, middle click = back
+    "triggerEventLinks2":[
+        ["triggerId:triggers2", "triggerInput", "inputAction"],
+        // >>> etk854hybrid_cockpit_slots: links (generated, do not edit by hand)
+        ["hyb_cdClose", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdClose", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdTab1", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdTab1", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdTab2", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdTab2", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdTab3", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdTab3", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdTab4", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdTab4", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdTab5", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdTab5", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB11", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB11", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB12", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB12", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB13", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB13", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB14", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB14", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB15", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB15", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB21", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB21", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB22", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB22", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB23", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB23", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB24", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB24", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB25", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB25", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB31", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB31", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB32", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB32", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB33", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB33", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB34", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB34", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB35", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB35", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB41", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB41", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB42", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB42", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB43", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB43", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB44", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB44", "action2", "etk854hybrid_cdBack"],
+        ["hyb_cdB45", "action0", "etk854hybrid_cdTouch"],
+        ["hyb_cdB45", "action2", "etk854hybrid_cdBack"]
+        // <<< etk854hybrid_cockpit_slots: links
+    ],
+    // actions of the panel (etk854hybrid.interaction.json); key bindings of
+    // vehicle actions that are not listed here are ignored
+    "actionsEnabled": [
+        ["id"],
+        ["etk854hybrid_cdMenu"],
+        ["etk854hybrid_cdPrev"],
+        ["etk854hybrid_cdNext"],
+        ["etk854hybrid_cdPress"],
+        ["etk854hybrid_cdBack"],
+        ["etk854hybrid_cdViewNext"],
+        ["etk854hybrid_clusterViewNext"],
+        ["etk854hybrid_cdTouch"]
     ]
 }
 }

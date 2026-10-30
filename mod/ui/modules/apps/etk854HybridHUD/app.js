@@ -1,63 +1,19 @@
-// ETK 854 ActiveHybrid - Hybrid Cockpit HUD
+// ETK 854 ActiveHybrid - Hybrid Cockpit HUD (BeamNG.drive 0.39.4)
 // =========================================================================
-// Target: BeamNG.drive 0.39.4
+// AngularJS directive: 0.39 still mounts app.js apps through the Vue AppHost
+// and broadcasts "streamsUpdate"; a Vue app would need the vite build chain.
+// Rendering: exactly one root <svg>, `replace: true`; presentation attributes
+// only (no <style>, classes or assets), so the global UI CSS cannot interfere.
+// The host owns position and size, the viewBox does the scaling.
 //
-// Format decision (verified against the shipped 0.39.4 install):
-//   AngularJS `app.js` apps are still fully supported. `lua/ge/extensions/ui/
-//   apps.lua` builds the catalogue from `app.json` and sets
-//   `jsSource = <dir>/app.js`; `ui-vue/src/modules/apps/components/AppHost.vue`
-//   picks renderer "angular" whenever `hasAppJs || directive` is set and mounts
-//   it through `window.UIAppsServiceShim.mountDirective()` (see
-//   `ui/modules/apps/app-service.js`). Vue apps need `app.vue` + the vite build
-//   chain (`@/bridge` imports), which a shipped mod cannot provide.
-//
-//   Streams still reach Angular: `ui-vue/src/bridge/libs/StreamHooks.js` does
-//   `window.globalAngularRootScope.$broadcast("streamsUpdate", ...)`, and
-//   `window.StreamsManager = window.bridge.streams` (ui/lib/int/vueService.js).
-//
-// Rendering notes:
-//   * EXACTLY ONE root element (an <svg>), same pattern as the base-game
-//     SimpleTacho app. `replace: true`.
-//   * No <style> block, no CSS classes, no external assets: every visual is a
-//     presentation attribute so nothing can be clobbered by the global UI CSS
-//     and nothing leaks out of the app.
-//   * The 0.39 app host owns position AND size (`.ui-app-host { position:
-//     absolute; inset: 0 }` + `.ui-angular-app-slot { width/height: 100% }`),
-//     so the SVG just fills 100%/100% and the viewBox does the scaling.
-//     The old `uiapps-hidden` DOM hack from 0.38 is NOT needed any more and is
-//     deliberately absent.
-//
-// Data source: electrics stream, channels published by
-//   vehicles/etk800/lua/controller/etk854hybridControl.lua (+ submodules).
-//   The chip row (y 55..66, the only free band between the SOC bar and the
-//   ICE readout / power rings) shows optional channels owned by other
-//   controllers - shift program (etk854hybrid_8hp shift logic), AWD/2WD
-//   (etk854hybrid_awdMode), trailer + leveling (etk854hybrid_adaptiveSusp),
-//   trailer air supply (etk854hybrid_airCompressor: receiver pressure, dot =
-//   compressor running, amber AIR LOW below the 4.14 bar spring-brake release
-//   pressure, amber TRL BRK while an air-coupled trailer still holds its
-//   spring brakes with our parking brake released, amber outline while the
-//   trailer protection valve etk854hybrid_airTrlValve is shut), rear diff
-//   lock (etk854hybrid_diffLock: LSD nn %, colour per preset, dot = slip
-//   hold; hidden while OPEN), ICE engage state (VCU) and fan stage. Every
-//   chip is hidden while its channel is nil, so configs without those parts
-//   look exactly as before. Chip widths are fixed per chip (no reflow while
-//   a value changes); a label longer than its chip is squeezed
-//   (textLength). Chips that would run past the right edge are hidden
-//   (rightmost first): with all seven at once (trailer + compressor +
-//   xAllrad + SPORT/DTC + fan) the ICE chip yields first.
-//
-//   ECO PRO pedal ruler (pedal map v3, ecoMapSpec.md step C), between the
-//   power-flow nodes and the status line, only in ECO PRO while the split
-//   map is live (etk854hybrid_pedalIceJoin > 0): pedal travel 0..1 with
-//   the segments EV (blue, to etk854hybrid_pedalEvEdge) | EV MAX
-//   plateau (light blue, to pedalIceJoin) | hybrid band (white, to
-//   pedalKickOn; amber fill = load integral iceDeficitS / iceDeficitOnS) |
-//   kick (amber, to pedalUrgent) | kickdown (red). The lit part ends at the
-//   caret = the pedal the VCU maps (throttle, throttle_input while shifting,
-//   etk854hybridControl.lua updateGFX). Right-hand label from
-//   etk854hybrid_pedalZone: EV / EV MAX / HYBRID / ICE / KICKDOWN. The
-//   EV segments grey out above the ECO EV ceiling (evZoneOpen 0).
+// Data: electrics stream of the VCU (etk854hybridControl.lua) + submodules.
+// Chip row (y 55..66): optional channels of other controllers, hidden while
+//   nil. Fixed widths (no reflow), overlong labels squeezed; greedy layout
+//   left to right, a chip that does not fit is skipped.
+// ECO PRO pedal ruler (ECO PRO with pedalIceJoin > 0): pedal 0..1 split into
+//   EV | EV MAX plateau | hybrid band (amber fill = load integral towards the
+//   ICE start) | kick | kickdown, lit up to the caret (pedal the VCU maps);
+//   EV segments grey out above the ECO EV speed ceiling (evZoneOpen 0).
 // =========================================================================
 
 angular.module('beamng.apps')
@@ -124,21 +80,15 @@ angular.module('beamng.apps')
                   fill="${C.green}" opacity="0"/>`
   }
 
-  // Status chips: laid out left-to-right at runtime, only visible ones take
-  // space. w = fixed width in viewBox units (7 px condensed caps ~ 3.9 u/char).
-  // Widths (2026-10, 7th chip cDiff): longest label of each chip measured
-  // with Roboto Condensed 7 px + letter-spacing 0.9 plus ~4 u padding per
-  // side (dot chips: text must end ~1.5 u left of the dot, i.e.
-  // w >= text + 14). The row is 296 u: SPORT/DTC on xAllrad with trailer
-  // and fan (program, AWD, LSD, TRAILER, ICE, FAN) = 294 u fits; only with
-  // the trunk compressor on top does the rightmost chip that no longer fits
-  // drop out.
+  // Status chips. w = fixed width (u) = longest label (~3.9 u/char) + ~4 u
+  // padding per side; dot chips need w >= text + 14. The 296 u row holds all
+  // but AIR (294 u); with AIR shown the ICE chip is skipped.
   const CHIP_Y = 55, CHIP_H = 11, CHIP_GAP = 4
   const CHIPS = [
     { key: 'cProg', w: 70 },   // shift program + gear, e.g. "SPORT+ · S3▲4"
     { key: 'cAwd',  w: 26 },   // AWD / 2WD
-    { key: 'cDiff', w: 46, dot: true, dotFill: C.text },  // LSD nn % (rear diff lock), dot = slip hold
-    { key: 'cTrl',  w: 48 },   // TRAILER / TRL RAISE|LOWER|MAX|FAULT / LEVEL MAX|FAULT
+    { key: 'cDiff', w: 46, dot: true, dotFill: C.text },  // LSD nn %, dot = slip hold
+    { key: 'cTrl',  w: 48 },   // trailer / leveling / TSA
     { key: 'cAir',  w: 44, dot: true },  // AIR 8.4 / AIR LOW / TRL BRK / AIR OFF
     { key: 'cIce',  w: 54 },   // ICE engage state
     { key: 'cFan',  w: 30 }    // FAN n
@@ -156,10 +106,8 @@ angular.module('beamng.apps')
             </g>`
   }
 
-  // ECO PRO pedal ruler (see header): x 12..262, label right-aligned at 308,
-  // in the band between the power-flow nodes (bottom 194.5) and the status
-  // line, which moves from y 211 to ST_Y_RULER while the ruler is shown
-  // (caps top ~208.2, clear of the caret)
+  // ECO PRO pedal ruler below the power-flow nodes; the status line drops to
+  // ST_Y_RULER while it is shown to clear the caret
   const RUL_X = BAR_X, RUL_W = 250, RUL_Y = 198.5, RUL_H = 5
   const ST_Y = 211, ST_Y_RULER = 213.5
   const RUL_SEGS = 5
@@ -302,7 +250,7 @@ angular.module('beamng.apps')
   ${node('batt',  N_BATT,  'BATTERY')}
   ${node('wheel', N_WHEEL, 'WHEELS')}
 
-  <!-- ================= ECO PRO pedal ruler (map v3) ================== -->
+  <!-- ======================= ECO PRO pedal ruler ===================== -->
   ${ruler()}
 
   <!-- ========================= status line ========================== -->
@@ -313,24 +261,15 @@ angular.module('beamng.apps')
 </svg>`
 
   // ------------------------------------------------------------- constants
-  // Boost stage -> e-machine limits, mirrored from BOOST_STAGES in
-  // etk854hybridControl.lua so the rings stay honest per stage.
+  // boost stage -> e-machine drive / regen kW (BOOST_STAGES in the VCU)
   const STAGE_KW    = [83, 110, 150, 200]
   const STAGE_REGEN = [55, 65, 80, 95]
-  // ICE ring scale. The engines span 185 kW (30e) to 408 kW (B58S), and the
-  // VCU publishes no per-config rating: etk854hybrid_iceMaxTorqueNm is the
-  // full-load torque at the CURRENT reference speed, not a peak value. So the
-  // scale is learned per vehicle:
-  //   * floor 220 kW (30e, 40e and 35d fit without any learning),
-  //   * instant rise to the larger of the measured ICE power and the
-  //     full-load potential iceMaxTorqueNm x engine rpm while the engine runs.
-  //     The VCU evaluates that torque at max(ICE rpm, shaft rpm) >= the ICE
-  //     rpm used here, so the product cannot exceed the curve's power peak
-  //     (only the ~50 ms skew between the 20 Hz channel and rpm), and the ring
-  //     reaches its true scale the first time the engine revs out - full
-  //     throttle is not needed,
-  //   * slow decay back towards the floor (time constant ICE_PEAK_TAU) plus a
-  //     reset on vehicle change, so a weaker engine re-learns its own scale.
+  // ICE ring scale, learned per vehicle (no rated power is published, engines
+  // span 185..408 kW): floor ICE_PEAK_FLOOR_KW, instant rise to
+  // max(ICE kW, iceMaxTorqueNm x rpm) while running (full-load torque taken
+  // at an rpm >= the ICE rpm, so the product stays below the power peak and
+  // the scale is found without full throttle), slow decay to the floor,
+  // reset on vehicle change.
   const ICE_PEAK_FLOOR_KW = 220
   const ICE_PEAK_TAU      = 600         // s
 
@@ -343,9 +282,7 @@ angular.module('beamng.apps')
     SAIL:    { label: 'SAILING',       color: C.blueLt, soft: 'rgba(124,196,255,0.10)' },
     IDLE:    { label: 'READY',         color: C.muted, soft: 'rgba(255,255,255,0.05)' }
   }
-  // Stability system badge. Colours follow the DSE simpleControlButton in
-  // etk854hybrid_dse.jbeam so HUD and quick-access button agree:
-  //   DSC 238BE6 (blue) / DTC DA0C0C (red) / OFF 343434 (grey).
+  // stability badge, colours as the DSE simpleControlButton (blue / red / grey)
   const DSC_STYLE = {
     DSC: { color: C.blue,  text: C.blueLt, soft: 'rgba(30,144,255,0.12)' },
     DTC: { color: C.red,   text: C.red,    soft: 'rgba(255,85,99,0.12)'  },
@@ -358,18 +295,13 @@ angular.module('beamng.apps')
     BATTERY_CONTROL: 'BATTERY CONTROL'
   }
 
-  // ICE engage FSM (VCU etk854hybrid_iceEngageState): transitional states
-  // light blue like the START node label, ON amber like the ICE ring.
+  // ICE engage state: transitions light blue (as START), running amber
   const ICE_ENGAGE_COLOR = {
     OFF: C.dim, CRANK: C.blueLt, SYNC: C.blueLt, ENGAGE: C.blueLt,
     BLEND: C.amber, ON: C.amber, RELEASE: C.muted
   }
-  // Leveling states worth a chip. etk854hybrid_selfLeveling.lua:39 publishes
-  // OFF|CALIB|LEVEL|RAISE|LOWER|HOLD|MAX|FAULT; HOLD is set for 1 s after every
-  // |gx|/|gy| > 1 m/s^2 (l.77-79, 330, 351) and CALIB after every spawn/reset
-  // (l.552-577), so both are routine and must never pop a chip (it would also
-  // re-flow the ICE/FAN chips). Without trailer only a fault/limit is shown;
-  // with trailer the active pump direction is added as useful feedback.
+  // Leveling states worth a chip; routine HOLD / CALIB must not pop one (and
+  // re-flow the row). Pump direction only with trailer mode on.
   const LEVEL_ALERT   = { MAX: 1, FAULT: 1 }
   const LEVEL_TRAILER = { RAISE: 1, LOWER: 1, MAX: 1, FAULT: 1 }
 
@@ -383,6 +315,7 @@ angular.module('beamng.apps')
 
   const clamp01 = v => v < 0 ? 0 : (v > 1 ? 1 : v)
   const num = v => (v === undefined || v === null || isNaN(Number(v))) ? null : Number(v)
+  const now = () => (window.performance && performance.now) ? performance.now() : Date.now()
 
   return {
     template: TPL,
@@ -399,14 +332,23 @@ angular.module('beamng.apps')
       const found = element[0].querySelectorAll('[data-k]')
       for (let i = 0; i < found.length; i++) R[found[i].getAttribute('data-k')] = found[i]
 
-      const set  = (k, a, v) => { const e = R[k]; if (e) e.setAttribute(a, v) }
+      // attribute memo: a write equal to the last one is skipped (most values
+      // are steady); every attribute set() touches is written only here
+      const attrMemo = {}
+      const set = (k, a, v) => {
+        const e = R[k]; if (!e) return
+        const m = attrMemo[k] || (attrMemo[k] = {})
+        if (m[a] === v) return
+        m[a] = v
+        e.setAttribute(a, v)
+      }
       const txt  = (k, v)    => { const e = R[k]; if (e && e.textContent !== v) e.textContent = v }
       const show = (k, on)   => set(k, 'opacity', on ? 1 : 0)
 
       // dash animation phase, advanced from the stream tick (no rAF loop that
       // could outlive the app)
       let dash = 0
-      let lastT = (window.performance && performance.now) ? performance.now() : Date.now()
+      let lastT = now()
 
       let lastPhase = null
 
@@ -465,14 +407,7 @@ angular.module('beamng.apps')
         set(key + 'box', 'stroke', color)
       }
 
-      // ECO PRO pedal ruler: attribute memo (most values are steady)
-      const rulMemo = {}
-      const setR = (k, a, v) => {
-        const mk = k + '.' + a
-        if (rulMemo[mk] === v) return
-        rulMemo[mk] = v
-        set(k, a, v)
-      }
+      // ECO PRO pedal ruler
       const rx = p => Math.round((RUL_X + RUL_W * clamp01(p)) * 10) / 10
       let rulOn = null
       // ECO EV ceiling (evZoneOpen) debounced 0.5 s: the VCU compares the
@@ -496,9 +431,9 @@ angular.module('beamng.apps')
         let pK = num(e.etk854hybrid_pedalKickOn)
         if (!(pK >= pJ)) pK = pJ
         let pU = num(e.etk854hybrid_pedalUrgent)
-        if (!(pU >= pK && pU <= 1)) pU = Math.max(pK, Math.min(1, 0.95))
+        if (!(pU >= pK && pU <= 1)) pU = Math.max(pK, 0.95)
         const openRaw = (num(e.etk854hybrid_evZoneOpen) || 0) > 0.5
-        const tG = (window.performance && performance.now) ? performance.now() : Date.now()
+        const tG = now()
         if (openRaw === evGate.open) evGate.since = 0
         else if (!evGate.since) evGate.since = tG
         else if (tG - evGate.since >= 500) { evGate.open = openRaw; evGate.since = 0 }
@@ -515,29 +450,29 @@ angular.module('beamng.apps')
           const col = (i < 2 && !evOpen) ? C.dim : RUL_COLOR[i]
           // 0.6 u gap between segments keeps the thresholds readable
           const w = Math.max(0, x1 - x0 - (i < RUL_SEGS - 1 ? 0.6 : 0))
-          setR('rulB' + i, 'x', x0); setR('rulB' + i, 'width', w); setR('rulB' + i, 'fill', col)
+          set('rulB' + i, 'x', x0); set('rulB' + i, 'width', w); set('rulB' + i, 'fill', col)
           const lw = ped > a ? Math.min(w, Math.round((rx(ped) - x0) * 10) / 10) : 0
-          setR('rulL' + i, 'x', x0); setR('rulL' + i, 'width', Math.max(0, lw)); setR('rulL' + i, 'fill', col)
+          set('rulL' + i, 'x', x0); set('rulL' + i, 'width', Math.max(0, lw)); set('rulL' + i, 'fill', col)
         }
         // load integral towards the ICE start, drawn into the hybrid band
         const dOn = num(e.etk854hybrid_iceDeficitOnS) || 0
         const dS = num(e.etk854hybrid_iceDeficitS) || 0
         const fr = (dOn > 0 && !iceOn) ? clamp01(dS / dOn) : 0
         const bw = Math.max(0, rx(pK) - rx(pJ) - 0.6)
-        setR('rulDef', 'x', rx(pJ)); setR('rulDef', 'width', Math.round(bw * fr * 10) / 10)
+        set('rulDef', 'x', rx(pJ)); set('rulDef', 'width', Math.round(bw * fr * 10) / 10)
         // segment labels: plateau "MAX" (light blue), kickdown "KD" (red)
-        setR('rulMax', 'x', Math.round((rx(pE) + rx(pJ)) * 5) / 10)
-        setR('rulKd', 'x', Math.round((rx(pU) + rx(1)) * 5) / 10)
+        set('rulMax', 'x', Math.round((rx(pE) + rx(pJ)) * 5) / 10)
+        set('rulKd', 'x', Math.round((rx(pU) + rx(1)) * 5) / 10)
         const cx = rx(ped)
-        setR('rulCar', 'x1', cx); setR('rulCar', 'x2', cx)
-        setR('rulCarB', 'x1', cx); setR('rulCarB', 'x2', cx)
+        set('rulCar', 'x1', cx); set('rulCar', 'x2', cx)
+        set('rulCarB', 'x1', cx); set('rulCarB', 'x2', cx)
         // right-hand label from the VCU zone
         const zone = Math.max(0, Math.min(5, Math.round(num(e.etk854hybrid_pedalZone) || 0)))
         let zc = ZONE_COLOR[zone]
         if (zone <= 2 && !evOpen) zc = C.muted
         else if (zone === 3 && dS > 0.02 && !iceOn) zc = C.amber
         txt('rulLbl', ZONE_LABEL[zone])
-        setR('rulLbl', 'fill', zc)
+        set('rulLbl', 'fill', zc)
       }
       function layoutChips() {
         let sig = ''
@@ -548,7 +483,6 @@ angular.module('beamng.apps')
         for (let i = 0; i < CHIPS.length; i++) {
           const c = CHIPS[i]
           // a chip that would run past the SOC bar's right end is hidden
-          // (296 u: room for 5-6 of the 7 chips at once, see CHIPS)
           const on = sig.charAt(i) === '1' && x + c.w <= BAR_X + BAR_W
           show(c.key, on)
           if (!on) continue
@@ -559,13 +493,9 @@ angular.module('beamng.apps')
         }
       }
 
-      // AIR chip from the compressor channels (etk854hybrid_airCompressor.lua
-      // header); null = no receiver fitted. LOW = receiver < 4.14 bar (trailer
-      // spring brakes cannot release fully), TRL BRK = an air-coupled
-      // trailer's spring-brake torque share is still > 0.5 although our
-      // parking brake is released (filling / supply below 40 psi).
-      // Plain chip with an amber outline: trailer protection valve shut
-      // (etk854hybrid_airTrlValve 0, no supply to a trailer until 6.0 bar).
+      // AIR chip (null = no receiver). AIR LOW = below the 4.14 bar spring-brake
+      // release; TRL BRK = trailer spring brakes hold with our parking brake
+      // off; amber = protection valve shut; dot = compressor running.
       let lastAirDot = null, lastDiffDot = null
       function airChip(e) {
         const st = e.etk854hybrid_airState
@@ -606,44 +536,15 @@ angular.module('beamng.apps')
         set(key + 'lbl', 'fill',   active ? C.text : C.muted)
       }
 
-      scope.$on('streamsUpdate', function (event, streams) {
-        const e = streams && streams.electrics
-        if (!e) { return }
-
-        const nowT = (window.performance && performance.now) ? performance.now() : Date.now()
-        let dt = (nowT - lastT) / 1000
-        lastT = nowT
-        if (!(dt > 0) || dt > 0.5) dt = 0.016
-        dash = (dash + dt * 26) % 11        // 11 = dash(5) + gap(6)
-
-        // ---------------------------------------------------------- inputs
-        const boost = Math.max(0, Math.min(3, Math.round(num(e.etk854hybrid_boostStage) || 0)))
-        const evPeak    = STAGE_KW[boost]
-        const regenPeak = STAGE_REGEN[boost]
-
-        const iceKw = num(e.etk854hybrid_icePower) || 0
-        const evKw  = num(e.etk854hybrid_evPower)  || 0
-        const totalKw = iceKw + evKw
-
-        // ICE ring scale: running max with slow decay towards the floor
-        let iceCandKw = iceKw
-        const iceCapNm = num(e.etk854hybrid_iceMaxTorqueNm)
-        const iceRpm   = num(e.rpm)
-        if (iceKw > 1 && iceCapNm !== null && iceCapNm > 0 && iceRpm !== null && iceRpm > 0) {
-          iceCandKw = Math.max(iceCandKw, iceCapNm * iceRpm * Math.PI / 30000)
-        }
-        if (iceCandKw > icePeakKw) icePeakKw = iceCandKw
-        else icePeakKw -= (icePeakKw - ICE_PEAK_FLOOR_KW) * Math.min(1, dt / ICE_PEAK_TAU)
-
-        // ------------------------------------------------------------- SOC
-        // etk854hybrid_batterySoc is published as PERCENT (0..100) by
-        // batteryMonitor.lua / etk854hybridControl.lua. Guard anyway.
+      // ------------------------------------------------------------- SOC
+      // batterySoc is percent; fraction fallback + rescale as a guard
+      function updateSoc(e, edrive) {
         let soc = num(e.etk854hybrid_batterySoc)
         if (soc === null) {
           const frac = num(e.etk854hybrid_batteryFraction)
           soc = frac === null ? null : frac * 100
         }
-        if (soc !== null && soc <= 1.5) soc *= 100          // defensive rescale
+        if (soc !== null && soc <= 1.5) soc *= 100
         const socPct = soc === null ? 0 : Math.max(0, Math.min(100, soc))
 
         txt('socpct', soc === null ? '--%' : Math.round(socPct) + '%')
@@ -651,7 +552,6 @@ angular.module('beamng.apps')
         set('socbar', 'fill', socPct < 12 ? C.red : 'url(#etk854hud-soc)')
 
         // target SOC marker: only meaningful in BATTERY CONTROL
-        const edrive = String(e.etk854hybrid_edriveMode || 'AUTO_EDRIVE')
         let tgt = num(e.etk854hybrid_targetSoc)              // published as 0..1
         if (tgt !== null && tgt > 1.5) tgt /= 100
         const showTgt = (edrive === 'BATTERY_CONTROL') && tgt !== null
@@ -659,8 +559,13 @@ angular.module('beamng.apps')
         if (showTgt) {
           set('socTgt', 'x', Math.min(BAR_X + BAR_W - 2, BAR_X + BAR_W * clamp01(tgt)))
         }
+      }
 
-        // ----------------------------------------------------------- rings
+      // ----------------------------------------------------------- rings
+      function updateRings(iceKw, evKw, totalKw, boost) {
+        const evPeak    = STAGE_KW[boost]
+        const regenPeak = STAGE_REGEN[boost]
+
         const iceFrac = clamp01(iceKw / icePeakKw)
         set('arcIce', 'stroke-dashoffset', LEN_OUT * (1 - iceFrac))
 
@@ -674,8 +579,10 @@ angular.module('beamng.apps')
         // keep the number clear of the inner ring as it grows
         set('total', 'font-size', totalStr.length <= 2 ? 24 : (totalStr.length === 3 ? 21 : 18))
         set('total', 'fill', totalKw < -0.5 ? C.green : C.text)
+      }
 
-        // ------------------------------------------------------- readouts
+      // ------------------------------------------------------- readouts
+      function updateReadouts(e, iceKw, evKw) {
         txt('icekw', String(Math.round(iceKw)))
         txt('evkw',  String(Math.round(evKw)))
         const iceNm = num(e.etk854hybrid_iceTorqueNm) || 0
@@ -701,10 +608,10 @@ angular.module('beamng.apps')
         txt('reclvl', opHold ? (regenLvl + ' HOLD') : regenLvl)
         set('reclvl', 'fill', regenLvl === 'OFF' ? C.dim
                             : (opHold ? C.green : (recActive ? C.green : C.muted)))
+      }
 
-        // ---------------------------------------------------------- phase
-        const phaseRaw = String(e.etk854hybrid_phase || 'IDLE').toUpperCase()
-        const sail = (num(e.etk854hybrid_sailActive) || 0) > 0.5 || phaseRaw === 'SAIL'
+      // ---------------------------------------------------------- phase
+      function updatePhase(phaseRaw, sail, boost, iceKw, evKw) {
         let pKey = sail ? 'SAIL' : (PHASE[phaseRaw] ? phaseRaw : 'IDLE')
         // "HYBRID" only earns the boost wording when both units actually pull
         const p = PHASE[pKey]
@@ -719,10 +626,12 @@ angular.module('beamng.apps')
           set('phasebox', 'stroke', p.color)
           set('phasebox', 'fill', p.soft)
         }
+      }
 
-        // ------------------------------------------------------ power flow
-        // Derived from the actual numbers, not from the phase label, so the
-        // schematic can never disagree with the readouts.
+      // ------------------------------------------------------ power flow
+      // from the numbers, not the phase label, so it matches the readouts;
+      // then the K0 clutch pack
+      function updateFlow(e, sail, iceKw, evKw, totalKw, iceOn, k0) {
         const iceFlow  = !sail && iceKw > 1
         const battOut  = !sail && evKw >  1       // battery -> e-motor
         const battIn   = !sail && evKw < -1       // e-motor -> battery
@@ -732,7 +641,7 @@ angular.module('beamng.apps')
         setLink('lb', battOut ? 1 : (battIn ? -1 : 0), battIn ? C.green : C.blue)
         setLink('lw', driveOut ? 1 : (driveIn ? -1 : 0), driveIn ? C.green : C.blue)
 
-        const iceOn = (num(e.etk854hybrid_iceState) || 0) > 0.5
+        const evNeg = evKw < -0.5
         const restarting = (num(e.etk854hybrid_iceRestartMs) || 0) > 0
         setNode('ice',   iceOn || restarting, restarting ? C.blueLt : C.amber)
         setNode('em',    !sail && (Math.abs(evKw) > 0.5), evNeg ? C.green : C.blue)
@@ -740,9 +649,6 @@ angular.module('beamng.apps')
         setNode('wheel', driveOut || driveIn, driveIn ? C.green : C.blue)
         txt('icelbl', restarting ? 'START' : 'ICE')
 
-        // K0 clutch: 1 = closed (ICE coupled), 0 = open (decoupled)
-        const k0 = clamp01(num(e.etk854hybrid_k0ClutchRatio) === null
-                    ? (iceOn ? 1 : 0) : num(e.etk854hybrid_k0ClutchRatio))
         const k0Col = k0 > 0.9 ? (iceFlow ? C.amber : C.muted) : (k0 > 0.1 ? C.amber : C.dim)
         set('k0up',   'stroke', k0Col)
         set('k0down', 'stroke', k0 > 0.9 ? k0Col : C.dim)
@@ -755,15 +661,12 @@ angular.module('beamng.apps')
         set('k0pB', 'y1', 163 + gap); set('k0pB', 'y2', 163 + gap)
         set('k0up',   'y2', 163 - gap - 1.5)
         set('k0down', 'y1', 163 + gap + 1.5)
+      }
 
-        // ------------------------------------------- stability system badge
-        // etk854hybrid_dscMode = arming state ("DSC"/"DTC"/"OFF"),
-        // etk854hybrid_dscLamp = qualified intervention flag from the
-        // cluster module etk854hybrid_gaugeData (real trim < 0.90 for
-        // >= 0.25 s or a DSE brake stage, held 1 s). Fallback when that
-        // module is not fitted: etk854hybrid_tcActive (raw escActive /
-        // tcsActive, lights on ANY DSE activity). While intervening the
-        // badge blinks at ~4 Hz, like the DSC telltale in the real cluster.
+      // ------------------------------------------- stability system badge
+      // dscMode = arming state; blinks while intervening: dscLamp (qualified,
+      // cluster module) or, without that module, the raw tcActive
+      function updateDscBadge(e) {
         const dscKey = String(e.etk854hybrid_dscMode || 'DSC').toUpperCase()
         const ds = DSC_STYLE[dscKey] || DSC_STYLE.DSC
         const dscLamp = num(e.etk854hybrid_dscLamp)
@@ -779,14 +682,13 @@ angular.module('beamng.apps')
           set('dscbox', 'stroke', blinkOn ? C.amber : ds.color)
           set('dscbox', 'fill',   blinkOn ? 'rgba(255,166,43,0.30)' : ds.soft)
         }
+      }
 
-        // --------------------------------------------------- status chips
-        // Defensive: every channel may be nil (part not fitted / controller
-        // from another package not integrated yet) -> chip hidden.
-        // shift program + engaged gear + OEM-style recommendation, e.g.
-        // "COMFORT · D4" or "MANUAL · M3▲4" (etk854hybrid_gearActual /
-        // etk854hybrid_gearHint from the cluster module; without it only
-        // the program, as before)
+      // --------------------------------------------------- status chips
+      // nil channel (part not fitted) -> chip hidden
+      function updateChips(e) {
+        // Program + gear + recommendation ("MANUAL · M3▲4"); gear needs the
+        // cluster module
         const sp = e.etk854hybrid_shiftProgram
         const spTxt = (typeof sp === 'string' && sp !== '') ? sp.toUpperCase().replace(/_/g, ' ').slice(0, 10) : ''
         const gTxt = hudGear(e)
@@ -797,9 +699,8 @@ angular.module('beamng.apps')
         const awdStr = (typeof awd === 'string' && awd !== '') ? awd.toUpperCase() : null
         setChip('cAwd', awdStr, awdStr === 'AWD' ? C.blue : C.dim)
 
-        // rear diff lock (etk854hybrid_diffLock.lua): nominal lock in 5 %
-        // steps (less DOM churn), hidden while OPEN / not fitted; dot = slip
-        // hold engaged (activeLockCoef share > 0.5)
+        // rear diff lock in 5 % steps (less DOM churn), hidden while OPEN;
+        // dot = slip hold engaged
         const dp = e.etk854hybrid_diffPreset
         const diffOn = typeof dp === 'string' && dp !== '' && dp !== 'OPEN'
         setChip('cDiff', diffOn ? 'LSD ' + (Math.round(20 * clamp01(num(e.etk854hybrid_diffLock) || 0)) * 5) + '%' : null,
@@ -807,17 +708,23 @@ angular.module('beamng.apps')
         const diffDot = diffOn && (num(e.etk854hybrid_diffHold) || 0) > 0.5
         if (diffDot !== lastDiffDot) { lastDiffDot = diffDot; show('cDiffdot', diffDot) }
 
-        // trailer mode; with a pump direction / limit "TRL <state>" (keeps
-        // the chip at 48 u), without trailer only a leveling alert
+        // TRAILER / TRL <state> / LEVEL <alert> (state cut to fit 48 u);
+        // overridden by TSA while sway or corner stage >= 1 (red = TSA lamp)
+        // and by TSA FAULT in trailer mode
         const trl = e.etk854hybrid_trailerMode
         const trlOn = trl === true || (num(trl) || 0) > 0.5
         const lvl = typeof e.etk854hybrid_levelState === 'string'
           ? e.etk854hybrid_levelState.toUpperCase() : ''
-        setChip('cTrl', trlOn ? (LEVEL_TRAILER[lvl] ? 'TRL ' + lvl.slice(0, 5) : 'TRAILER')
-                      : (LEVEL_ALERT[lvl] ? 'LEVEL ' + lvl.slice(0, 5) : null), C.amber)
+        const tsSt = num(e.etk854hybrid_tsaStage) || 0, tsK = num(e.etk854hybrid_tsaCorner) || 0
+        const tsL = (num(e.etk854hybrid_tsaLamp) || 0) > 0.5
+        const tsState = typeof e.etk854hybrid_tsaState === 'string' ? e.etk854hybrid_tsaState : ''
+        let trlLabel = trlOn ? (LEVEL_TRAILER[lvl] ? 'TRL ' + lvl.slice(0, 5) : 'TRAILER')
+          : (LEVEL_ALERT[lvl] ? 'LEVEL ' + lvl.slice(0, 5) : null)
+        let trlColor = C.amber
+        if (tsSt >= 1 || tsK >= 1) { trlLabel = 'TSA'; trlColor = tsL ? C.red : C.amber }
+        else if (trlOn && tsState === 'FAULT') { trlLabel = 'TSA FAULT'; trlColor = C.red }
+        setChip('cTrl', trlLabel, trlColor)
 
-        // trailer air supply (etk854hybrid_airCompressor.lua): only while a
-        // receiver exists (state string other than 'NO TANK')
         const air = airChip(e)
         setChip('cAir', air ? air.label : null, air ? air.color : C.dim)
         const airDot = !!(air && air.running)
@@ -831,11 +738,10 @@ angular.module('beamng.apps')
         setChip('cFan', (fan !== null && fan > 0) ? 'FAN ' + Math.round(fan) : null, C.blueLt)
 
         layoutChips()
+      }
 
-        // ---------------------------------------------- ECO PRO pedal ruler
-        updateRuler(e, String(e.etk854hybrid_deMode || ''), iceOn)
-
-        // ---------------------------------------------------- status line
+      // ---------------------------------------------------- status line
+      function updateStatus(e, edrive, k0, boost, sail) {
         const de = String(e.etk854hybrid_deMode || 'COMFORT').replace('_', ' ')
         txt('stLeft', de + ' · ' + (EDRIVE_LABEL[edrive] || edrive))
 
@@ -844,6 +750,52 @@ angular.module('beamng.apps')
         const sailState = String(e.etk854hybrid_sailState || '')
         if (sail && sailState && sailState !== 'SAIL') right += ' · ' + sailState
         txt('stRight', right)
+      }
+
+      scope.$on('streamsUpdate', function (event, streams) {
+        const e = streams && streams.electrics
+        if (!e) { return }
+
+        const nowT = now()
+        let dt = (nowT - lastT) / 1000
+        lastT = nowT
+        if (!(dt > 0) || dt > 0.5) dt = 0.016
+        dash = (dash + dt * 26) % 11        // 11 = dash(5) + gap(6)
+
+        // ---------------------------------------------------------- inputs
+        const boost = Math.max(0, Math.min(3, Math.round(num(e.etk854hybrid_boostStage) || 0)))
+        const iceKw = num(e.etk854hybrid_icePower) || 0
+        const evKw  = num(e.etk854hybrid_evPower)  || 0
+        const totalKw = iceKw + evKw
+
+        // ICE ring scale: running max with slow decay towards the floor
+        let iceCandKw = iceKw
+        const iceCapNm = num(e.etk854hybrid_iceMaxTorqueNm)
+        const iceRpm   = num(e.rpm)
+        if (iceKw > 1 && iceCapNm !== null && iceCapNm > 0 && iceRpm !== null && iceRpm > 0) {
+          iceCandKw = Math.max(iceCandKw, iceCapNm * iceRpm * Math.PI / 30000)
+        }
+        if (iceCandKw > icePeakKw) icePeakKw = iceCandKw
+        else icePeakKw -= (icePeakKw - ICE_PEAK_FLOOR_KW) * Math.min(1, dt / ICE_PEAK_TAU)
+
+        const edrive = String(e.etk854hybrid_edriveMode || 'AUTO_EDRIVE')
+        const phaseRaw = String(e.etk854hybrid_phase || 'IDLE').toUpperCase()
+        const sail = (num(e.etk854hybrid_sailActive) || 0) > 0.5 || phaseRaw === 'SAIL'
+        const iceOn = (num(e.etk854hybrid_iceState) || 0) > 0.5
+        // K0 clutch: 1 = closed (ICE coupled), 0 = open (decoupled)
+        const k0Raw = num(e.etk854hybrid_k0ClutchRatio)
+        const k0 = clamp01(k0Raw === null ? (iceOn ? 1 : 0) : k0Raw)
+
+        // sections in draw order
+        updateSoc(e, edrive)
+        updateRings(iceKw, evKw, totalKw, boost)
+        updateReadouts(e, iceKw, evKw)
+        updatePhase(phaseRaw, sail, boost, iceKw, evKw)
+        updateFlow(e, sail, iceKw, evKw, totalKw, iceOn, k0)
+        updateDscBadge(e)
+        updateChips(e)
+        updateRuler(e, String(e.etk854hybrid_deMode || ''), iceOn)
+        updateStatus(e, edrive, k0, boost, sail)
       })
     }
   }

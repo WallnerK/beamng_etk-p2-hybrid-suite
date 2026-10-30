@@ -2,28 +2,13 @@
   // ==========================================================================
   // ETK 854 ActiveHybrid - default keyboard bindings (vehicle inputmap)
   // ==========================================================================
-  // Scheme: Alt + mnemonic, nothing on F-keys.
-  //   Alt+1/2/3  COMFORT / ECO PRO / SPORT     Alt+F  cycle driving experience
-  //   Alt+4/5    MAX EV / AUTO EV      Alt+E  cycle EV mode
-  //   Alt+B      BATTERY CONTROL               Alt+PageUp/PageDown target SOC +/-10
-  //   Alt+R      recuperation level            Alt+K  launch control
-  //   Alt+G      shift program (8HP)           Alt+M  legacy preset cycle
-  //   Alt+T      trailer mode                  Alt+W  xAllrad AWD / 2WD
-  //
-  // Conflict check 2026-09-30 against BeamNG.drive 0.39.4
-  //   settings/inputmaps/keyboard.json (driving map) plus keyboard_editor,
-  //   keyboard_flowgraph, keyboard_rallyEditor, keyboard_openxr and
-  //   keyboard_beamng.tech (modifier order normalised, // lines ignored):
-  //   alt 1..5, alt b, alt e, alt f, alt g, alt k, alt m, alt pageup,
-  //   alt pagedown, alt r, alt t: not bound anywhere.
-  //   alt w: only keyboard_editor.json (editorPlacePlayerAtCamera), i.e. only
-  //   while the World Editor is open - never while driving.
-  //   The etk800 and common vehicle archives ship no keyboard inputmap.
-  // Replaced defaults that the base driving map also uses:
-  //   f5 cefdev_reload_ui, f7 dropPlayerAtCameraNoReset,
-  //   f8 dropCameraAtPlayer, alt a toggleRangeStatus,
-  //   alt up / alt down toggle_slow_motion, alt l couplersUnlock (would drop a
-  //   hitched trailer when arming launch control).
+  // Scheme: Alt + mnemonic, nothing on F-keys. Alt+M = legacy preset cycle;
+  //   Alt+H/J/Comma/Period/Backspace/V = centre display controller (panel,
+  //   press, rotate left/right, back, view); Alt+C = cluster view.
+  // Free in the 0.39.4 keyboard maps except alt w (World Editor only, never
+  //   active while driving); alt r is distinct from reset_physics on r.
+  // Avoided (driving map): f5, f7, f8, alt a, alt up / down,
+  //   alt l (couplersUnlock would drop a hitched trailer).
   // ==========================================================================
   "bindings": [
     { "control": "alt 1", "action": "etk854hybrid_setComfort" },
@@ -41,7 +26,14 @@
     { "control": "alt g", "action": "etk854hybrid_cycleShiftProgram" },
     { "control": "alt m", "action": "etk854hybrid_cycleMode" },
     { "control": "alt t", "action": "etk854hybrid_toggleTrailerMode" },
-    { "control": "alt w", "action": "etk854hybrid_toggleAwdMode" }
+    { "control": "alt w", "action": "etk854hybrid_toggleAwdMode" },
+    { "control": "alt h", "action": "etk854hybrid_cdMenu" },
+    { "control": "alt comma", "action": "etk854hybrid_cdPrev" },
+    { "control": "alt period", "action": "etk854hybrid_cdNext" },
+    { "control": "alt j", "action": "etk854hybrid_cdPress" },
+    { "control": "alt backspace", "action": "etk854hybrid_cdBack" },
+    { "control": "alt v", "action": "etk854hybrid_cdViewNext" },
+    { "control": "alt c", "action": "etk854hybrid_clusterViewNext" }
   ],
   "name": "Keyboard",
   "version": 1,

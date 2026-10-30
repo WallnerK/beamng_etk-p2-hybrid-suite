@@ -1,247 +1,84 @@
 -- ETK 854 ActiveHybrid - instrument cluster data module
--- =========================================================================
--- Target: BeamNG.drive 0.39.4
+-- Custom module of the stock gauges/genericGauges controller. The cluster parts
+-- add it with fileName "gauges/customModules/etk854hybrid_gaugeData" and no
+-- custom name (genericGauges resolves custom modules by that path).
+-- Contract as the stock modules: init / reset / updateGFX (every frame) /
+-- setupGaugeData(props, once) / updateGaugeData(m, per UI push while seated).
+-- Also getEnergyInfo() (screenData), resetTripComputer(), setOption() (tests).
 --
--- A custom module for the base-game controller gauges/genericGauges (the
--- controller named "gauge" that the stock ETK 800 dash declares). It is
--- declared by the parts in etk854hybrid_gauges.jbeam as a controller row
--- with fileName "gauges/customModules/etk854hybrid_gaugeData" and NO custom
--- name: genericGauges resolves custom modules with
---   controller.getController("gauges/customModules/" .. moduleName)
--- (lua/vehicle/controller/gauges/genericGauges.lua:144-153), so the
--- controller name has to equal the fileName.
+-- Electrics, every frame: etk854hybrid_tachoRpm (rpm / READY 0 / OFF -500),
+--   _dscLamp (qualified DSC lamp), _dse* diagnostics, _gearActual, _gearHint,
+--   _fuel*, _tripKm, _evAvgKwh, _tripId; stock esc / tcs / dseWarningPulse are
+--   rewritten to follow the qualified lamp.
+-- customModules per UI push (requested properties only):
+--   range: rangeKm (-1 = unknown)
+--   scale: iceKw, evKw, regenKw [kW]      gear: gearStyle "number" | "plain"
+--   fuel:  fuelL fuelRangeKm instL100 instLh instMode instBar avgL100 tripKm
+--          avgKwh [kWh/100 km]
+-- Side effect: ICE K0 gate on the traction control group (installIceGate).
 --
--- The file is found through the vehicle-first package.path
--- (lua/vehicle/main.lua:212), no shim needed. It does NOT shadow any
--- base-game file: the base modules live in lua/vehicle/controller/gauges/
--- customModules/ and none of them is called etk854hybrid_*.
---
--- Contract (same as the stock modules, e.g. electricMotorData.lua):
---   M.type = "auxiliary"
---   init(jbeamData)            controller init, row options below
---   reset()                    R-reset (genericGauges itself is NOT re-set up)
---   updateGFX(dt)              every frame, seated or not
---   setupGaugeData(props, tex) once, props = { <property> = true } from the
---                              displayData.customModules rows of the part
---   updateGaugeData(m, dtPush) every UI push while a player is seated;
---                              m persists between pushes, dtPush is the time
---                              since the previous push, NOT the frame time
---                              (genericGauges.lua:80-92)
---
--- What it provides
---   1. electrics.values.etk854hybrid_tachoRpm (every frame)
---      Drives the rpm needle prop of the etk854hybrid_gauges parts instead of
---      the raw "rpm" channel. The stock ETK dial face already has a READY /
---      OFF bracket below 0 rpm; this channel parks the needle there like a
---      production ActiveHybrid rev counter:
---        ICE turning (rpm > iceRpmMin)       -> engine rpm
---        ICE still, ignition on (level >= 2) -> tachoReadyRpm (0 = READY)
---        ignition off / accessory            -> tachoOffRpm (-500 = OFF)
---      Sweeps between READY and OFF are rate limited (tachoSweepRate).
---      Needle geometry (etk800_gauges.jbeam, rpm prop): petrol 0.03 deg/rpm
---      offset -3500, diesel 0.035 deg/rpm offset -2750. On both faces the
---      READY mark sits at ~0 rpm and the OFF mark at ~-500 rpm (measured on
---      common.zip etk_gauges_*_kmh_b.color.dds), so one value pair fits both.
---   2. customModules.etk854hybrid_gaugeData (per UI push, only what the part
---      asked for in displayData.customModules):
---        range  -> rangeKm    electric range estimate [km], -1 = unknown
---                  consKwh    learned consumption [kWh/100 km]
---        scale  -> iceKw      ICE peak power [kW] (from the engine curve)
---                  evKw       e-machine peak drive power of the boost stage
---                  regenKw    e-machine peak regen power of the boost stage
---        gear   -> gearStyle  "number" | "plain" (row option gearStyle)
---        fuel   -> on-board computer, see item 10
---      Everything else the page needs comes straight from the electrics list
---      in displayData (genericGauges copies electrics.values[k] or 0).
---   3. M.getEnergyInfo() for other controllers (etk854hybrid_screenData uses
---      it so cluster and centre screen show the same range).
---   4. DSE diagnostics (every frame, read-only, nil-safe):
---        etk854hybrid_dseMotorTf   integratedMotor.throttleFactor (1 = no trim)
---        etk854hybrid_dseIceTf     mainEngine.throttleFactor
---        etk854hybrid_dseSrc       bitmask of what the DSE is doing this frame
---            1  motorTorqueControl.isActingAsTC (torque-stage TC; the flag
---               only holds the LAST wheel group stepped, motorTorqueControl.
---               lua:53/:72 - with our list order that is integratedMotor)
---            2  motorTorqueControl.isActingAsYC (torque-stage yaw control)
---            4  electrics.isTCBrakeActive (brake TC, factor > 0.1,
---               brakeControl.lua:97/:236)
---            8  electrics.isYCBrakeActive (brake yaw, factor > 0.3,
---               brakeControl.lua:170/:235)
---           16  mainEngine throttleFactor < 1 (TC or yaw trim on the ICE)
---           32  integratedMotor throttleFactor < 1
---           64  brakeControl.isActingAsTC (any brake factor > 0)
---          128  brakeControl.isActingAsYC (any brake factor > 0)
---        etk854hybrid_dseSlipIce / _dseSlipEm  wheelGroup.maxSlip of the two
---               TC groups (virtualSpeedSlip.lua:53)
---        etk854hybrid_dseBsa       CMU virtualSensors virtual.bodySlipAngle [rad]
---        etk854hybrid_dseVirtKmh   CMU virtualSensors virtual.speed [km/h]
---      All values are sampled once per frame (the flags are written per
---      physics step), so they give a duty estimate, not every 0.5 ms event.
---   5. electrics.values.etk854hybrid_dscLamp (every frame): the QUALIFIED
---      DSC telltale for cluster chip, HUD badge and QA. 1 while
---        min(motorTf, iceTf) < lampTfMax for >= lampOnS continuously
---          (iceTf counts only while K0 is closed, k0ClutchRatio >= lampK0Min:
---          trimming an ICE that idles behind an open K0 changes nothing at
---          the wheels), or
---        a DSE brake stage is active (isTCBrakeActive / isYCBrakeActive),
---      then held for lampHoldS after the last qualifying frame. The raw
---      escActive/tcsActive flags (and etk854hybrid_tcActive in the VCU) turn
---      on after ~0.2 s of ANY didAct, even a 0.999 throttle factor
---      (motorTorqueControl.lua:72/:98, yawControl.lua:90-96,
---      tractionControl.lua:71-77), which is what made the chip blink.
---   6. ICE K0 gate for traction control (row option dseIceK0Gate, default on).
---      virtualSpeedSlip only records slip while wheelGroup.motor.throttle >
---      0.01 (virtualSpeedSlip.lua:41), and combustionEngine device.throttle
---      includes the idle throttle (combustionEngine.lua:737/:801). So the
---      "mainEngine" TC group measured slip - and trimmed / flagged tcsActive -
---      while the ICE only idled behind an open K0 and drove nothing. The
---      gate swaps that group's motor reference (tractionControl.lua:157-164,
---      exposed through tractionControl.tractionControlledWheels) for a
---      read-through proxy whose "throttle" reads 0 while
---      k0ClutchRatio < dseIceK0GateMin. The only readers of wheelGroup.motor
---      are virtualSpeedSlip.lua:41 (.throttle) and motorTorqueControl.lua:54/
---      :58 (.name); both keep working. The proxy does not touch the device;
---      ICE throttleFactor is still written on the real device
---      (motorTorqueControl.lua:43-45). Nothing base-game is overridden.
---   7. electrics.values.etk854hybrid_gearActual (every frame) = the gearbox
---      device's engaged gearIndex. electrics.gearIndex is the 8HP's DECIDED
---      target (etk854hybrid_8hp.lua:506/:559) and runs ahead by the shift
---      time. customModules.etk854hybrid_gaugeData "gear" -> gearStyle
---      ("number" = D1..D8, "plain" = D without number), rendered by the page.
---      GEAR_UNKNOWN (-99) until the gearbox device is resolved: genericGauges
---      turns a missing electrics key into 0 (genericGauges.lua:61), which
---      would read as "neutral", so the page needs an explicit marker to fall
---      back to electrics.gearIndex.
---   8. Qualified STOCK telltales (row option dseStockLampQualified, default
---      on). The dial-face ESC / TCS decals are glowMaps on electrics esc /
---      tcs (etk800.jbeam:62-63), written every frame as
---      floor(isActiveSmoothed) * CMU.warningLightPulse (yawControl.lua:92,
---      tractionControl.lua:73), i.e. on the same raw didAct as escActive /
---      tcsActive. This module has no defaultOrder, so it runs at order
---      100000 (controller.lua:360), after CMU (50), yawControl (60) and
---      tractionControl (65), and before material.updateGFX reads the
---      glowMaps (main.lua:88 vs :112). While a supervisor is enabled, esc /
---      tcs are rewritten to CMU.warningLightPulse only while the qualified
---      lamp is on AND that supervisor's raw flag is on or was on within the
---      last lampHoldS; otherwise 0. dseWarningPulse (UI DSC button blink,
---      CMU.lua:196-197) is rewritten the same way while the CMU state is
---      normal. Untouched: escActive / tcsActive (read by the VCU
---      etk854hybrid_tcActive, the 8HP and QA T18), the steady 1 of a
---      DISABLED supervisor (yawControl.lua:94-96, tractionControl.lua:75-77;
---      recognised as esc/tcs == 1 with the raw flag off) and everything
---      while etk854hybrid_dscMode is "OFF". The supervisors rewrite the raw
---      values every frame before this module runs, so the rewrite does not
---      feed back into the next frame. The raw values are kept for telemetry
---      as etk854hybrid_dseEscRaw / etk854hybrid_dseTcsRaw.
---   9. electrics.values.etk854hybrid_gearHint (every frame): the OEM-style
---      shift recommendation the page / HUD draw next to the engaged gear
---      (triangle + gear). Source: etk854hybrid_gearPlanned from the 8HP core
---      (etk854hybrid_8hpCore.lua C.decide: decided / debounced target in D
---      and S, shadow plan of the D program in M<n> and temporary manual).
---      0 = no recommendation. Shown when planned ~= engaged for gearHintOnS
---      (D / S; a normal shift takes ~0.3 s and moves the engaged gear at its
---      start) or gearHintOnManualS (M<n>), cleared after gearHintOffS or at
---      once when the engaged gear changes.
---  10. On-board computer (every frame, nil-safe: no fuel tank -> fuelL -1):
---        fuel tank    energyStorage cfg.fuelTankName ("mainTank", fuelTank.lua:
---                     remainingVolume = storedEnergy / (density * energyDensity)
---                     :11, capacity in l), read live from storedEnergy
---        instantaneous  fuel flow = tank volume drop per frame (l/s), first-
---                     order filter fuelInstTau; l/100 km = flow / speed * 1e5,
---                     l/h = flow * 3600 below fuelInstLhSpeed; mode "ev" while
---                     the VCU has the ICE off (etk854hybrid_iceState < 0.5)
---        trip average fuel used / distance since the last resetTripComputer()
---                     (or spawn); kept across R-resets (the R refill of the tank
---                     is skipped: any volume RISE re-baselines, no negative use)
---        fuel range   litres / learned consumption WHILE THE ICE RUNS (same
---                     distance-weighted estimator as the electric one, default
---                     defaultFuelConsumption) * 100
---        electric average = the learned consKwh above (the SAME number the
---                     centre screen shows as its ELECTRIC average, so both agree)
---      electrics: etk854hybrid_fuelL, _fuelInstL100 (-1 = n/a), _fuelInstLh,
---        _fuelInstMode ("l100" | "lh" | "ev"), _fuelAvgL100 (-1 until
---        tripMinKm), _tripKm, _fuelRangeKm (-1), _evAvgKwh, _tripId
---      customModules property "fuel" -> fuelL fuelCapL fuelRangeKm instL100
---        instLh instMode instBar(0..1) avgL100 tripKm avgKwh tripId
---      M.resetTripComputer() (Actions app / console) starts a new trip.
---
--- Runtime options (tests): M.setOption(key, value), see below.
---
--- Range estimate
---   usable energy = (SOC - socFloor) * capacity of the battery storage
---   consumption   = distance-weighted average of the battery energy drop per
---                   distance, sampled once per second while the ICE is OFF
---                   (EV / REGEN / SAIL). Starts at defaultConsumption and
---                   keeps the learned value across R-resets.
---   range         = usable / consumption * 100
---   socFloor 0.10 = batteryMonitor SOC_LOW1 (below it the EV budget ends).
---
--- Cost: one table lookup batch per frame for the needle and the DSE
--- channels, one storage read per second, a handful of numbers per UI push.
--- No allocations per frame (the gate proxy is created once). The gate's
--- __index runs once per physics step for the ICE TC group.
--- =========================================================================
+-- Order: no defaultOrder -> 100000, after CMU / yawControl / tractionControl and
+-- before material.updateGFX reads the glowMaps (the telltale rewrite needs both).
 
 local M = {}
 M.type = "auxiliary"
 
 local max, min, abs = math.max, math.min, math.abs
 
--- Boost stage -> e-machine limits. Mirrors BOOST_STAGES in
--- etk854hybridControl.lua (powerKw / regenKw) - keep both in sync.
+-- e-machine limits per boost stage; keep in sync with BOOST_STAGES in etk854hybridControl.lua
 local STAGE_EV_KW = {[0] = 83, [1] = 110, [2] = 150, [3] = 200}
 local STAGE_REGEN_KW = {[0] = 55, [1] = 65, [2] = 80, [3] = 95}
 
--- combustionEngine device.maxPower is in mechanical hp
--- (torqueToPower = 1 / 7120.9, lua/vehicle/powertrain/combustionEngine.lua:21)
-local HP_TO_KW = 0.7457
+local HP_TO_KW = 0.7457 -- combustionEngine maxPower is in hp
 
 local J_PER_KWH = 3600000
 
--- etk854hybrid_gearActual while no gearbox device is resolved (header item 7)
+-- gearActual without a gearbox device; a missing key would arrive as 0 (neutral),
+-- this marker lets the page fall back to electrics.gearIndex
 local GEAR_UNKNOWN = -99
 
 local cfg = {
   engineName = "mainEngine",
   batteryName = "mainBattery",
   socFloor = 0.10,
-  defaultConsumption = 21.0, -- kWh/100 km, reference-hybrid-like mixed driving
+  defaultConsumption = 21.0, -- kWh/100 km, start value
   consumptionMin = 12.0,
   consumptionMax = 40.0,
-  consumptionDistance = 3000, -- m, averaging distance of the estimator
+  consumptionDistance = 3000, -- m, averaging distance
   sampleInterval = 1.0, -- s
   tachoReadyRpm = 0,
   tachoOffRpm = -500,
-  tachoSweepRate = 1800, -- rpm/s for the READY <-> OFF sweeps
+  tachoSweepRate = 1800, -- rpm/s, READY <-> OFF
   iceRpmMin = 150,
   -- DSE / DSC lamp / gear
   motorName = "integratedMotor",
   gearboxName = "gearbox",
-  lampTfMax = 0.90, -- throttle factor below this counts as a real trim
-  lampOnS = 0.25, -- s of continuous trim before the lamp lights
-  lampHoldS = 1.0, -- s the lamp stays on after the last qualifying frame
+  lampTfMax = 0.90, -- throttle factor below = real trim
+  lampOnS = 0.25, -- s of trim before the lamp lights
+  lampHoldS = 1.0, -- s, after a stock trim / brake stage
+  lampHoldTsaS = 0.3, -- s, after a trailer stability braking stage (its own 0.15 s tail comes first)
   lampK0Min = 0.9, -- K0 ratio from which the ICE factor counts
-  dseIceK0Gate = true,
+  dseIceK0Gate = true, -- see installIceGate
   dseIceK0GateMin = 0.1, -- K0 ratio below which the ICE TC group sees throttle 0
-  dseStockLampQualified = true, -- header item 8
+  dseStockLampQualified = true, -- stock ESC / TCS decals follow the qualified lamp
   gearStyle = "number", -- "number" (D1..D8) | "plain" (D, S<n>, M<n>)
-  -- shift recommendation debounce (header item 9) [s]
-  gearHintOnS = 0.25, -- D / S: planned != engaged this long (a shift takes ~0.3 s)
-  gearHintOnManualS = 0.10, -- M<n> / temporary manual
-  gearHintOffS = 0.20, -- recommendation gone this long (a shift clears at once)
-  -- on-board computer (header item 10)
+  -- shift recommendation debounce [s]
+  gearHintOnS = 0.25, -- show delay D / S (a shift takes ~0.3 s)
+  gearHintOnManualS = 0.10, -- show delay M<n>
+  gearHintOffS = 0.20, -- clear delay
+  -- on-board computer
   fuelTankName = "mainTank",
-  defaultFuelConsumption = 8.0, -- l/100 km with the ICE running (R6 hybrid, mixed)
+  defaultFuelConsumption = 8.0, -- l/100 km, start value
   fuelConsumptionMin = 3.0,
   fuelConsumptionMax = 30.0,
-  fuelInstTau = 0.6, -- s, filter of the instantaneous flow
-  fuelInstLhSpeed = 1.4, -- m/s (~5 km/h): below this l/h instead of l/100 km
-  fuelBarMaxL100 = 30.0, -- full instantaneous bar
+  fuelInstTau = 0.6, -- s
+  fuelInstLhSpeed = 1.4, -- m/s, below: l/h instead of l/100 km
+  fuelBarMaxL100 = 30.0, -- full bar
   fuelBarMaxLh = 10.0,
-  tripMinKm = 0.2 -- trip average shown from this distance on
+  tripMinKm = 0.2 -- trip average shown from here
 }
 
--- on-board computer state (header item 10), one table
+-- on-board computer state
 local obc = {
   tank = nil,
   retryT = 0,
@@ -256,18 +93,16 @@ local obc = {
   tripId = 0,
   fuelL = -1,
   fuelCapL = 0,
-  consFuel = 8.0, -- learned l/100 km while the ICE runs
+  consFuel = 8.0, -- learned l/100 km, ICE running
   sampleT = 0,
   sampleDist = 0,
   sampleFuel = 0
 }
 
--- shift recommendation display state (header item 9)
 local hint = {actual = nil, shown = 0, t = 0}
 
--- all mutable state in one table (keeps the upvalue count low)
+-- mutable state in one table (upvalue limit)
 local st = {
-  -- needle
   needle = -500,
   -- estimator
   sampleTimer = 0,
@@ -278,7 +113,6 @@ local st = {
   usableKwh = 0,
   capKwh = 0,
   hasBattery = false,
-  -- scale
   iceKw = 0,
   -- requested properties
   wantRange = false,
@@ -287,25 +121,25 @@ local st = {
   wantFuel = false
 }
 
--- DSE handles (resolved on the first frames, retried at 1 Hz while missing)
--- and DSC lamp timers
+-- DSE handles (retried at 1 Hz while missing) and DSC lamp timers
 local dse = {
   resolved = false,
   retryT = 0,
   mtc = nil, -- motorTorqueControl
   bc = nil, -- brakeControl
-  cmu = nil, -- CMU (virtualSensors)
-  tc = nil, -- tractionControl supervisor
+  cmu = nil,
+  tc = nil, -- tractionControl
   ice = nil,
   em = nil,
   gbx = nil,
-  grpIce = nil, -- tractionControl wheelGroup of the ICE
-  grpEm = nil, -- tractionControl wheelGroup of the e-machine
+  grpIce = nil, -- tractionControl wheelGroups
+  grpEm = nil,
   gateDone = false,
   lowT = 0,
-  holdT = 0,
-  escT = 0, -- s left since yawControl's raw escActive was last on
-  tcsT = 0 -- s left since tractionControl's raw tcsActive was last on
+  holdT = 0, -- s left of the stock hold
+  tsaT = 0, -- s left of the trailer stability hold
+  escT = 0, -- s left of the raw escActive hold
+  tcsT = 0 -- s left of the raw tcsActive hold
 }
 
 local function num(v, d)
@@ -332,6 +166,7 @@ local function readConfig(jbeamData)
   cfg.lampTfMax = num(jbeamData.lampTfMax, cfg.lampTfMax)
   cfg.lampOnS = max(0, num(jbeamData.lampOnS, cfg.lampOnS))
   cfg.lampHoldS = max(0, num(jbeamData.lampHoldS, cfg.lampHoldS))
+  cfg.lampHoldTsaS = max(0, num(jbeamData.lampHoldTsaS, cfg.lampHoldTsaS))
   cfg.lampK0Min = num(jbeamData.lampK0Min, cfg.lampK0Min)
   if jbeamData.dseIceK0Gate ~= nil then
     cfg.dseIceK0Gate = jbeamData.dseIceK0Gate == true
@@ -372,6 +207,8 @@ local function refreshIcePeak()
 end
 
 -- -------------------------------------------------------------- needle
+-- Engine rpm while the ICE turns, else READY (ignition on) or OFF. Both stock
+-- dial faces print READY at ~0 and OFF at ~-500 rpm; moves sweep at tachoSweepRate.
 local function updateNeedle(dt)
   local ev = electrics.values
   local rpm = num(ev.rpm, 0)
@@ -386,8 +223,7 @@ local function updateNeedle(dt)
   end
   local cur = st.needle
   if target > cfg.iceRpmMin then
-    -- engine turning: follow the real rpm without lag, but come out of the
-    -- READY/OFF zone at the sweep rate so the needle does not snap
+    -- follow the rpm, but leave the READY/OFF zone at the sweep rate
     if cur < cfg.tachoReadyRpm then
       cur = min(target, cur + cfg.tachoSweepRate * dt)
     else
@@ -407,6 +243,9 @@ local function updateNeedle(dt)
 end
 
 -- ----------------------------------------------------------- estimator
+-- EV range = (SOC - socFloor) * capacity / consumption * 100; consumption is a
+-- distance-weighted average sampled while the ICE is off, kept over R-resets.
+-- socFloor = batteryMonitor SOC_LOW1 (end of the EV budget).
 local function updateEstimator(dt)
   st.sampleDist = st.sampleDist + abs(num(electrics.values.wheelspeed, 0)) * dt
   st.sampleTimer = st.sampleTimer + dt
@@ -446,10 +285,11 @@ local function updateEstimator(dt)
 end
 
 -- ---------------------------------------------------- on-board computer
--- header item 10. Live volume from storedEnergy (fuelTank.lua:11 derives
--- remainingVolume the same way, but only in its own updateGFX, which runs
--- after the controllers, main.lua:88/:93).
-local MAX_FLOW_LPS = 0.05 -- 180 l/h: anything faster is a leak / manipulation, not consumption
+-- Tank litres come live from storedEnergy (fuelTank updates remainingVolume only
+-- after the controllers). Instantaneous = filtered volume drop: l/100 km, l/h
+-- below fuelInstLhSpeed, "ev" with the ICE off. Fuel range uses the consumption
+-- learned with the ICE running. The trip survives R-resets. -1 = not available.
+local MAX_FLOW_LPS = 0.05 -- 180 l/h, above = not consumption
 
 local function tankVolume(t)
   local se, d, e = t.storedEnergy, t.fuelLiquidDensity, t.energyDensity
@@ -499,7 +339,7 @@ local function updateFuel(dt)
   local used = 0
   if obc.lastVol then
     used = obc.lastVol - vol
-    -- a RISE (refuel, R refill) or an implausible drop re-baselines
+    -- a rise (refuel, R refill) or an implausible drop re-baselines
     if used < 0 or used > MAX_FLOW_LPS * dt then
       used = 0
     end
@@ -508,7 +348,6 @@ local function updateFuel(dt)
   obc.tripFuelL = obc.tripFuelL + used
   obc.tripDistM = obc.tripDistM + dist
 
-  -- instantaneous (filtered flow)
   obc.flow = obc.flow + (used / dt - obc.flow) * min(1, dt / cfg.fuelInstTau)
   local iceOn = num(ev.etk854hybrid_iceState, 1) >= 0.5
   if not iceOn then
@@ -526,8 +365,7 @@ local function updateFuel(dt)
     obc.instBar = min(1, obc.instL100 / cfg.fuelBarMaxL100)
   end
 
-  -- learned consumption while the ICE runs (fuel range), same estimator as
-  -- the electric one (updateEstimator)
+  -- learned consumption with the ICE running (fuel range)
   if iceOn and spd >= cfg.fuelInstLhSpeed then
     obc.sampleDist = obc.sampleDist + dist
     obc.sampleFuel = obc.sampleFuel + used
@@ -547,8 +385,7 @@ local function updateFuel(dt)
   publishFuel(ev)
 end
 
--- Starts a new trip (average fuel consumption + trip distance). The electric
--- average is the learned consumption behind the EV range and is kept.
+-- New trip (fuel average + distance); the learned EV consumption is kept.
 local function resetTripComputer()
   obc.tripFuelL, obc.tripDistM = 0, 0
   obc.tripId = obc.tripId + 1
@@ -560,7 +397,7 @@ local function resetTripComputer()
 end
 
 -- ------------------------------------------------------ DSE diagnostics
--- true for boolean true or a number > 0.5 (electrics flags arrive as either)
+-- electrics flags arrive as boolean or number
 local function on(v)
   return v == true or (tonumber(v) or 0) > 0.5
 end
@@ -605,15 +442,19 @@ local function resolveDse()
   dse.resolved = dse.gbx ~= nil and (dse.tc == nil or dse.grpIce ~= nil or dse.grpEm ~= nil)
 end
 
--- See header item 6. Returns true when the gate is in place (or not wanted /
--- not applicable), false while the TC group does not exist yet.
+-- ICE K0 gate: virtualSpeedSlip measures slip while motor.throttle > 0.01, and
+-- the engine throttle includes idle, so the ICE TC group would trim and flag
+-- tcsActive while the ICE idles behind an open K0. The group's motor reference
+-- becomes a read-through proxy whose throttle reads 0 below dseIceK0GateMin
+-- (throttleFactor is still written on the real device). Returns false while the
+-- TC group does not exist yet.
 local function installIceGate()
   if not cfg.dseIceK0Gate then
     return true
   end
   local g = dse.grpIce
   if not g then
-    -- resolved without an ICE TC group (no DSE, or no ICE listed): nothing to gate
+    -- no ICE TC group: nothing to gate
     return dse.resolved
   end
   local dev = g.motor
@@ -628,7 +469,7 @@ local function installIceGate()
   setmetatable(proxy, {
     __index = function(_, k)
       if k == "throttle" then
-        -- nil on a vehicle without our VCU: no gating
+        -- nil without the VCU: no gating
         local r = tonumber(electrics.values.etk854hybrid_k0ClutchRatio)
         if r and r < gateMin then
           return 0
@@ -641,7 +482,6 @@ local function installIceGate()
   return true
 end
 
--- Undo installIceGate (runtime option dseIceK0Gate = false, see M.setOption)
 local function removeIceGate()
   local g = dse.grpIce
   local p = g and g.motor
@@ -650,11 +490,15 @@ local function removeIceGate()
   end
 end
 
--- See header item 8. lampOn = qualified lamp state of this frame.
+-- Stock telltales: yawControl / tractionControl write esc / tcs from the raw
+-- didAct every frame. Running after them, rewrite them to CMU.warningLightPulse
+-- only while the qualified lamp is on and that supervisor's raw flag is (or was
+-- within lampHoldS) on; dseWarningPulse likewise. escActive / tcsActive (read
+-- by the VCU and the 8HP), a disabled supervisor's steady 1 and DSC OFF stay
+-- untouched. No feedback: the supervisors rewrite esc / tcs every frame.
 local function qualifyStockLamps(ev, dt, lampOn)
   if ev.etk854hybrid_dscMode == "OFF" then
-    -- DSC OFF: keep the stock steady-on telltale, also during the fade-out
-    -- of a raw flag right after the switch
+    -- keep the stock steady-on telltale
     dse.escT, dse.tcsT = 0, 0
     return
   end
@@ -664,20 +508,31 @@ local function qualifyStockLamps(ev, dt, lampOn)
   dse.escT = escAct and cfg.lampHoldS or max(0, dse.escT - dt)
   dse.tcsT = tcsAct and cfg.lampHoldS or max(0, dse.tcsT - dt)
   local escRaw, tcsRaw = ev.esc, ev.tcs
-  -- nil = supervisor not fitted; 1 with the raw flag off = supervisor disabled
+  -- nil = not fitted; 1 with the raw flag off = disabled
   if escRaw ~= nil and not (escRaw == 1 and not escAct) then
     ev.esc = (lampOn and (escAct or dse.escT > 0)) and pulse or 0
   end
   if tcsRaw ~= nil and not (tcsRaw == 1 and not tcsAct) then
     ev.tcs = (lampOn and (tcsAct or dse.tcsT > 0)) and pulse or 0
   end
-  -- CMU.lua:197 writes 1 in a degraded / offline system state; keep that
+  -- keep the CMU's 1 in a degraded / offline state
   local states = cmu and cmu.systemStates
   if ev.dseWarningPulse ~= nil and states and cmu.systemState == states.normal then
     ev.dseWarningPulse = lampOn and pulse or 0
   end
 end
 
+-- DSE diagnostics, qualified DSC lamp, engaged gear. Sampled per frame while the
+-- flags change per physics step (duty estimate). etk854hybrid_dseSrc bits:
+--   1/2 motorTorqueControl actingAsTC/YC (last wheel group stepped)
+--   4/8 TC/YC brake stage   16/32 ICE/e-machine throttleFactor < 1
+--   64/128 brakeControl actingAsTC/YC   256 trailer stability brake stage
+-- Lamp: min(motorTf, iceTf) < lampTfMax for lampOnS or a DSE brake stage, held
+-- lampHoldS; a TSA brake stage, held lampHoldTsaS (each source keeps its own
+-- hold, so a short TSA corner jab stays a short flash). iceTf counts only with
+-- K0 closed (trimming an ICE that idles behind an open K0 changes nothing at
+-- the wheels). The raw escActive / tcsActive react to any trim (even 0.999)
+-- and would blink.
 local function updateDse(dt)
   local ev = electrics.values
   local motorTf, iceTf = devTf(dse.em), devTf(dse.ice)
@@ -700,8 +555,11 @@ local function updateDse(dt)
     if bc.isActingAsTC == true then src = src + 64 end
     if bc.isActingAsYC == true then src = src + 128 end
   end
+  local tsaLamp = on(ev.etk854hybrid_tsaLamp)
+  if tsaLamp then src = src + 256 end
   ev.etk854hybrid_dseSrc = src
 
+  -- CMU virtual sensors: speed [km/h], body slip angle [rad]
   local vs = dse.cmu and dse.cmu.virtualSensors
   local virt = type(vs) == "table" and vs.virtual or nil
   if type(virt) == "table" then
@@ -711,7 +569,6 @@ local function updateDse(dt)
   if dse.grpIce then ev.etk854hybrid_dseSlipIce = num(dse.grpIce.maxSlip, 0) end
   if dse.grpEm then ev.etk854hybrid_dseSlipEm = num(dse.grpEm.maxSlip, 0) end
 
-  -- qualified DSC lamp (header item 5)
   local tf = motorTf
   if num(ev.etk854hybrid_k0ClutchRatio, 1) >= cfg.lampK0Min then
     tf = min(tf, iceTf)
@@ -721,23 +578,28 @@ local function updateDse(dt)
   else
     dse.lowT = 0
   end
-  if dse.lowT >= cfg.lampOnS or tcBrake or ycBrake then
+  local stock = dse.lowT >= cfg.lampOnS or tcBrake or ycBrake
+  if stock then
     dse.holdT = cfg.lampHoldS
   elseif dse.holdT > 0 then
     dse.holdT = max(0, dse.holdT - dt)
   end
-  -- the second clause keeps the lamp correct with lampHoldS = 0
-  local lampOn = dse.holdT > 0 or dse.lowT >= cfg.lampOnS or tcBrake or ycBrake
+  if tsaLamp then
+    dse.tsaT = cfg.lampHoldTsaS
+  elseif dse.tsaT > 0 then
+    dse.tsaT = max(0, dse.tsaT - dt)
+  end
+  -- the last clauses keep the lamp correct with zero holds
+  local lampOn = dse.holdT > 0 or dse.tsaT > 0 or stock or tsaLamp
   ev.etk854hybrid_dscLamp = lampOn and 1 or 0
-  -- raw stock telltale values before item 8 rewrites them (telemetry; the
-  -- recorder runs after this module and sees the rewritten esc / tcs)
+  -- raw telltales before the rewrite (telemetry)
   ev.etk854hybrid_dseEscRaw = num(ev.esc, 0)
   ev.etk854hybrid_dseTcsRaw = num(ev.tcs, 0)
   if cfg.dseStockLampQualified then
     qualifyStockLamps(ev, dt, lampOn)
   end
 
-  -- engaged gear (header item 7)
+  -- engaged gear (electrics.gearIndex is the 8HP target and runs ahead)
   local gbx = dse.gbx
   if gbx then
     ev.etk854hybrid_gearActual = num(gbx.gearIndex, 0)
@@ -746,7 +608,8 @@ local function updateDse(dt)
   end
 end
 
--- See header item 9. Debounced shift recommendation for the page / HUD.
+-- Debounced shift recommendation from etk854hybrid_gearPlanned (8HP target in
+-- D / S, shadow D plan in M<n>; 0 = none). Cleared at once on a gear change.
 local function updateGearHint(dt)
   local ev = electrics.values
   local actual = num(ev.etk854hybrid_gearActual, 0)
@@ -759,7 +622,7 @@ local function updateGearHint(dt)
     raw = planned
   end
   if actual ~= hint.actual then
-    -- a shift happened: the old recommendation is spent, debounce afresh
+    -- a shift spends the recommendation
     hint.actual, hint.shown, hint.t = actual, 0, 0
   end
   if raw == hint.shown then
@@ -778,44 +641,36 @@ local function updateGearHint(dt)
 end
 
 -- ------------------------------------------------------------ contract
+-- Transient display state, restarted on spawn and on R (= reset). The learned
+-- consumption, the DSE wheel groups / gate proxy (tractionControl.reset only
+-- clears slip state) and the trip survive R; re-baselining the tank volume keeps
+-- the R refill out of the trip.
+local function resetTransient()
+  st.sampleTimer, st.sampleDist, st.lastEnergy = 0, 0, nil
+  st.needle = cfg.tachoOffRpm
+  electrics.values.etk854hybrid_tachoRpm = st.needle
+  dse.lowT, dse.holdT, dse.tsaT, dse.escT, dse.tcsT = 0, 0, 0, 0, 0
+  electrics.values.etk854hybrid_dscLamp = 0
+  hint.actual, hint.shown, hint.t = nil, 0, 0
+  electrics.values.etk854hybrid_gearHint = 0
+  obc.lastVol, obc.flow = nil, 0
+  obc.sampleT, obc.sampleDist, obc.sampleFuel = 0, 0, 0
+end
+
 local function init(jbeamData)
   readConfig(jbeamData)
   st.consKwh = cfg.defaultConsumption
-  st.needle = cfg.tachoOffRpm
-  st.sampleTimer, st.sampleDist, st.lastEnergy = 0, 0, nil
   st.rangeKm = -1
-  electrics.values.etk854hybrid_tachoRpm = st.needle
+  resetTransient()
   dse.resolved, dse.gateDone, dse.retryT = false, false, 0
-  dse.lowT, dse.holdT, dse.escT, dse.tcsT = 0, 0, 0, 0
-  electrics.values.etk854hybrid_dscLamp = 0
   electrics.values.etk854hybrid_gearActual = GEAR_UNKNOWN
-  hint.actual, hint.shown, hint.t = nil, 0, 0
-  electrics.values.etk854hybrid_gearHint = 0
   -- on-board computer: a spawn starts a new trip
-  obc.tank, obc.retryT, obc.lastVol, obc.flow = nil, 0, nil, 0
+  obc.tank, obc.retryT = nil, 0
   obc.tripFuelL, obc.tripDistM, obc.tripId = 0, 0, 0
   obc.consFuel = cfg.defaultFuelConsumption
-  obc.sampleT, obc.sampleDist, obc.sampleFuel = 0, 0, 0
   obc.fuelL, obc.fuelCapL = -1, 0
   obc.instL100, obc.instLh, obc.instMode, obc.instBar = -1, 0, "ev", 0
   publishFuel(electrics.values)
-end
-
-local function reset()
-  -- keep the learned consumption; restart the sampling window
-  st.sampleTimer, st.sampleDist, st.lastEnergy = 0, 0, nil
-  st.needle = cfg.tachoOffRpm
-  electrics.values.etk854hybrid_tachoRpm = st.needle
-  -- the DSE wheel groups and the gate proxy survive an R-reset
-  -- (tractionControl.reset only clears slip state, tractionControl.lua:124-133)
-  dse.lowT, dse.holdT, dse.escT, dse.tcsT = 0, 0, 0, 0
-  electrics.values.etk854hybrid_dscLamp = 0
-  hint.actual, hint.shown, hint.t = nil, 0, 0
-  electrics.values.etk854hybrid_gearHint = 0
-  -- on-board computer: the trip survives R; the R refill of the tank must not
-  -- count, so the volume is re-baselined (and the fill never counts anyway)
-  obc.lastVol, obc.flow = nil, 0
-  obc.sampleT, obc.sampleDist, obc.sampleFuel = 0, 0, 0
 end
 
 local function updateGFX(dt)
@@ -853,7 +708,6 @@ local function updateGaugeData(m)
   if st.wantFuel then
     local ev = electrics.values
     m.fuelL = obc.fuelL
-    m.fuelCapL = obc.fuelCapL
     m.fuelRangeKm = ev.etk854hybrid_fuelRangeKm
     m.instL100 = obc.instL100
     m.instLh = obc.instLh
@@ -862,11 +716,9 @@ local function updateGaugeData(m)
     m.avgL100 = ev.etk854hybrid_fuelAvgL100
     m.tripKm = obc.tripDistM * 0.001
     m.avgKwh = st.consKwh
-    m.tripId = obc.tripId
   end
   if st.wantRange then
     m.rangeKm = st.hasBattery and st.rangeKm or -1
-    m.consKwh = st.consKwh
   end
   if st.wantScale then
     if st.iceKw <= 0 then
@@ -879,7 +731,7 @@ local function updateGaugeData(m)
   end
 end
 
--- read-only snapshot for other controllers (no allocation: shared table)
+-- read-only snapshot for other controllers (shared table)
 local info = {rangeKm = -1, consKwh = 0, usableKwh = 0, capKwh = 0, iceKw = 0, hasBattery = false,
   fuelL = -1, fuelCapL = 0, fuelRangeKm = -1, instL100 = -1, instLh = 0, instMode = "ev", avgL100 = -1, tripKm = 0}
 local function getEnergyInfo()
@@ -888,7 +740,6 @@ local function getEnergyInfo()
   info.usableKwh = st.usableKwh
   info.capKwh = st.capKwh
   info.hasBattery = st.hasBattery
-  -- on-board computer (header item 10), same values the cluster shows
   local ev = electrics.values
   info.fuelL = obc.fuelL
   info.fuelCapL = obc.fuelCapL
@@ -905,12 +756,8 @@ local function getEnergyInfo()
   return info
 end
 
--- Runtime change of a row option (tests / diagnosis, not persistent):
---   controller.getController("gauges/customModules/etk854hybrid_gaugeData")
---     .setOption("dseStockLampQualified", false)
--- Only existing keys of the same type. dseIceK0Gate false removes the gate
--- proxy at once, true re-installs it on the next frame. Returns the old
--- value, nil when refused.
+-- Runtime option change (tests, not persistent); existing keys of the same type
+-- only. dseIceK0Gate false removes the gate proxy. Returns the old value or nil.
 local function setOption(key, value)
   local old = cfg[key]
   if old == nil or type(old) ~= type(value) then
@@ -928,7 +775,7 @@ local function setOption(key, value)
 end
 
 M.init = init
-M.reset = reset
+M.reset = resetTransient
 M.setOption = setOption
 M.updateGFX = updateGFX
 M.setupGaugeData = setupGaugeData

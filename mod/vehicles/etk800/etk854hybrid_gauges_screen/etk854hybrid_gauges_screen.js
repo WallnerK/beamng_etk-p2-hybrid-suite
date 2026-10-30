@@ -1,46 +1,34 @@
 // ETK 854 ActiveHybrid - instrument cluster page logic
-// =========================================================================
-// Target: BeamNG.drive 0.39.4, web view "@etk800_gauges_screen" (512 x 256)
-//
-// Data: genericGauges calls updateData({electrics, powertrain, customModules})
-// with the channels listed in etk854hybrid_gauges.jbeam (gauge.displayData).
-// Missing electrics arrive as the number 0, so every string channel is
-// type-checked. customModules:
+// Web view "@etk800_gauges_screen" (512 x 256). genericGauges calls
+// updateData({electrics, powertrain, customModules}) with the channels of
+// gauge.displayData (etk854hybrid_gauges.jbeam). Missing electrics arrive as
+// the number 0, so string channels are type-checked. customModules:
 //   environmentData        { time "HH:MM", temperatureEnv [C] }
-//   etk854hybrid_gaugeData { rangeKm, consKwh, iceKw, evKw, regenKw, gearStyle,
-//                            on-board computer ("fuel"): fuelL fuelCapL
-//                            fuelRangeKm instL100 instLh instMode instBar
-//                            avgL100 tripKm avgKwh tripId }
-// electrics etk854hybrid_air* / trailerSpringCoef / parkingbrake from the
-// trunk compressor (etk854hybrid_airCompressor.lua) feed the AIR chips
-// (etk854hybrid_airTrlValve 0 = trailer protection valve shut: the plain
-// AIR chip gets an amber outline until the receiver is back at 6.0 bar).
-// ECO PRO pedal map v3 (etk854hybridControl.lua mapPedal, ecoMapSpec.md
-// step C): etk854hybrid_pedalZone (1 EV zone | 2 EV MAX plateau |
-// 3 hybrid band | 4 kick | 5 kickdown), _pedalEvFrac (T / knee),
-// _pedalBandFrac (position in the band), _pedalIceJoin (> 0 = split map
-// live), _evZoneOpen (ECO EV speed ceiling), _iceDeficitS / _iceDeficitOnS
-// (load integral and its start threshold) drive the demand caret mDem just
-// outside the power-meter arc: inside the blue EV zone while the pedal
-// is in the EV zone, parked (pulsing 1 Hz) on the zone edge on the
-// EV MAX plateau, beyond it across POWER / BOOST in the hybrid band;
-// amber while the load integral builds towards an ICE start.
+//   etk854hybrid_gaugeData { rangeKm iceKw evKw regenKw gearStyle, on-board
+//                            computer: fuelL fuelRangeKm instL100 instLh
+//                            instMode instBar avgL100 tripKm avgKwh }
+// AIR chips: etk854hybrid_air* / trailerSpringCoef / parkingbrake.
+// ECO PRO demand caret: etk854hybrid_pedalZone (1 EV zone | 2 EV MAX plateau |
+// 3 hybrid band | 4 kick | 5 kickdown), _pedalEvFrac, _pedalBandFrac,
+// _pedalIceJoin (> 0 = split map live), _evZoneOpen, _iceDeficitS.
 //
-// Layout (texture px, visible parts of the stock opacity mask):
+// Layout (texture px, visible through the stock opacity mask):
 //   centre column  x 95..221  modes, SOC, EV range, phase, flow glyph
 //   bottom strip   y 216..240 odometer, clock, outside temperature
-//   rev-counter bowl, centre (335.5, 102.3), inner edge r ~136:
-//                  shift program, gear, system power, status chips and the
-//                  power meter arc (CHARGE | EV | POWER | BOOST)
-//   speedometer sliver x 63..92, y 165..210 (the only part of the speedo
-//                  bowl the mask shows): instantaneous consumption bar
-//   band y ~213..222, x 78..240 (under the flow glyph): tank, fuel range,
-//                  trip averages (fuel + electric)
+//   rev-counter bowl, centre (335.5, 102.3), r ~136: shift program, gear,
+//                  system power, chips, power meter (CHARGE | EV | POWER | BOOST)
+//   speedometer sliver x 63..92, y 165..210: instantaneous consumption bar
+//   band y ~213..222, x 78..240: tank, fuel range, trip averages
 //
-// No framework: plain DOM on one inline SVG, every write memoised so an
-// unchanged frame touches nothing. NO CSS animations / transitions (the
-// vehicle web view freezes, see the css file): animate() per data frame.
-// =========================================================================
+// Views HYBRID / EFFICIENCY / SPORT / MINIMAL (etk854hybrid_clusterView, AUTO
+// resolved by the cockpit panel; 0 -> HYBRID). Each view owns its elements
+// (data-views groups switched by opacity: getComputedTextLength needs laid-out
+// text, so never display:none), so no memo (__t, __k, zoneKey, chipKey) holds
+// another view's geometry. Shared: header, chips, power meter, bottom strip,
+// the HYBRID gear box (MINIMAL) and the toast.
+//
+// Plain DOM on one inline SVG, every write memoised. No CSS animations (the
+// vehicle web view freezes, see the css): animate() runs per data frame.
 (function () {
   "use strict";
 
@@ -61,25 +49,23 @@
   };
 
   // ------------------------------------------------------ power meter geometry
-  // Arc concentric with the rev-counter ring as seen through the mask.
-  // Angles in degrees from straight down, positive to the right.
+  // Concentric with the rev-counter ring; degrees from straight down, + = right.
   var ARC = { cx: 335.5, cy: 102.3, r: 122, zoneR: 112.5, a0: -48, a1: 48, s0: 0.2 };
-  // ECO PRO demand caret: triangle outside the arc (track outer edge r + 4.5,
-  // the opacity mask is fully open to r + 12 and cuts at ~r + 13.5), tip
-  // towards the centre
+  // demand caret outside the arc, tip towards the centre (track edge r + 4.5,
+  // mask fully open to r + 12, cut at ~r + 13.5)
   var DEM = { tip: ARC.r + 5, base: ARC.r + 12.5, half: 4, tauS: 0.08, pulseMs: 1000 };
+  // EFFICIENCY: larger caret plus a line across the bar
+  var DEM_EF = { tip: ARC.r + 3, base: ARC.r + 12.5, half: 5.5, ln0: ARC.r - 5.5 };
 
-  // Boost stage -> e-machine limits (fallback when the Lua module is missing).
-  // Mirrors BOOST_STAGES in etk854hybridControl.lua.
+  // e-machine limits per boost stage (fallback without the Lua module);
+  // mirrors BOOST_STAGES in etk854hybridControl.lua
   var STAGE_EV_KW = [83, 110, 150, 200];
   var STAGE_REGEN_KW = [55, 65, 80, 95];
   var DEFAULT_ICE_KW = 250;
-  // Per-mode scale of the blue EV zone = DE_CFG.<mode>.evCapScale in the VCU.
-  // ECO PRO no longer throttles the e-machine since v1.0.1 (evCapScale 1.00),
-  // so the table is empty; keep it as the single place to mirror a future cap.
-  var DE_EV_SCALE = {};
 
   var DE_LABEL = { COMFORT: "COMFORT", ECO_PRO: "ECO PRO", SPORT: "SPORT" };
+  // shift program that only repeats the driving-experience headline
+  var DE_PROG_BASE = { COMFORT: "COMFORT", ECO_PRO: "ECO", SPORT: "SPORT" };
   var DE_COLOR = { COMFORT: C.text, ECO_PRO: C.eco, SPORT: C.sport };
   var ED_LABEL = { AUTO_EDRIVE: "AUTO EV", MAX_EDRIVE: "MAX EV", BATTERY_CONTROL: "BATTERY CONTROL" };
   var ED_COLOR = { AUTO_EDRIVE: C.blueLt, MAX_EDRIVE: C.blue, BATTERY_CONTROL: C.amber };
@@ -101,6 +87,14 @@
   var REGEN_CHIP = { OFF: "REGEN OFF", LOW: "REGEN LOW", HIGH: "REGEN HIGH" };
   var LEVEL_ALERT = { MAX: 1, FAULT: 1 };
 
+  // letter in the data-views attribute
+  var VIEW_CODE = { HYBRID: "H", EFFICIENCY: "E", SPORT: "S", MINIMAL: "M" };
+  // the toast covers the mid block of every view
+  var MID_IDS = ["mid", "efMid", "spMid", "mnMid"];
+  // pedalZone 1..5, HUD wording
+  var PEDAL_ZONE = ["", "EV", "EV FULL", "HYBRID", "ICE", "KICKDOWN"];
+  var DSC_TXT = { DSC: ["DSC", C.blueLt], DTC: ["DTC", C.amber], OFF: ["DSC OFF", C.amber] };
+
   // ------------------------------------------------------------------ state
   var units = { length: "metric", temp: "c", cons: "metric", vol: "l", press: "bar" };
   var $ = {};
@@ -114,9 +108,14 @@
   var zoneKey = "";
   var chipKey = ["", ""];
   var dem = { s: null, t: 0, vis: false }; // demand caret: smoothed arc position
-  // ECO EV ceiling gate (evZoneOpen), debounced: the VCU compares the raw
-  // speed with 120 km/h, so cruising at the ceiling would flicker the zone
+  // ECO EV ceiling gate (evZoneOpen), debounced: the VCU compares raw speed,
+  // so cruising at the ceiling would flicker the zone
   var evGate = { open: true, since: 0, holdMs: 500 };
+  var viewEls = [];   // groups with data-views
+  var viewNow = "";
+  // EFFICIENCY: smoothed electric consumption; SPORT: peak power hold
+  var efCons = { v: 0, t: 0, tauS: 0.6, minSpeed: 1.4 };
+  var spPeak = { kw: 0, t: 0, holdMs: 5000 };
 
   function now() {
     return (window.performance && performance.now) ? performance.now() : Date.now();
@@ -207,9 +206,8 @@
       ln.setAttribute("stroke-width", zero ? "2" : "1.4");
       g.appendChild(ln);
     }
-    // "CHARGE" follows the arc over the charge zone, glyph tops towards the
-    // centre (path runs left -> right). The drive side needs no label: the
-    // chips sit there and the colours carry EV / POWER / BOOST.
+    // "CHARGE" follows the arc (path left -> right, glyph tops inwards); the
+    // drive side needs no label, its colours carry EV / POWER / BOOST
     attr($.mLblPath, "d", arcD(ARC.zoneR - 8.5, 0, ARC.s0));
     try {
       $.mLblCPath.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", "#mLblPath");
@@ -232,20 +230,30 @@
     return Math.round(v * 500) / 500;
   }
 
-  // demand caret at arc position s: tip at DEM.tip, base at DEM.base
-  function caretD(s) {
+  // demand caret at arc position s (g = DEM or DEM_EF)
+  function caretD(s, g) {
+    g = g || DEM;
     var a = ang(s);
     var t = a * Math.PI / 180;
-    var tip = pt(DEM.tip, a);
-    var bc = pt(DEM.base, a);
-    var ux = Math.cos(t) * DEM.half;   // unit tangent of pt(): (cos t, -sin t)
-    var uy = -Math.sin(t) * DEM.half;
+    var tip = pt(g.tip, a);
+    var bc = pt(g.base, a);
+    var ux = Math.cos(t) * g.half;   // unit tangent of pt(): (cos t, -sin t)
+    var uy = -Math.sin(t) * g.half;
     return "M" + tip[0].toFixed(2) + " " + tip[1].toFixed(2) +
       " L" + (bc[0] + ux).toFixed(2) + " " + (bc[1] + uy).toFixed(2) +
       " L" + (bc[0] - ux).toFixed(2) + " " + (bc[1] - uy).toFixed(2) + " Z";
   }
+  // radial line at arc position s from radius r0 to r1
+  function radialD(s, r0, r1) {
+    var p0 = pt(r0, ang(s));
+    var p1 = pt(r1, ang(s));
+    return "M" + p0[0].toFixed(2) + " " + p0[1].toFixed(2) + " L" + p1[0].toFixed(2) + " " + p1[1].toFixed(2);
+  }
 
   // ---------------------------------------------------------------- toast
+  function midOpacity(o) {
+    for (var i = 0; i < MID_IDS.length; i++) { attr($[MID_IDS[i]], "opacity", o); }
+  }
   function toast(title, sub, color, info, seconds) {
     if (!ready) { return; }
     var key = title + "|" + sub + "|" + (info || "");
@@ -260,12 +268,12 @@
     setText($.toastInfo, info || "", 62);
     attr($.toastTitle, "fill", color || C.text);
     attr($.toast, "opacity", "1");
-    attr($.mid, "opacity", "0");
+    midOpacity("0");
     if (toastTimer) { clearTimeout(toastTimer); }
     toastTimer = setTimeout(function () {
       toastTimer = null;
       attr($.toast, "opacity", "0");
-      attr($.mid, "opacity", "1");
+      midOpacity("1");
     }, Math.max(0.6, Math.min(8, seconds || 1.8)) * 1000);
   }
 
@@ -297,17 +305,12 @@
   }
 
   // ----------------------------------------------------------------- gear
-  // g      = shift logic getGearName() (etk854hybrid_8hp.lua:124-136):
-  //          "P" "R" "N" "D", "S<n>", "M<n>" (also M<n> for temporary manual)
-  // actual = etk854hybrid_gearActual, the ENGAGED gearbox gear (gaugeData.lua);
-  //          GEAR_UNKNOWN (-99) while the module has no gearbox device yet.
-  //          A missing channel arrives as 0 (genericGauges.lua:61), so only
-  //          the explicit marker can trigger the fallback.
-  // target = electrics.gearIndex, the 8HP's DECIDED gear (runs ahead by the
-  //          shift time, etk854hybrid_8hp.lua:506/559) - fallback only
-  // style  = "number": D1..D8 | "plain": D without number. S/M always carry the
-  //          engaged gear. No number is ever shown while the gearbox is in
-  //          neutral (index <= 0), and P / R / N are never numbered.
+  // g      = shift logic gear name: "P" "R" "N" "D", "S<n>", "M<n>"
+  // actual = etk854hybrid_gearActual, the engaged gear; GEAR_UNKNOWN without a
+  //          gearbox device (a missing channel is 0, so only the marker falls back)
+  // target = electrics.gearIndex, the 8HP decision (runs ahead) - fallback only
+  // style  = "number": D1..D8 | "plain": D. S/M always numbered; P / R / N and
+  //          neutral (index <= 0) never.
   var GEAR_UNKNOWN_MAX = -50; // gaugeData GEAR_UNKNOWN = -99
   function gearLabel(g, actual, target, style) {
     var n = (actual !== null && actual > GEAR_UNKNOWN_MAX) ? actual : target;
@@ -329,9 +332,8 @@
     var list = [];
     if (v.iesStart) { list.push(["START", C.blueLt, false]); }
     if (v.band === "CRIT" || v.band === "LOW1") { list.push(["BATT LOW", C.red, false]); }
-    // trailer air supply warnings (etk854hybrid_airCompressor.lua): receiver
-    // below the 4.14 bar spring-brake release pressure, or an air-coupled
-    // trailer still holding its spring brakes with our parking brake off
+    // air warnings: receiver below the 4.14 bar spring-brake release, or an
+    // air-coupled trailer holding its spring brakes with our parking brake off
     if (v.air && v.air.low) { list.push(["AIR LOW", C.amber, false, v.air.run]); }
     else if (v.air && v.air.trlBrk) { list.push(["TRL BRK", C.amber, false, v.air.run]); }
     if (v.dsc === "DTC") { list.push(["DTC", C.amber, blinkDsc]); }
@@ -344,16 +346,37 @@
     else if (REGEN_CHIP[v.rl]) { list.push([REGEN_CHIP[v.rl], v.rl === "OFF" ? C.muted : C.green, false]); }
     if (v.boost > 0) { list.push(["BOOST " + v.boost, C.orange, false]); }
     if (v.fan >= 2) { list.push(["FAN " + v.fan, C.blueLt, false]); }
-    // plain receiver pressure: lowest priority, dot = compressor running
-    // amber outline = trailer protection valve shut (no supply to a trailer
-    // until the receiver is back at 6.0 bar)
+    // receiver pressure, lowest priority: dot = compressor running, amber
+    // outline = protection valve shut (reopens at 6.0 bar)
     if (v.air && !v.air.low && !v.air.trlBrk) {
       list.push([v.air.label, v.air.shut ? C.amber : (v.air.run ? C.blueLt : C.muted), false, v.air.run]);
     }
     return list;
   }
-  // slot 0 right of the gear box (left-aligned at x 367), slot 1 left of it
-  // (right-aligned at x 313, clear of the curved CHARGE label)
+  // per view: MINIMAL keeps warnings + DSC; EFFICIENCY / SPORT drop the chips
+  // their column already shows (regen; dsc, boost). Unknown labels = info.
+  var CHIP_KIND = {
+    "BATT LOW": "warn", "AIR LOW": "warn", "TRL BRK": "warn", LEVEL: "warn",
+    DSC: "dsc", DTC: "dsc", "DSC OFF": "dsc",
+    "ONE PEDAL": "regen", "REGEN OFF": "regen", "REGEN LOW": "regen", "REGEN HIGH": "regen"
+  };
+  function chipKind(label) {
+    if (CHIP_KIND.hasOwnProperty(label)) { return CHIP_KIND[label]; }
+    return label.indexOf("BOOST ") === 0 ? "boost" : "info";
+  }
+  function chipsFor(view, list) {
+    if (view === "HYBRID") { return list; }
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var k = chipKind(list[i][0]);
+      var keep = view === "MINIMAL" ? (k === "warn" || k === "dsc") :
+        !((view === "EFFICIENCY" && k === "regen") || (view === "SPORT" && (k === "dsc" || k === "boost")));
+      if (keep) { out.push(list[i]); }
+    }
+    return out;
+  }
+  // slot 0 right of the gear box (left edge x 367), slot 1 left of it (right
+  // edge x 313, clear of the CHARGE label)
   var CHIP_MAXW = [52, 38];
   var CHIP_X = [367, 313];
   function setChip(i, c) {
@@ -371,7 +394,7 @@
       return;
     }
     var hasDot = !!c[3];
-    var pad = hasDot ? 14 : 11; // the dot takes ~3.5 px + gap at the right end
+    var pad = hasDot ? 14 : 11; // dot ~3.5 px + gap
     t.__t = null;
     txt(t, c[0]);
     t.removeAttribute("textLength");
@@ -403,14 +426,9 @@
   }
 
   // ------------------------------------------------------------ animation
-  // Script-driven instead of CSS keyframes: in BeamNG 0.39.4 the vehicle
-  // HTML texture stopped showing DOM updates once an infinite CSS animation
-  // ran - the cluster froze as soon as the energy-flow dashes started (i.e.
-  // as soon as the car drove), with the last gear / mode on screen and a
-  // DSC chip that went on blinking by itself (user feedback 2026-10 "Gang im
-  // Tacho", "DSC blinkt die ganze Zeit"; reproduced in game). Called once per
-  // data frame (~UI rate), so the steps are coarse but the page stays live.
-  var FLOW_PERIOD_MS = 450;   // one dash period (6 px) per 0.45 s, as the old CSS
+  // Script-driven instead of CSS keyframes (see the css), once per data frame:
+  // coarse steps, but the page stays live.
+  var FLOW_PERIOD_MS = 450;   // one dash period (6 px) per 0.45 s
   var BLINK_PERIOD_MS = 500;  // 0.25 s on / 0.25 s dim
   function animate() {
     var t = now();
@@ -424,20 +442,22 @@
       attr(el, "stroke-dashoffset", off.toFixed(1));
     }
     var lit = (t % BLINK_PERIOD_MS) < BLINK_PERIOD_MS / 2;
-    var bl = [$.chip1, $.chip2, $.icIce];
+    var bl = [$.chip1, $.chip2, $.icIce, $.spDsc];
     for (var j = 0; j < bl.length; j++) {
       var g = bl[j];
       if (!g) { continue; }
-      if (g === $.icIce) {
+      if (g === $.icIce || g === $.spDsc) {
         attr(g, "opacity", g.__blink && !lit ? "0.25" : "1");
       } else if (g.__a && g.__a.opacity !== "0") {
         // visible chip: blink between 1 and 0.25; setChip hides with "0"
         attr(g, "opacity", g.__blink && !lit ? "0.25" : "1");
       }
     }
-    // demand caret: hidden / steady / 1 Hz pulse on the EV MAX plateau
-    var md = $.mDem;
-    if (md) {
+    // demand carets: hidden / steady / 1 Hz pulse on the EV MAX plateau
+    var cr = [$.mDem, $.efDem];
+    for (var k = 0; k < cr.length; k++) {
+      var md = cr[k];
+      if (!md) { continue; }
       var op = "0";
       if (md.__vis) {
         op = md.__pulse ? (0.725 + 0.275 * Math.cos(2 * Math.PI * (t % DEM.pulseMs) / DEM.pulseMs)).toFixed(2) : "1";
@@ -451,14 +471,12 @@
   }
 
   // ----------------------------------------------------- on-board computer
-  // customModules.etk854hybrid_gaugeData "fuel" (etk854hybrid_gaugeData.lua
-  // header item 10). Units follow the game settings handed to setup():
-  // uiUnitConsumptionRate "metric" -> l/100 km, else US mpg; uiUnitVolume
-  // "gal" -> US gallons; uiUnitLength -> km / mi (same rules as the stock
-  // gauges_screen.js setup()). Litres as "L": a lone condensed "l" after a
-  // number reads as "|" on the small texture.
+  // gaugeData "fuel". Units from setup() as in the stock gauges_screen.js:
+  // consumption "metric" -> l/100 km else US mpg, volume "gal" -> US gal,
+  // length -> km / mi. Litres as "L": a condensed "l" reads as "|" here.
   var L_PER_GAL = 3.785411784;
   var KM_PER_MI = 1.609344;
+  var KM_TO_MI = 0.621371; // EV range display factor, not 1 / KM_PER_MI (rounds differently)
   var MPG_L100 = 235.214583; // mpg = 235.21 / (l/100 km)
   var OBC_BAR_Y = 207, OBC_BAR_H = 40;
   var obcFitKey = "";
@@ -479,7 +497,6 @@
     var bar = clamp01(num(gd.instBar) || 0);
     var val, unit;
     if (mode === "ev") {
-      // ICE off: electric driving, no fuel flow
       val = mpg ? "EV" : "0.0";
       unit = mpg ? "" : "EV";
       bar = 0;
@@ -518,7 +535,7 @@
     txt($.avgE, hasE ? (miles ? kwh * KM_PER_MI : kwh).toFixed(1) : "");
     txt($.avgEU, hasE ? "kWh" : "");
     txt($.avgPer, (mpg && !hasE) ? "" : (miles ? "/100mi" : "/100km"));
-    // re-fit only when the rendered strings changed (getComputedTextLength)
+    // re-fit only when the strings changed (getComputedTextLength)
     var key = $.obcL.textContent + "|" + $.obcR.textContent;
     if (key !== obcFitKey) {
       obcFitKey = key;
@@ -527,95 +544,204 @@
     }
   }
 
-  // ------------------------------------------------------------ main apply
-  function apply(d) {
-    if (!ready || !d) { return; }
-    var e = d.electrics || {};
-    var cm = d.customModules || {};
-    var env = cm.environmentData || {};
-    var gd = cm.etk854hybrid_gaugeData || {};
-
-    // ---------------- inputs
-    var phRaw = str(e.etk854hybrid_phase);
-    var hasVcu = phRaw !== null;
-    var ign = num(e.ignitionLevel) || 0;
-    var ice = hasVcu ? (num(e.etk854hybrid_icePower) || 0) : 0;
-    var ev = hasVcu ? (num(e.etk854hybrid_evPower) || 0) : 0;
-    var total = ice + ev;
-    var iceOn = (num(e.etk854hybrid_iceState) || 0) > 0.5;
-    var sail = hasVcu && ((num(e.etk854hybrid_sailActive) || 0) > 0.5 || phRaw === "SAIL");
-    var speed = Math.abs(num(e.wheelspeed) || 0);
-    var soc = hasVcu ? num(e.etk854hybrid_batterySoc) : null;
-    var tgt = num(e.etk854hybrid_targetSoc);
-    if (tgt !== null && tgt > 1.5) { tgt = tgt / 100; }
-    var de = str(e.etk854hybrid_deMode);
-    var ed = str(e.etk854hybrid_edriveMode);
-    var boost = Math.max(0, Math.min(3, Math.round(num(e.etk854hybrid_boostStage) || 0)));
-    var ies = str(e.etk854hybrid_iceEngageState);
-    var k0 = num(e.etk854hybrid_k0ClutchRatio);
-    if (!hasVcu) { k0 = 0; } else if (k0 === null) { k0 = iceOn ? 1 : 0; }
-    k0 = clamp01(k0);
-    var evAvail = (num(e.etk854hybrid_evAvailable) === null) ? 1 : num(e.etk854hybrid_evAvailable);
-    var evFrac = num(e.etk854hybrid_evPowerFraction);
-    if (evFrac === null) { evFrac = 1; }
-    var rl = str(e.etk854hybrid_regenLevel);
-    var band = str(e.etk854hybrid_batteryBand);
-    var dsc = str(e.etk854hybrid_dscMode);
-    // Qualified lamp from etk854hybrid_gaugeData (real trim < 0.90 for
-    // >= 0.25 s or a brake stage, held 1 s). The raw etk854hybrid_tcActive
-    // (escActive || tcsActive) lights on ANY DSE didAct. Every part that
-    // loads this page also fits gaugeData, and a missing listed channel
-    // arrives as 0 (genericGauges.lua:61), so in the game the lamp channel
-    // is always a number; the tcActive branch only serves the demo /
-    // preview when the key is left out.
-    var lampRaw = num(e.etk854hybrid_dscLamp);
-    var dseActing = lampRaw !== null ? lampRaw > 0.5 : (num(e.etk854hybrid_tcActive) || 0) > 0.5;
-    var awd = str(e.etk854hybrid_awdMode);
-    var trl = (num(e.etk854hybrid_trailerMode) || 0) > 0.5;
-    var lvl = str(e.etk854hybrid_levelState);
-    var fan = Math.round(num(e.etk854hybrid_fanStage) || 0);
-    var op = (num(e.etk854hybrid_onePedalHold) || 0) > 0.5;
-
-    // ---------------- scale (Lua module, else boost-stage fallback)
-    var iceKw = num(gd.iceKw);
-    if (!(iceKw > 1)) { iceKw = DEFAULT_ICE_KW; }
-    var evKw = num(gd.evKw);
-    if (!(evKw > 1)) { evKw = STAGE_EV_KW[boost]; }
-    var regenKw = num(gd.regenKw);
-    if (!(regenKw > 1)) { regenKw = STAGE_REGEN_KW[boost]; }
-    scale.ice = iceKw;
-    scale.ev = evKw;
-    scale.max = iceKw + evKw;
-    scale.regen = regenKw;
-
-    // electric-only capability now: stage peak x battery derating x DE cap;
-    // grey (0) when the pack cannot drive or the mode keeps the engine on
-    var evLimit = evKw * clamp01(evFrac) * (DE_EV_SCALE[de] || 1);
-    // BATTERY CONTROL never drives electrically while moving: below the target
-    // SOC the engine charges, at/above it the engine carries the car (VCU
-    // EDRIVE_CFG.BATTERY_CONTROL: evTopKmh 0, iceKickdown 0)
-    var iceForced = de === "SPORT" || ed === "BATTERY_CONTROL";
-    if (!hasVcu || evAvail < 0.5 || iceForced) { evLimit = 0; }
-    // ECO PRO split map (pedal map v3): above the ECO EV speed ceiling
-    // (DE_CFG.ECO_PRO.evTopAuto, 120 km/h) the map no longer drives
-    // electrically -> grey zone. Only while the split map is live
-    // (pedalIceJoin > 0): a missing channel arrives as 0 and must not grey it.
-    var ecoSplit = hasVcu && de === "ECO_PRO" && ed === "AUTO_EDRIVE" && (num(e.etk854hybrid_pedalIceJoin) || 0) > 0;
-    var openRaw = (num(e.etk854hybrid_evZoneOpen) || 0) > 0.5;
-    var tGate = now();
-    if (!ecoSplit || openRaw === evGate.open) {
-      evGate.since = 0;
-      if (!ecoSplit) { evGate.open = true; }
-    } else if (!evGate.since) {
-      evGate.since = tGate;
-    } else if (tGate - evGate.since >= evGate.holdMs) {
-      evGate.open = openRaw;
-      evGate.since = 0;
+  // ------------------------------------------------------------------ views
+  function viewOf(v) {
+    return (typeof v === "string" && VIEW_CODE.hasOwnProperty(v)) ? v : "HYBRID";
+  }
+  function setView(v) {
+    if (v === viewNow) { return; }
+    viewNow = v;
+    var code = VIEW_CODE[v];
+    for (var i = 0; i < viewEls.length; i++) {
+      var el = viewEls[i];
+      attr(el, "opacity", String(el.getAttribute("data-views")).indexOf(code) >= 0 ? "1" : "0");
     }
-    if (ecoSplit && !evGate.open) { evLimit = 0; }
-    updateZones(evLimit, iceKw);
+  }
+  // 8HP shift program colour (ECO teal, SPORT red, MANUAL amber)
+  function progColor(t) {
+    if (t.indexOf("ECO") === 0) { return C.eco; }
+    if (t.indexOf("SPORT") === 0) { return C.sport; }
+    if (t.indexOf("MANUAL") === 0) { return C.amber; }
+    return C.text;
+  }
 
-    // ---------------- driving experience / EV mode
+  // gear box geometry: HYBRID (also shown in MINIMAL) and the large SPORT box
+  var GEAR_GEO_H = { x: "339", xHint: "333", w: 38, wHint: 29, up: "M354 167.5 L358.5 174 H349.5 Z", dn: "M349.5 167.5 H358.5 L354 174 Z" };
+  var GEAR_GEO_S = { x: "340", xHint: "331", w: 40, wHint: 26, up: "M355 165 L360.5 173 H349.5 Z", dn: "M349.5 165 H360.5 L355 173 Z" };
+  // gear letter with the optional shift hint (triangle + recommended gear)
+  function drawGear(el, hintEl, triEl, txtEl, geo, gl, gCol, showHint, hintG, gActual) {
+    var k = gl + (showHint ? "|h" : "");
+    if (el.__k !== k) {
+      // position / width change: re-fit even with unchanged text
+      el.__k = k;
+      el.__t = null;
+      attr(el, "x", showHint ? geo.xHint : geo.x);
+    }
+    setText(el, gl, showHint ? geo.wHint : geo.w);
+    attr(el, "fill", gCol);
+    if (showHint) {
+      attr(triEl, "d", hintG > gActual ? geo.up : geo.dn);
+      attr(triEl, "fill", gCol);
+      txt(txtEl, String(hintG));
+      attr(txtEl, "fill", gCol);
+    }
+    attr(hintEl, "opacity", showHint ? "1" : "0");
+  }
+
+  // x = values derived by apply()
+  function applyEfficiency(x) {
+    var gd = x.gd;
+    var miles = x.imperial;
+    var mpg = units.cons !== "metric";
+    var gal = units.vol === "gal";
+
+    // EV range large, SOC compact (target marker in BATTERY CONTROL)
+    txt($.efRngVal, x.rngTxt);
+    txt($.efRngUnit, miles ? "mi" : "km");
+    attr($.efRngLbl, "fill", x.evUsable ? C.eco : C.dim);
+    attr($.efRng, "fill", x.evUsable ? C.text : C.muted);
+    txt($.efSocVal, x.socPct === null ? "--" : String(Math.round(x.socPct)));
+    attr($.efSocVal, "fill", x.low ? C.red : C.text);
+    attr($.efSocBar, "width", x.socPct === null ? "0" : (54 * x.socPct / 100).toFixed(1));
+    attr($.efSocBar, "fill", x.low ? C.red : "url(#gSoc)");
+    attr($.efSocTgt, "opacity", x.showTgt ? "1" : "0");
+    if (x.showTgt) { attr($.efSocTgt, "x", (131.5 + 54 * clamp01(x.tgt) - 1).toFixed(1)); }
+
+    // phase + recuperation level (one-pedal hold first, as in the chips)
+    txt($.efPhase, x.P.label);
+    attr($.efPhase, "fill", x.P.color);
+    setText($.efRegen, !x.hasVcu ? "" : (x.op ? "ONE PEDAL" : (x.rl ? "REGEN " + x.rl : "")), 76);
+    attr($.efRegen, "fill", (x.rl === "OFF" && !x.op) ? C.muted : C.green);
+
+    var trip = num(gd.tripKm);
+    txt($.efTripVal, (trip === null || trip < 0) ? "--" : (miles ? trip / KM_PER_MI : trip).toFixed(1));
+    txt($.efTripUnit, miles ? "mi" : "km");
+    var kwh = num(gd.avgKwh);
+    txt($.efAvgEVal, (x.hasVcu && kwh !== null && kwh > 0) ? (miles ? kwh * KM_PER_MI : kwh).toFixed(1) : "--");
+    txt($.efAvgEUnit, miles ? "kWh/100mi" : "kWh/100km");
+    var fuelL = num(gd.fuelL);
+    var avg = num(gd.avgL100);
+    txt($.efAvgFVal, (fuelL === null || fuelL < 0 || avg === null || avg < 0) ? "--" : (mpg ? mpgOf(avg) : avg.toFixed(1)));
+    txt($.efAvgFUnit, mpg ? "mpg" : "L/100km");
+
+    // emphasised demand caret + pedal zone above the gear (HYBRID caret gate)
+    var dv = x.demOn;
+    if (dv) {
+      var sq = q(dem.s);
+      var ln = radialD(sq, DEM_EF.ln0, DEM_EF.tip);
+      attr($.efDemTri, "d", caretD(sq, DEM_EF));
+      attr($.efDemTri, "fill", x.demFill);
+      attr($.efDemBg, "d", ln);
+      attr($.efDemLn, "d", ln);
+      attr($.efDemLn, "stroke", x.demFill);
+    }
+    $.efDem.__vis = dv;
+    $.efDem.__pulse = dv && x.zone === 2;
+    setText($.efPedal, dv ? (PEDAL_ZONE[x.zone] || "") : "", 90);
+    attr($.efPedal, "fill", x.demFill);
+
+    setText($.efGear, x.gl, 22);
+    attr($.efGear, "fill", x.gCol);
+
+    // instantaneous consumption: fuel with the ICE running (l/100 km, l/h near
+    // standstill), else battery power / speed (smoothed, < 0 = recuperation)
+    var mode = str(gd.instMode) || "ev";
+    var val = "--";
+    var unit = "";
+    var col = C.muted;
+    var tc = now();
+    if (x.on && mode === "lh") {
+      var lh = Math.max(0, num(gd.instLh) || 0);
+      val = (gal ? lh / L_PER_GAL : lh).toFixed(1);
+      unit = gal ? "gal/h" : "L/h";
+      col = C.amber;
+    } else if (x.on && mode !== "ev") {
+      var l100 = num(gd.instL100);
+      if (l100 !== null && l100 >= 0) { val = mpg ? mpgOf(l100) : l100.toFixed(1); col = C.amber; }
+      unit = mpg ? "mpg" : "L/100km";
+    } else if (x.on) {
+      unit = miles ? "kWh/100mi" : "kWh/100km";
+      if (x.speed > efCons.minSpeed) {
+        var raw = x.ev / (x.speed * 3.6) * 100;
+        var dtc = (tc - efCons.t) / 1000;
+        efCons.v = (efCons.t === 0 || dtc > 0.5) ? raw : efCons.v + (raw - efCons.v) * (1 - Math.exp(-dtc / efCons.tauS));
+        efCons.t = tc;
+        var cv = Math.max(-999, Math.min(999, miles ? efCons.v * KM_PER_MI : efCons.v));
+        val = Math.abs(cv) < 0.05 ? "0.0" : (Math.abs(cv) >= 99.95 ? String(Math.round(cv)) : cv.toFixed(1));
+        col = cv <= -0.05 ? C.green : C.blue;
+      }
+    }
+    if (!(x.on && mode === "ev" && x.speed > efCons.minSpeed)) { efCons.t = 0; }
+    setText($.efCons, val, 62);
+    attr($.efCons, "fill", col);
+    setText($.efConsUnit, unit, 52);
+  }
+
+  function applySport(x) {
+    // stability mode, blinks (and turns amber) while DSC / DTC acts
+    var ds = DSC_TXT.hasOwnProperty(x.dsc) ? DSC_TXT[x.dsc] : null;
+    setText($.spDsc, !x.hasVcu ? "NO HYBRID DATA" : (ds ? ds[0] : ""), 80);
+    attr($.spDsc, "fill", !x.hasVcu || !ds ? C.muted : (x.blinkDsc ? C.amber : ds[1]));
+    $.spDsc.__blink = x.blinkDsc;
+
+    // digital speed (game unit setting)
+    setText($.spSpd, String(Math.round(x.speed * (x.imperial ? 2.236936 : 3.6))), 64);
+    txt($.spSpdUnit, x.imperial ? "mph" : "km/h");
+
+    // e-boost pips, label lit in phase eBOOST; SOC as the boost reserve
+    for (var i = 1; i <= 3; i++) {
+      attr($["spPip" + i], "fill", x.hasVcu && x.boost >= i ? C.orange : "#161b23");
+    }
+    attr($.spBoostLbl, "fill", x.pk === "BOOST" ? C.orange : (x.hasVcu && x.boost > 0 ? C.text : C.muted));
+    txt($.spSocVal, x.socPct === null ? "--" : String(Math.round(x.socPct)));
+    attr($.spSocVal, "fill", x.low ? C.red : (x.evAvail < 0.5 ? C.muted : C.blue));
+
+    // ICE / EV split, each against its own peak (recuperation: regen peak)
+    var iceKw = x.on ? Math.max(0, x.ice) : 0;
+    var evKw = x.on ? x.ev : 0;
+    attr($.spIceBar, "width", (46 * clamp01(iceKw / scale.ice)).toFixed(1));
+    txt($.spIceKw, String(Math.round(iceKw)));
+    attr($.spIceKw, "fill", iceKw < 0.5 ? C.muted : C.text);
+    var rec = evKw < -0.5;
+    attr($.spEvBar, "width", (46 * clamp01(rec ? -evKw / scale.regen : evKw / scale.ev)).toFixed(1));
+    attr($.spEvBar, "fill", rec ? C.green : C.blue);
+    txt($.spEvKw, String(Math.round(evKw) || 0));
+    attr($.spEvKw, "fill", Math.abs(evKw) < 0.5 ? C.muted : (rec ? C.green : C.blue));
+
+    // peak system power, held spPeak.holdMs
+    var tp = now();
+    var tot = x.on ? Math.max(0, x.total) : 0;
+    if (tot >= spPeak.kw) { spPeak.kw = tot; spPeak.t = tp; }
+    else if (tp - spPeak.t > spPeak.holdMs) { spPeak.kw = tot; }
+    txt($.spPeakVal, String(Math.round(spPeak.kw)));
+
+    // shift program, always (HYBRID hides it when it repeats the headline)
+    var prog = str(x.e.etk854hybrid_shiftProgram);
+    var progTxt = prog ? prog.toUpperCase().replace(/_/g, " ") : "";
+    setText($.spProg, progTxt, 96);
+    attr($.spProg, "fill", progColor(progTxt));
+
+    // large gear with the shift hint
+    drawGear($.spGear, $.spHint, $.spHintTri, $.spHintTxt, GEAR_GEO_S, x.gl, x.gCol, x.showHint, x.hintG, x.gActual);
+
+    txt($.spKw, String(x.on ? Math.round(x.total) : 0));
+    attr($.spKw, "fill", x.kwCol);
+  }
+
+  function applyMinimal(x) {
+    txt($.mnSocVal, x.socPct === null ? "--" : String(Math.round(x.socPct)));
+    attr($.mnSoc, "fill", x.low ? C.red : C.text);
+    txt($.mnRngVal, x.rngTxt);
+    txt($.mnRngUnit, x.imperial ? "mi" : "km");
+    attr($.mnRngLbl, "fill", x.evUsable ? C.blue : C.dim);
+    attr($.mnRng, "fill", x.evUsable ? C.text : C.muted);
+  }
+
+  // ---------------------------------------------------- HYBRID view blocks
+  // Called by apply() in this order with the values it derived.
+
+  // driving experience / EV mode
+  function applyHeader(hasVcu, de, ed) {
     setText($.deMode, hasVcu ? (DE_LABEL[de] || (de ? de.replace(/_/g, " ") : "")) : "", 92);
     var deCol = DE_COLOR[de] || C.text;
     attr($.deMode, "fill", deCol);
@@ -623,55 +749,36 @@
     setText($.edMode, hasVcu ? (ED_LABEL[ed] || (ed ? ed.replace(/_/g, " ") : "")) : "NO HYBRID DATA", 80);
     attr($.edMode, "fill", hasVcu ? (ED_COLOR[ed] || C.blueLt) : C.muted);
     attr($.edMode, "font-weight", ed === "MAX_EDRIVE" ? "700" : "400");
+  }
 
-    // ---------------- SOC
-    var socPct = soc === null ? null : Math.max(0, Math.min(100, soc));
+  function applySoc(socPct, low, showTgt, tgt) {
     txt($.socVal, socPct === null ? "--" : String(Math.round(socPct)));
-    var low = socPct !== null && (socPct < 12 || band === "CRIT" || band === "LOW1");
     attr($.socBar, "width", socPct === null ? "0" : (54 * socPct / 100).toFixed(1));
     attr($.socBar, "fill", low ? C.red : "url(#gSoc)");
     attr($.soc, "fill", low ? C.red : C.text);
-    var showTgt = ed === "BATTERY_CONTROL" && tgt !== null;
     attr($.socTgt, "opacity", showTgt ? "1" : "0");
     if (showTgt) { attr($.socTgt, "x", (131.5 + 54 * clamp01(tgt) - 1).toFixed(1)); }
+  }
 
-    // ---------------- EV range
-    var rng = num(gd.rangeKm);
-    var imperial = units.length !== "metric";
-    if (!hasVcu || rng === null || rng < 0) {
-      txt($.rngVal, "--");
-    } else {
-      txt($.rngVal, String(Math.round(imperial ? rng * 0.621371 : rng)));
-    }
+  function applyRange(rngTxt, imperial, evUsable) {
+    txt($.rngVal, rngTxt);
     txt($.rngUnit, imperial ? "mi" : "km");
-    var evUsable = hasVcu && evAvail > 0.5;
     attr($.rngLbl, "fill", evUsable ? C.blue : C.dim);
     attr($.rng, "fill", evUsable ? C.text : C.muted);
+  }
 
-    // ---------------- phase
-    var pk;
-    if (!hasVcu) { pk = "NONE"; }
-    else if (ign < 2) { pk = "OFF"; }
-    else if (sail) { pk = "SAIL"; }
-    else if (phRaw === "CHARGE") { pk = "CHARGE"; }
-    else if (phRaw === "REGEN") { pk = "REGEN"; }
-    // eBOOST only when the e-machine adds real power, not for torque fill
-    else if (phRaw === "HYBRID") { pk = (ice > 10 && ev > Math.max(10, 0.25 * evKw)) ? "BOOST" : "HYBRID"; }
-    else if (phRaw === "ICE") { pk = "ENGINE"; }
-    else if (phRaw === "EV") { pk = (Math.abs(total) < 1 && speed < 0.5) ? "READY" : "EDRIVE"; }
-    else { pk = iceOn ? "ENGINE" : "READY"; }
-    var P = PHASE[pk];
+  function applyPhase(P) {
     txt($.phase, P.label);
     attr($.phase, "fill", P.color);
+  }
 
-    // ---------------- flow glyph
-    var on = hasVcu && ign >= 2;
+  // flow glyph: links, icons and the K0 clutch
+  function applyFlow(on, sail, ice, ev, total, k0, iceOn, starting, socPct, low, speed) {
     var batOut = on && !sail && ev > 1;
     var batIn = on && !sail && ev < -1;
     var drvOut = on && !sail && total > 1;
     var drvIn = on && !sail && total < -1;
     var iceFlow = on && ice > 1 && k0 > 0.5;
-    var starting = !!(ies && ICE_STARTING[ies]);
 
     setLink($.lnBat, batOut ? "fwd" : (batIn ? "rev" : "idle"), batIn ? C.green : C.blue);
     var wheelCol = drvIn ? C.green : (ice > 1 ? (ev > 1 ? C.text : C.amber) : C.blue);
@@ -704,8 +811,10 @@
     attr($.k0B, "stroke", k0Col);
     attr($.lnIceA, "y2", (178.5 - gap - 1.2).toFixed(2));
     attr($.lnIceB, "y1", (178.5 + gap + 1.2).toFixed(2));
+  }
 
-    // ---------------- power meter
+  // power meter bars + system power
+  function applyMeter(on, ev, total, kwCol) {
     var sT = q(sOf(total));
     if (on && total > 0.5) {
       var sE = q(sOf(Math.max(0, Math.min(ev, total))));
@@ -724,19 +833,16 @@
 
     var kwShown = on ? Math.round(total) : 0;
     txt($.kw, String(kwShown));
-    attr($.kw, "fill", !on || Math.abs(total) < 0.5 ? C.muted : (total < 0 ? C.green : (ice < 1 ? C.blue : C.text)));
+    attr($.kw, "fill", kwCol);
+  }
 
-    // ---------------- ECO PRO demand caret (pedal map v3)
-    // zone 1: inside the EV zone by T / knee; zone 2 (EV MAX
-    // plateau): on the zone edge, pulsing; zones 3-5: beyond the edge by the
-    // position in the hybrid band. Hidden while recuperating, at zero
-    // demand and while the EV zone is grey (EV ceiling, pack, ...).
-    var zone = Math.round(num(e.etk854hybrid_pedalZone) || 0);
-    var dEv = clamp01(num(e.etk854hybrid_pedalEvFrac) || 0);
-    var dBand = clamp01(num(e.etk854hybrid_pedalBandFrac) || 0);
-    var demOn = on && ecoSplit && zone >= 1 && evLimit > 0 && phRaw !== "REGEN" && total > -0.5 &&
-      !(zone === 1 && dEv < 0.01);
+  // ECO PRO demand caret. zone 1: inside the EV zone by torque / knee; 2: on
+  // the edge, pulsing; 3-5: beyond the edge by band position, amber while the
+  // load integral (iceDeficitS) builds towards an ICE start. Smooths dem and
+  // returns the caret colour.
+  function applyDemand(demOn, zone, dEv, dBand, evLimit, iceOn, e, vw) {
     var tDem = now();
+    var demFill = C.blueLt;
     if (demOn) {
       var sEdge = sOf(evLimit);
       var sTgt = zone === 1 ? ARC.s0 + (sEdge - ARC.s0) * dEv : (zone === 2 ? sEdge : sEdge + (1 - sEdge) * dBand);
@@ -744,60 +850,29 @@
       dem.s = (dem.s === null || !dem.vis) ? sTgt : dem.s + (sTgt - dem.s) * (1 - Math.exp(-dtDem / DEM.tauS));
       attr($.mDem, "d", caretD(q(dem.s)));
       var defS = num(e.etk854hybrid_iceDeficitS) || 0;
-      attr($.mDem, "fill", zone <= 2 ? C.blueLt : ((zone === 3 && defS > 0.02 && !iceOn) ? C.amber : C.text));
+      demFill = zone <= 2 ? C.blueLt : ((zone === 3 && defS > 0.02 && !iceOn) ? C.amber : C.text);
+      attr($.mDem, "fill", demFill);
     }
     dem.t = tDem;
     dem.vis = demOn;
     if ($.mDem) {
-      $.mDem.__vis = demOn;
+      // the EFFICIENCY view draws its own, larger caret (efDem)
+      $.mDem.__vis = demOn && vw !== "EFFICIENCY";
       $.mDem.__pulse = demOn && zone === 2;
     }
+    return demFill;
+  }
 
-    // ---------------- shift program / gear
-    // 8HP shift program (etk854hybrid_8hpCore: ECO / COMFORT / SPORT plus
-    // the adaptive "+" / "++", or MANUAL). Shown only when it says more than
-    // the driving-experience headline, i.e. not "COMFORT" under COMFORT.
-    var prog = str(e.etk854hybrid_shiftProgram);
-    var progTxt = prog ? prog.toUpperCase().replace(/_/g, " ") : "";
-    var deBase = { COMFORT: "COMFORT", ECO_PRO: "ECO", SPORT: "SPORT" }[de];
-    if (progTxt === deBase) { progTxt = ""; }
+  // shift program + gear box (MINIMAL shows the same box)
+  function applyGearBox(progTxt, gl, gCol, showHint, hintG, gActual) {
     setText($.prog, progTxt, 96);
-    var pc = C.text;
-    if (progTxt.indexOf("ECO") === 0) { pc = C.eco; }
-    else if (progTxt.indexOf("SPORT") === 0) { pc = C.sport; }
-    else if (progTxt.indexOf("MANUAL") === 0) { pc = C.amber; }
-    attr($.prog, "fill", pc);
+    attr($.prog, "fill", progColor(progTxt));
+    drawGear($.gear, $.gHint, $.gHintTri, $.gHintTxt, GEAR_GEO_H, gl, gCol, showHint, hintG, gActual);
+  }
 
-    var gActual = num(e.etk854hybrid_gearActual);
-    var gl = gearLabel(e.gear, gActual, num(e.gearIndex), gd.gearStyle);
-    var gc0 = gl.charAt(0);
-    var gCol = gc0 === "M" || gc0 === "S" ? C.amber : C.text;
-    // shift recommendation: etk854hybrid_gearHint = recommended gear (0 = none),
-    // already debounced by etk854hybrid_gaugeData; only next to a forward gear
-    var hintG = Math.round(num(e.etk854hybrid_gearHint) || 0);
-    var showHint = hintG >= 1 && gActual !== null && gActual >= 1 && hintG !== Math.round(gActual) &&
-      (gc0 === "D" || gc0 === "S" || gc0 === "M");
-    var gKey = gl + (showHint ? "|h" : "");
-    if ($.gear.__k !== gKey) {
-      // position / width change: re-fit even when the text itself is unchanged
-      $.gear.__k = gKey;
-      $.gear.__t = null;
-      attr($.gear, "x", showHint ? "333" : "339");
-    }
-    setText($.gear, gl, showHint ? 29 : 38);
-    attr($.gear, "fill", gCol);
-    if (showHint) {
-      var up = hintG > gActual;
-      attr($.gHintTri, "d", up ? "M354 167.5 L358.5 174 H349.5 Z" : "M349.5 167.5 H358.5 L354 174 Z");
-      attr($.gHintTri, "fill", gCol);
-      txt($.gHintTxt, String(hintG));
-      attr($.gHintTxt, "fill", gCol);
-    }
-    attr($.gHint, "opacity", showHint ? "1" : "0");
-
-    // ---------------- trailer air supply (AIR chips)
-    // etk854hybrid_airState: OFF | FILL | READY | LOW | NO TANK; a missing
-    // channel arrives as 0 (genericGauges.lua:61) -> no chip
+  // trailer air supply for the AIR chips, null = no chip. airState OFF | FILL |
+  // READY | LOW | NO TANK; missing (0) -> no chip
+  function airOf(e) {
     var airSt = str(e.etk854hybrid_airState);
     var air = null;
     if (airSt && airSt !== "NO TANK") {
@@ -810,27 +885,16 @@
         trlBrk: (num(e.etk854hybrid_airTrailer) || 0) > 0.5 && spring !== null && spring > 0.5 &&
           (num(e.parkingbrake) || 0) < 0.5,
         run: (num(e.etk854hybrid_airCompressor) || 0) > 0.5,
-        // protection valve (0 = shut); absent in older data -> null = open
+        // protection valve (0 = shut); channel absent -> null = open
         shut: num(e.etk854hybrid_airTrlValve) === 0,
         label: str(e.etk854hybrid_airInhibit) === "SWITCH" ? "AIR OFF" : "AIR " + pTxt
       };
     }
+    return air;
+  }
 
-    // ---------------- chips
-    var blinkDsc = dseActing && on;
-    var v = {
-      hasVcu: hasVcu, de: de, ed: ed, rl: rl, awd: awd, trl: trl, dsc: dsc, boost: boost,
-      tgt: tgt, band: band, op: op, fan: fan, iesStart: starting,
-      lvlAlert: !!(lvl && LEVEL_ALERT[lvl]), air: air
-    };
-    var chips = hasVcu ? chipList(v, blinkDsc) : [];
-    setChip(0, chips[0] || null);
-    setChip(1, chips[1] || null);
-
-    // ---------------- on-board computer
-    applyObc(gd, on, hasVcu);
-
-    // ---------------- bottom strip
+  // bottom strip: odometer, clock, outside temperature
+  function applyBottom(e, env, imperial) {
     var odoM = num(e.odometer);
     if (odoM !== null && odoM > 0) {
       var odo = Math.min(999999, Math.floor(odoM * (imperial ? 0.000621371 : 0.001)));
@@ -846,6 +910,176 @@
       var tf = units.temp === "f" ? tc * 9 / 5 + 32 : (units.temp === "k" ? tc + 273.15 : tc);
       txt($.temp, tf.toFixed(1) + (units.temp === "f" ? "\u00b0F" : (units.temp === "k" ? " K" : "\u00b0C")));
     }
+  }
+
+  // ------------------------------------------------------------ main apply
+  function apply(d) {
+    if (!ready || !d) { return; }
+    var e = d.electrics || {};
+    var cm = d.customModules || {};
+    var env = cm.environmentData || {};
+    var gd = cm.etk854hybrid_gaugeData || {};
+
+    // ---------------- inputs
+    var phRaw = str(e.etk854hybrid_phase);
+    var hasVcu = phRaw !== null;
+    var ign = num(e.ignitionLevel) || 0;
+    var ice = hasVcu ? (num(e.etk854hybrid_icePower) || 0) : 0;
+    var ev = hasVcu ? (num(e.etk854hybrid_evPower) || 0) : 0;
+    var total = ice + ev;
+    var iceOn = (num(e.etk854hybrid_iceState) || 0) > 0.5;
+    var sail = hasVcu && ((num(e.etk854hybrid_sailActive) || 0) > 0.5 || phRaw === "SAIL");
+    var speed = Math.abs(num(e.wheelspeed) || 0);
+    var soc = hasVcu ? num(e.etk854hybrid_batterySoc) : null;
+    var tgt = num(e.etk854hybrid_targetSoc);
+    if (tgt !== null && tgt > 1.5) { tgt = tgt / 100; }
+    var de = str(e.etk854hybrid_deMode);
+    var ed = str(e.etk854hybrid_edriveMode);
+    var boost = Math.max(0, Math.min(3, Math.round(num(e.etk854hybrid_boostStage) || 0)));
+    var ies = str(e.etk854hybrid_iceEngageState);
+    var k0 = num(e.etk854hybrid_k0ClutchRatio);
+    if (!hasVcu) { k0 = 0; } else if (k0 === null) { k0 = iceOn ? 1 : 0; }
+    k0 = clamp01(k0);
+    var evAvail = num(e.etk854hybrid_evAvailable);
+    if (evAvail === null) { evAvail = 1; }
+    var evFrac = num(e.etk854hybrid_evPowerFraction);
+    if (evFrac === null) { evFrac = 1; }
+    var rl = str(e.etk854hybrid_regenLevel);
+    var band = str(e.etk854hybrid_batteryBand);
+    var dsc = str(e.etk854hybrid_dscMode);
+    // qualified DSC lamp (gaugeData); the raw tcActive lights on any DSE didAct
+    // and is only a fallback for the demo when dscLamp is left out
+    var lampRaw = num(e.etk854hybrid_dscLamp);
+    var dseActing = lampRaw !== null ? lampRaw > 0.5 : (num(e.etk854hybrid_tcActive) || 0) > 0.5;
+    var awd = str(e.etk854hybrid_awdMode);
+    var trl = (num(e.etk854hybrid_trailerMode) || 0) > 0.5;
+    var lvl = str(e.etk854hybrid_levelState);
+    var fan = Math.round(num(e.etk854hybrid_fanStage) || 0);
+    var op = (num(e.etk854hybrid_onePedalHold) || 0) > 0.5;
+    var vw = viewOf(e.etk854hybrid_clusterView);
+
+    // ---------------- scale (Lua module, else boost-stage fallback)
+    var iceKw = num(gd.iceKw);
+    if (!(iceKw > 1)) { iceKw = DEFAULT_ICE_KW; }
+    var evKw = num(gd.evKw);
+    if (!(evKw > 1)) { evKw = STAGE_EV_KW[boost]; }
+    var regenKw = num(gd.regenKw);
+    if (!(regenKw > 1)) { regenKw = STAGE_REGEN_KW[boost]; }
+    scale.ice = iceKw;
+    scale.ev = evKw;
+    scale.max = iceKw + evKw;
+    scale.regen = regenKw;
+
+    // electric-only capability: stage peak x battery derating (the VCU's
+    // DE_CFG.<mode>.evCapScale is 1.00 in every mode)
+    var evLimit = evKw * clamp01(evFrac);
+    // BATTERY CONTROL never drives electrically while moving (VCU evTopKmh 0)
+    var iceForced = de === "SPORT" || ed === "BATTERY_CONTROL";
+    if (!hasVcu || evAvail < 0.5 || iceForced) { evLimit = 0; }
+    // ECO PRO split map: grey above the ECO EV speed ceiling, only while the
+    // map is live (pedalIceJoin > 0; a missing channel is 0)
+    var ecoSplit = hasVcu && de === "ECO_PRO" && ed === "AUTO_EDRIVE" && (num(e.etk854hybrid_pedalIceJoin) || 0) > 0;
+    var openRaw = (num(e.etk854hybrid_evZoneOpen) || 0) > 0.5;
+    var tGate = now();
+    if (!ecoSplit || openRaw === evGate.open) {
+      evGate.since = 0;
+      if (!ecoSplit) { evGate.open = true; }
+    } else if (!evGate.since) {
+      evGate.since = tGate;
+    } else if (tGate - evGate.since >= evGate.holdMs) {
+      evGate.open = openRaw;
+      evGate.since = 0;
+    }
+    if (ecoSplit && !evGate.open) { evLimit = 0; }
+    updateZones(evLimit, iceKw);
+
+    // ---------------- derived values (pure), shared with the other views
+    var socPct = soc === null ? null : Math.max(0, Math.min(100, soc));
+    var low = socPct !== null && (socPct < 12 || band === "CRIT" || band === "LOW1");
+    var showTgt = ed === "BATTERY_CONTROL" && tgt !== null;
+    var rng = num(gd.rangeKm);
+    var imperial = units.length !== "metric";
+    var rngTxt = (!hasVcu || rng === null || rng < 0) ? "--" : String(Math.round(imperial ? rng * KM_TO_MI : rng));
+    var evUsable = hasVcu && evAvail > 0.5;
+
+    // phase
+    var pk;
+    if (!hasVcu) { pk = "NONE"; }
+    else if (ign < 2) { pk = "OFF"; }
+    else if (sail) { pk = "SAIL"; }
+    else if (phRaw === "CHARGE") { pk = "CHARGE"; }
+    else if (phRaw === "REGEN") { pk = "REGEN"; }
+    // eBOOST only when the e-machine adds real power, not for torque fill
+    else if (phRaw === "HYBRID") { pk = (ice > 10 && ev > Math.max(10, 0.25 * evKw)) ? "BOOST" : "HYBRID"; }
+    else if (phRaw === "ICE") { pk = "ENGINE"; }
+    else if (phRaw === "EV") { pk = (Math.abs(total) < 1 && speed < 0.5) ? "READY" : "EDRIVE"; }
+    else { pk = iceOn ? "ENGINE" : "READY"; }
+    var P = PHASE[pk];
+    var on = hasVcu && ign >= 2;
+    var starting = !!(ies && ICE_STARTING[ies]);
+    var kwCol = !on || Math.abs(total) < 0.5 ? C.muted : (total < 0 ? C.green : (ice < 1 ? C.blue : C.text));
+    // ECO PRO demand caret: hidden while recuperating, at zero demand and with
+    // a grey EV zone
+    var zone = Math.round(num(e.etk854hybrid_pedalZone) || 0);
+    var dEv = clamp01(num(e.etk854hybrid_pedalEvFrac) || 0);
+    var dBand = clamp01(num(e.etk854hybrid_pedalBandFrac) || 0);
+    var demOn = on && ecoSplit && zone >= 1 && evLimit > 0 && phRaw !== "REGEN" && total > -0.5 &&
+      !(zone === 1 && dEv < 0.01);
+    // 8HP shift program (ECO / COMFORT / SPORT with "+" / "++", MANUAL), only
+    // when it adds to the driving-experience headline
+    var prog = str(e.etk854hybrid_shiftProgram);
+    var progTxt = prog ? prog.toUpperCase().replace(/_/g, " ") : "";
+    var deBase = DE_PROG_BASE[de];
+    if (progTxt === deBase) { progTxt = ""; }
+    var gActual = num(e.etk854hybrid_gearActual);
+    var gl = gearLabel(e.gear, gActual, num(e.gearIndex), gd.gearStyle);
+    var gc0 = gl.charAt(0);
+    var gCol = gc0 === "M" || gc0 === "S" ? C.amber : C.text;
+    // shift hint (0 = none, debounced in gaugeData), only next to a forward gear
+    var hintG = Math.round(num(e.etk854hybrid_gearHint) || 0);
+    var showHint = hintG >= 1 && gActual !== null && gActual >= 1 && hintG !== Math.round(gActual) &&
+      (gc0 === "D" || gc0 === "S" || gc0 === "M");
+
+    // ---------------- HYBRID view (also the shared parts)
+    applyHeader(hasVcu, de, ed);
+    applySoc(socPct, low, showTgt, tgt);
+    applyRange(rngTxt, imperial, evUsable);
+    applyPhase(P);
+    applyFlow(on, sail, ice, ev, total, k0, iceOn, starting, socPct, low, speed);
+    applyMeter(on, ev, total, kwCol);
+    var demFill = applyDemand(demOn, zone, dEv, dBand, evLimit, iceOn, e, vw);
+    applyGearBox(progTxt, gl, gCol, showHint, hintG, gActual);
+    var air = airOf(e);
+
+    // ---------------- chips
+    var blinkDsc = dseActing && on;
+    var v = {
+      hasVcu: hasVcu, de: de, ed: ed, rl: rl, awd: awd, trl: trl, dsc: dsc, boost: boost,
+      tgt: tgt, band: band, op: op, fan: fan, iesStart: starting,
+      lvlAlert: !!(lvl && LEVEL_ALERT[lvl]), air: air
+    };
+    var chips = hasVcu ? chipsFor(vw, chipList(v, blinkDsc)) : [];
+    setChip(0, chips[0] || null);
+    setChip(1, chips[1] || null);
+
+    applyObc(gd, on, hasVcu);
+    applyBottom(e, env, imperial);
+
+    // ---------------- views: HYBRID elements always update (shared parts,
+    // toast); the others only while shown, before they become visible
+    if (vw !== "HYBRID") {
+      var x = {
+        e: e, gd: gd, hasVcu: hasVcu, on: on, ice: ice, ev: ev, total: total, speed: speed, imperial: imperial,
+        socPct: socPct, low: low, tgt: tgt, showTgt: showTgt, evUsable: evUsable, evAvail: evAvail, rngTxt: rngTxt,
+        P: P, pk: pk, rl: rl, op: op, dsc: dsc, blinkDsc: blinkDsc, boost: boost,
+        gl: gl, gCol: gCol, gActual: gActual, hintG: hintG, showHint: showHint,
+        demOn: demOn, zone: zone, demFill: demFill, kwCol: kwCol
+      };
+      if (vw === "EFFICIENCY") { applyEfficiency(x); }
+      else if (vw === "SPORT") { applySport(x); }
+      else { applyMinimal(x); }
+    }
+    setView(vw);
 
     detectChanges(v);
     animate();
@@ -863,6 +1097,7 @@
 
   var demo = null; // demo driver, see bottom
   var demoGearStyle = "number"; // #gear=plain in the demo URL
+  var demoView = ""; // &view=<VIEW> in the demo URL ("" = channel absent)
 
   function stopDemo() {
     if (demo) { clearInterval(demo); demo = null; }
@@ -877,13 +1112,22 @@
       "chip1", "chip1Box", "chip1Txt", "chip1Dot", "chip2", "chip2Box", "chip2Txt", "chip2Dot",
       "obc", "fiTrack", "fiBar", "fiVal", "fiUnit", "obcL", "obcR", "fuelVal", "fuelUnit", "frngVal", "frngUnit",
       "avgF", "avgFU", "avgE", "avgEU", "avgPer",
-      "mTrack", "zCharge", "zEdrive", "zPower", "zBoost", "mBarE", "mBarI", "mBarR", "mTicks", "mLblC", "mLblPath", "mLblCPath",
-      "mDem"
+      "mTrack", "zCharge", "zEdrive", "zPower", "zBoost", "mBarE", "mBarI", "mBarR", "mTicks", "mLblPath", "mLblCPath",
+      "mDem",
+      // EFFICIENCY / SPORT / MINIMAL views
+      "efMid", "efRngLbl", "efRng", "efRngVal", "efRngUnit", "efSocBar", "efSocTgt", "efSocVal", "efPhase", "efRegen",
+      "efTripVal", "efTripUnit", "efAvgEVal", "efAvgEUnit", "efAvgFVal", "efAvgFUnit",
+      "efPedal", "efGear", "efCons", "efConsUnit", "efDem", "efDemBg", "efDemLn", "efDemTri",
+      "spDsc", "spMid", "spSpd", "spSpdUnit", "spBoostLbl", "spPip1", "spPip2", "spPip3", "spSocVal",
+      "spIceBar", "spIceKw", "spEvBar", "spEvKw", "spPeakVal", "spProg", "spGear", "spHint", "spHintTri", "spHintTxt", "spKw",
+      "mnMid", "mnSoc", "mnSocVal", "mnRngLbl", "mnRng", "mnRngVal", "mnRngUnit"
     ];
     for (var i = 0; i < ids.length; i++) { $[ids[i]] = document.getElementById(ids[i]); }
     $.icEmCircle = document.querySelector("#icEm circle");
     $.icBatBody = document.querySelector("#icBat rect");
     $.icBatNub = document.querySelectorAll("#icBat rect")[1];
+    var vl = document.querySelectorAll("#etk-cluster [data-views]");
+    for (var vi = 0; vi < vl.length; vi++) { viewEls.push(vl[vi]); }
     buildMeter();
     ready = true;
 
@@ -899,7 +1143,7 @@
     window.messageClearAll = function () {
       if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
       attr($.toast, "opacity", "0");
-      attr($.mid, "opacity", "1");
+      midOpacity("1");
     };
 
     // flush calls that arrived before this script ran
@@ -912,8 +1156,7 @@
       window.__etk854q = null;
     }
 
-    // Demo only in a desktop browser: in game the page is served from
-    // local:// and the engine injects `beamng`. Real data stops it anyway.
+    // demo only in a desktop browser (in game: local:// and `beamng`)
     var inGame = /^local:/i.test(String(window.location.href)) || typeof beamng !== "undefined";
     var hash = String(window.location.hash || "");
     if ((!inGame || hash.indexOf("demo") >= 0) && !(bq && bq.data)) {
@@ -922,8 +1165,7 @@
   }
 
   // =================================================================== DEMO
-  // Desktop preview only (the page is opened outside the game). Produces the
-  // same data shape genericGauges sends. #demo=<state> pins one state.
+  // Desktop preview: same data shape as genericGauges; #demo=<state> pins one.
   function demoFrame(state, t) {
     var E = {
       gear: "D", gearIndex: 3, odometer: 12873400, ignitionLevel: 2, wheelspeed: 14,
@@ -936,7 +1178,7 @@
       etk854hybrid_sailActive: 0, etk854hybrid_chargeMode: "OFF", etk854hybrid_awdMode: 0,
       etk854hybrid_trailerMode: 0, etk854hybrid_levelState: "LEVEL", etk854hybrid_dscMode: "DSC",
       etk854hybrid_tcActive: 0, etk854hybrid_fanStage: 0, etk854hybrid_dscLamp: 0, etk854hybrid_gearActual: 3,
-      // trunk compressor not fitted: channels arrive as 0 (genericGauges.lua:61)
+      // trunk compressor not fitted: channels arrive as 0
       etk854hybrid_airState: 0, etk854hybrid_airPressureBar: 0, etk854hybrid_airCompressor: 0,
       etk854hybrid_airInhibit: 0, etk854hybrid_airTrailer: 0, etk854hybrid_trailerSpringCoef: 0, parkingbrake: 0
     };
@@ -946,9 +1188,8 @@
     function burn(l100) {
       F.instMode = "l100"; F.instL100 = l100; F.instLh = l100 * E.wheelspeed * 0.036; F.instBar = Math.min(1, l100 / 30);
     }
-    // ECO PRO pedal map v3 at pedal p (N57 / B58, 2000 rpm, stage 0, healthy
-    // SOC; ecoMapSpec.md section 1): knee 265 Nm, band top 680 Nm. Fills the
-    // mapPedal view channels; ICE off, EV power ~ T at 2000 rpm.
+    // ECO PRO pedal map at pedal p (R6, 2000 rpm, stage 0): knee 265 Nm, band
+    // top 680 Nm; ICE off, EV power ~ torque at 2000 rpm
     function ecoMap(p) {
       var knee = 265, top = 680, pEv = 0.80, pJ = 0.85, kick = 0.90, urg = 0.95;
       var T = p <= pEv ? knee * Math.pow(p / pEv, 1.2) : (p < pJ ? knee : knee + (top - knee) * (Math.min(p, 1) - pJ) / (1 - pJ));
@@ -1044,8 +1285,7 @@
         ecoMap(0.50); E.gearIndex = 6; E.wheelspeed = 22;
         break;
       case "eco82":
-        // EV MAX plateau: full E-machine, power-line downshift; caret
-        // pulses on the zone edge
+        // EV MAX plateau: caret pulses on the zone edge
         ecoMap(0.82); E.etk854hybrid_evPower = 72; E.gearIndex = 4; E.wheelspeed = 16.7;
         break;
       case "eco88":
@@ -1073,7 +1313,7 @@
         E.gearIndex = 6; E.wheelspeed = 20; E.etk854hybrid_evPower = 70; E.etk854hybrid_gearHint = 4;
         break;
       case "air":
-        // trunk compressor filling while a dolly is air-coupled (AIR 7.4 + dot)
+        // compressor filling, dolly air-coupled (AIR 7.4 + dot)
         E.etk854hybrid_trailerMode = 1; E.etk854hybrid_airState = "FILL"; E.etk854hybrid_airPressureBar = 7.4 + 0.1 * w;
         E.etk854hybrid_airCompressor = 1; E.etk854hybrid_airInhibit = "NONE"; E.etk854hybrid_airTrailer = 1;
         E.etk854hybrid_trailerSpringCoef = 0; E.etk854hybrid_evPower = 22; E.wheelspeed = 8; E.gearIndex = 2;
@@ -1091,8 +1331,7 @@
         E.etk854hybrid_trailerSpringCoef = 0.8;
         break;
       case "airshut":
-        // refilling after a leak, protection valve still shut (opens at
-        // 6.0 bar): amber outline on the plain AIR chip; parked, so no TRL BRK
+        // protection valve still shut: amber AIR outline; parked: no TRL BRK
         E.gear = "P"; E.gearIndex = 0; E.wheelspeed = 0; E.parkingbrake = 1; E.etk854hybrid_trailerMode = 1;
         E.etk854hybrid_airState = "FILL"; E.etk854hybrid_airPressureBar = 5.1 + 0.1 * w; E.etk854hybrid_airCompressor = 1;
         E.etk854hybrid_airInhibit = "NONE"; E.etk854hybrid_airTrailer = 1; E.etk854hybrid_trailerSpringCoef = 1;
@@ -1125,6 +1364,11 @@
     }
     // demo: the engaged gear equals the decided one; P/N have gearbox index 0
     E.etk854hybrid_gearActual = (E.gear === "P" || E.gear === "N") ? 0 : E.gearIndex;
+    // AUTO resolves as the cockpit panel does in game
+    if (demoView) {
+      E.etk854hybrid_clusterView = demoView !== "AUTO" ? demoView :
+        ({ ECO_PRO: "EFFICIENCY", SPORT: "SPORT" }[E.etk854hybrid_deMode] || "HYBRID");
+    }
     return {
       electrics: E,
       powertrain: {},
@@ -1145,6 +1389,8 @@
     var m = /demo=([a-z0-9]+)/.exec(hash);
     var state = m ? m[1] : "anim";
     demoGearStyle = /gear=plain/.test(hash) ? "plain" : "number";
+    var vm = /view=([A-Za-z]+)/.exec(hash);
+    demoView = vm ? vm[1].toUpperCase() : "";
     doSetup(state === "imperial"
       ? { uiUnitLength: "imperial", uiUnitTemperature: "f", uiUnitConsumptionRate: "imperial", uiUnitVolume: "gal", uiUnitPressure: "psi" }
       : { uiUnitLength: "metric", uiUnitTemperature: "c", uiUnitConsumptionRate: "metric", uiUnitVolume: "l", uiUnitPressure: "bar" });

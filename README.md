@@ -1,6 +1,6 @@
 # ETK 854 ActiveHybrid: P2 plug-in hybrid wagon with 8-speed automatic and xAllrad
 
-**Engine, K0 clutch and e-machine ahead of one 8-speed: sailing, one-pedal driving, launch control**
+**P2 hybrid with K0 clutch and 8-speed, now with active rear-axle steering and trailer stability**
 
 ![Collage of the ETK 854 ActiveHybrid exterior, the Actions app, the hybrid instrument cluster and the HUD](docs/images/hero-collage.jpg)
 
@@ -11,9 +11,11 @@
 1. **Get the mod:** download `etk_p2_hybrid_suite.zip` from the [latest release](https://github.com/WallnerK/beamng_etk-p2-hybrid-suite/releases/latest) and move it into your mods folder (`%LOCALAPPDATA%\BeamNG\BeamNG.drive\current\mods`) without unpacking it, or subscribe to it in the in-game repository.
 2. **Activate it** in the mod manager.
 3. **Optional, but recommended:** add the two UI apps **ETK 854 ActiveHybrid Cockpit** and **ETK 854 ActiveHybrid Actions** to your UI.
-4. **Spawn** one of the seven configurations from the **ETK ActiveHybrid** tile in the vehicle selector (Ctrl+E) and enjoy.
+4. **Spawn** one of the ten configurations from the **ETK ActiveHybrid** tile in the vehicle selector (Ctrl+E) and enjoy.
 
-**The ETK 800 wagon as a plug-in hybrid with the control logic of a real one.** Between the engine and the 8-speed automatic sit a K0 disconnect clutch and an e-machine on the gearbox input shaft, the P2 layout of production plug-in hybrids. A dedicated hybrid control unit decides every frame whether the car drives electrically, sails, boosts or charges; it starts the engine on the move without a jolt and caps the combined torque so the car pulls like a real one. Seven configurations, three engine lines.
+**New in 1.1.0:** optional **active rear-axle steering**. Below about 60 km/h the rear wheels steer opposite to the front wheels (up to 3°, turning circle about 0.6 m smaller), above it in the same direction (up to 1.5°) for calmer lane changes. The DSC knows the rear angle, and a stability assist lets the rear wheels counter beginning oversteer. Two new models carry it, plus a **Hauling** model with a **trailer stability function** of the DSC, and the centre screen now has switchable views and a **control panel** you can click.
+
+**The ETK 800 wagon as a plug-in hybrid with the control logic of a real one.** Between the engine and the 8-speed automatic sit a K0 disconnect clutch and an e-machine on the gearbox input shaft, the P2 layout of production plug-in hybrids. A dedicated hybrid control unit decides every frame whether the car drives electrically, sails, boosts or charges; it starts the engine on the move without a jolt and caps the combined torque so the car pulls like a real one. Ten configurations, three engine lines.
 
 I drive a 535d Touring from the F-series myself, and many technical details of this mod are inspired by it: the twin-turbo diesel, the chassis tune, the self-leveling rear and the fuel figures I compare against. The drivetrain and its operating logic are modelled on BMW's plug-in hybrids: the two mode selectors, the engine start through the slipping K0, sailing, the recuperation levels and the torque cap follow how those cars work.
 
@@ -23,6 +25,9 @@ This is a fan project; it is not affiliated with, endorsed by or connected to BM
 
 ## Highlights
 
+- **Active rear-axle steering (new):** counter-phase below about 60 km/h, in-phase above, DSC with a corrected yaw reference, selector OFF / ON + DSC / ON NO DSC
+- **Trailer stability (new):** sway damping in three stages and corner pre-braking, with the tow hitches; new **Hauling** model
+- **Cockpit control panel (new):** centre-screen views ENERGY / MAP / TRAILER, four cluster views plus AUTO, a MENU panel you click or turn like a rotary controller
 - **Real P2 hybrid:** engine → K0 clutch → e-machine → converter → 8-speed, the e-machine a true powertrain device
 - **Two selectors:** Driving Experience (COMFORT / ECO PRO / SPORT) × EV mode (AUTO EV / MAX EV / BATTERY CONTROL)
 - **Jolt-free engine starts** on the move, **sailing**, **four recuperation levels** up to **one-pedal driving**, **EV creep**
@@ -34,11 +39,15 @@ This is a fan project; it is not affiliated with, endorsed by or connected to BM
 
 ## The line-up
 
+![Grid of ten in-game shots, two rows of five.](docs/images/lineup-thumbnails.png)
+
+*The ten public configurations as their vehicle-selector thumbnails (1.1.0): petrol 30e / 40e models in the top row, diesel 35d models in the bottom row, each with its tier, engine and system power and feature badges (AWD, REAR STEER, TOW HITCH, HAULING).*
+
 ![Dark comparison card with seven rows in three groups: petrol four-cylinder (30e), petrol six-cylinder B58 (40e, 40e Performance, 40e Performance xAllrad) and diesel six-cylinder N57 (35d, 35d Performance, 35d Performance xAllrad). Each row lists the engine, the engine peak (30e 188 kW / 255 PS / 362 Nm, 40e 220 kW / 299 PS / 447 Nm, 40e Performance 415 kW / 565 PS / 704 Nm, 35d 230 kW / 313 PS / 637 Nm, 35d Performance 369 kW / 502 PS / 888 Nm; the xAllrad models as their RWD versions), and two horizontal bars on a shared grid. The top bar shows system power as engine peak in orange plus the 83 kW e-machine in blue (271 to 498 kW). The bottom bar shows torque at the gearbox input as engine torque in orange plus the 265 Nm e-machine in blue. Where that sum is above the system torque cap (680, 820 or 950 Nm), a red tick marks the cap and the trimmed electric part is hatched. Only the 30e stays below its cap (627 of 680 Nm). Further columns: drive (RWD, or AWD / 2WD on the xAllrad models), axle ratio (3.15 on the 30e, 2.81 on all others), weight (30e 1765 kg, 40e and 40e Performance 1805 kg, 40e Performance xAllrad 1850 kg, 35d and 35d Performance 1835 kg, 35d Performance xAllrad 1930 kg), value (63,500 to 89,400) and special equipment such as carbon-ceramic brakes, the Performance Cooling Package and the Heavy Duty Tow Hitch rated for 3.5 t. Each row also gives 0-100 km/h with launch control in SPORT + DTC: 30e 4.6 s, 40e 4.5 s, 40e Performance 4.2 s, 40e Performance xAllrad 3.1 s, 35d 4.5 s, 35d Performance 4.3 s, 35d Performance xAllrad 3.6 s. A footer panel lists what every configuration shares: the P2 module, 13.5 kWh battery, 50 l tank, limited-slip rear differential, DSC/DTC, adaptive dampers with rear self-leveling, and 245/40 R18 tyres.](docs/images/schematic-lineup.png)
 
 *The seven ETK 854 ActiveHybrid configurations side by side, from the 30e entry model to the 35d Performance xAllrad: engine, engine peak and system output, drive, axle, weight, value, special equipment and 0-100 km/h with launch control. The bars show system power and the torque at the gearbox input against each model's system torque cap. Engine figures and 0-100 times are measured in game.*
 
-All seven share the P2 module with an 83 kW / 265 Nm e-machine (e-boost stage 0), the 13.5 kWh battery, the 50 l tank, the limited-slip rear differential, DSC / DTC, the adaptive chassis and the hybrid cockpit.
+All ten share the P2 module with an 83 kW / 265 Nm e-machine (e-boost stage 0), the 13.5 kWh battery, the 50 l tank, the limited-slip rear differential, DSC / DTC, the adaptive chassis and the hybrid cockpit.
 
 | Configuration | Engine | Engine kW / PS / Nm | System kW / PS / Nm | Drive, axle | Weight | Value | Notes |
 |---|---|---|---|---|---|---|---|
@@ -46,17 +55,46 @@ All seven share the P2 module with an 83 kW / 265 Nm e-machine (e-boost stage 0)
 | **40e** | B58 3.0 l I6 turbo | 220 / 299 / 447 | 303 / 412 / 680 | RWD, 2.81 | 1805 kg | 68,500 | default model |
 | **40e Performance** | B58S, ttSport turbo | 415 / 565 / 704 | 498 / 678 / 820 | RWD, 2.81 | 1805 kg | 85,500 | carbon-ceramic brakes, Performance cooling |
 | **40e Performance xAllrad** | as above | as above | as above | AWD / 2WD, 2.81 | 1850 kg | 89,400 | + xAllrad |
+| **40e Perf. xAllrad Rear Steer** | as above | as above | as above | AWD / 2WD, 2.81 | 1850 kg | 92,200 | + xAllrad, rear-axle steering (new) |
 | **35d** | N57D30TOP 3.0 l I6 twin-turbo diesel | 230 / 313 / 637 | 313 / 426 / 680 | RWD, 2.81 | 1835 kg | 72,200 | diesel instrument cluster |
 | **35d Performance** | N57S, Stage 3 turbo | 369 / 502 / 888 | 452 / 615 / 950 | RWD, 2.81 | 1835 kg | 84,250 | carbon-ceramic brakes, Performance cooling |
-| **35d Performance xAllrad** | as above | as above | as above | AWD / 2WD, 2.81 | 1930 kg | 88,150 | + xAllrad, heavy-duty tow hitch |
+| **35d Performance xAllrad** | as above | as above | as above | AWD / 2WD, 2.81 | 1930 kg | 88,150 | + xAllrad, heavy-duty tow hitch, trailer stability |
+| **35d Perf. xAllrad Rear Steer** | as above | as above | as above | AWD / 2WD, 2.81 | 1886 kg | 88,900 | + xAllrad, rear-axle steering, no tow hitch (new) |
+| **35d Perf. xAllrad Hauling** | as above | as above | as above | AWD / 2WD, 2.81 | 1995 kg | 91,960 | + xAllrad, rear-axle steering, 3.5 t heavy-duty hitch with ball and pintle hook, trunk air compressor, trailer stability (new) |
+
+The selector tiles carry badges for tier, engine, power and features (AWD, REAR STEER, HAULING, TOW HITCH).
 
 System power = engine peak + 83 kW (a nominal sum, so it follows the engine figures). System torque = the system torque cap, or engine + 265 Nm where that is lower.
 
-**0-100 km/h with launch control** (SPORT + DTC, measured on smallgrid): 30e 4.6 s · 40e 4.5 s · 40e Performance 4.2 s · 40e Performance xAllrad 3.1 s · 35d 4.5 s · 35d Performance 4.3 s · 35d Performance xAllrad 3.6 s. The rear-wheel-drive models are limited by traction, which is why xAllrad is so much quicker.
+**0-100 km/h with launch control** (SPORT + DTC, measured on smallgrid): 30e 4.6 s · 40e 4.5 s · 40e Performance 4.2 s · 40e Performance xAllrad 3.1 s · 35d 4.5 s · 35d Performance 4.3 s · 35d Performance xAllrad 3.6 s. The rear-wheel-drive models are limited by traction, which is why xAllrad is so much quicker. The Rear Steer and Hauling models are not measured yet.
 
 ![Torque and power curves of the five ETK 854 ActiveHybrid calibrations](docs/images/chart-power-lineup.png)
 
 *System torque and power of the five calibrations (engine + e-machine at e-boost stage 0, limited by the electronic system torque cap): 30e 627 Nm / 271 kW, 40e 680 Nm / 302 kW, 40e Performance 820 Nm / 498 kW, 35d 680 Nm / 313 kW, 35d Performance 950 Nm / 450 kW.*
+
+## Rear-axle steering
+
+The optional part replaces the stock rear suspension 1:1 and turns its two toe links into actuators. Below about 60 km/h the rear wheels steer opposite to the front wheels, up to 3°, so the turning circle shrinks by about 0.6 m. Above it they steer with the front wheels, up to 1.5° (SPORT 1.0°), so lane changes feel calmer. In trailer mode or with a trailer coupled the change-over moves down to 40 km/h and the counter-steer is limited to 1°.
+
+The DSC knows the rear angle and corrects its yaw reference, so it does not mistake the tighter line for oversteer. With **ON + DSC** (default) a stability assist lets the rear wheels counter beginning oversteer before the DSC trims torque or brakes. **ON NO DSC** keeps the steering but no assist: the rear wheels return to straight while the DSC intervenes. **OFF** keeps the rear wheels straight, as without the system, and DSC OFF always switches the rear-axle steering off. The selector is the **R-STEER** row of the Actions app and the CHASSIS tab of the centre-screen panel.
+
+Two models carry it from the factory: **40e Perf. xAllrad Rear Steer** and **35d Perf. xAllrad Rear Steer**, plus the Hauling model. On any other ActiveHybrid you can fit it in the rear suspension slot; I have only driven it on the xAllrad models so far.
+
+## Trailer stability and the Hauling model
+
+Both tow hitches now bring a trailer stability function of the DSC. It arms with trailer mode on and DSC or DTC; with a trailer coupled but trailer mode off, a hint tells you so. The hitch carrier works as a force sensor, and from it the car estimates the trailer mass and tongue load; with a low or negative tongue load the recommended speed drops from 100 to 80 km/h.
+
+- **Sway:** stage 1 acts silently (rear-steer share, torque hold, no engine start or stop), stage 2 lights the lamp, takes the wheel torque away and brakes a single front wheel, stage 3 brakes the whole combination down and shows "Reduce speed". DTC keeps the sway damping.
+- **Corners:** with DSC, the car predicts the lateral acceleration of a corner and, in two steps, holds the torque and then brakes before the combination runs out of grip.
+- **Display:** a TRAILER page on the centre screen (drawbar load, estimated trailer mass) and a TSA chip in the HUD.
+
+I retuned the trailer-mode DSC after my own drive with a 2.9 t cargo trailer: it held on too long and was a bit too sensitive. The low-friction memory now needs real traction control or ABS action, a corner step ends once the car is back below the limit, shorter lamp after an intervention, torque back after a corner step, "Reduce speed" only for a clear intervention, and a better trailer mass estimate.
+
+The new **35d Perf. xAllrad Hauling** is the tow car of the range: rear-axle steering, the 3.5 t heavy-duty hitch with ball and pintle hook, the trunk air compressor for air-braked trailers, and trailer stability.
+
+## Cockpit views and control panel
+
+The centre screen switches between **ENERGY** (energy flow, changes to the trailer page by itself), **MAP** (the game's navigation map) and **TRAILER**. The cluster has the views **HYBRID**, **EFFICIENCY**, **SPORT** and **MINIMAL**; **AUTO** follows the Driving Experience. **MENU** opens a control panel on the centre screen with the tabs DRIVE, EV, CHASSIS, TRAILER and DISPLAY: everything the Actions app offers, plus shift program AUTO, trailer mode AUTO and a trip computer reset. Click a button on the screen with the mouse cursor, or use the keys like a rotary controller. A watchdog reloads a cockpit page that stops updating after a vehicle swap.
 
 ## What it changes on the ETK 800
 
@@ -67,10 +105,10 @@ System power = engine peak + 83 kW (a nominal sum, so it follows the engine figu
 - **Transmission:** the P2 module (K0, e-machine, converter, 8-speed, hybrid control) with an E-Boost Stage sub-slot
 - **Fuel tank:** 50 l tank plus 13.5 kWh HV battery
 - **Engine and driveline:** dedicated engine computers (ECUs) on the six-cylinders, no speed limiter, 2.81 axle on the six-cylinders, limited-slip rear differential, xAllrad transfer case
-- **Chassis, DSC, cooling, cockpit:** adaptive dampers, self-leveling, sport steering, dedicated DSC parts, uprated radiator, hybrid cluster and centre screen
-- **Towing:** EU or heavy-duty hitch, workshop cargo with an electric air compressor
+- **Chassis, DSC, cooling, cockpit:** adaptive dampers, self-leveling, sport steering, optional rear-axle steering, dedicated DSC parts, uprated radiator, hybrid cluster and centre screen with control panel
+- **Towing:** EU or heavy-duty hitch, both with trailer stability, workshop cargo with an electric air compressor
 
-Every change is a part in an existing ETK 800 slot or in a sub-slot of one of the mod's own parts (E-Boost Stage, tow balls, workshop cargo modules); no base-game file is touched.
+Every change is a part in an existing ETK 800 slot or in a sub-slot of one of the mod's own parts (E-Boost Stage, tow balls, workshop cargo modules); no base-game file is touched; the rear-axle steering uses the stock rear suspension slot.
 
 ## Inside the mod
 
@@ -112,7 +150,7 @@ Twelve deep-dive chapters explain every system. In short:
 
 *Upshift lines of the 8HP-style shift program. ECO and COMFORT shift up early and stay in a narrow torque-first band of about 1100–1900 rpm (diesel 1050–1520 rpm) up to 70 % load. SPORT shifts much higher and keeps 6th as its top gear, with no overdrive. Every point is capped at the full-load upshift speed of its gear pair.*
 
-**7. Driving dynamics.** Two-stage DSC trims engine and e-machine before it brakes a wheel. The rear differential's lock follows the Driving Experience, the DSC step and AWD/2WD, up to a full drift lock; the xAllrad models switch to 2WD at any time.
+**7. Driving dynamics.** Two-stage DSC trims engine and e-machine before it brakes a wheel. The rear differential's lock follows the Driving Experience, the DSC step and AWD/2WD, up to a full drift lock; the xAllrad models switch to 2WD at any time. With rear-axle steering, the DSC uses a yaw reference that includes the rear angle.
 
 ![Dark technical matrix. Rows: COMFORT, ECO PRO (both select DSC automatically) and SPORT (selects DTC). Columns: DSC, DTC, DSC OFF, each split into RWD models, xAllrad 2WD and xAllrad AWD. COMFORT and ECO PRO share their cells: with DSC OPEN (0 Nm, 0 %, 0 %, behaves like the stock open differential, marked DEFAULT), with DTC SPORT (power 60 %, coast 20 %, pre-load 60 Nm, no slip hold), with DSC OFF TRACK (80 %, 40 %, 100 Nm). SPORT row: with DSC SPORT. With DTC and rear drive, SPORT plus a slip hold of up to 1000 Nm (DEFAULT); with AWD, SPORT without hold (DEFAULT). With DSC OFF and rear drive, DRIFT (100 %, 70 %, 150 Nm) plus slip hold, with the handbrake freezing the hold; with AWD, TRACK. A legend shows the HUD chips LSD 60% in blue (SPORT), LSD 80% in amber (TRACK) and LSD 100% in red with a dot (DRIFT, dot = slip hold above 50 %, chip hidden in OPEN), and explains lock rate, power/coast and the stock brake EDL. Lower cards: a line chart of extra lock against axle slip (0 Nm below 6 %, rising to 1000 Nm at 15 %), with the hold timing (builds up at 6 /s, held 0.25 s, released at 2 /s, drops at 10 /s on ABS, DSC braking or brake at 30 % or more). A card on ABS and DSC braking: pre-load at most 20 Nm, coast 0 %, opens 100 % to 0 % in 50 ms, QA 0.039 s / 0.041 s, trailer mode caps to SPORT. A dashed side note: below about 2.5 km/h with the brake held or launch control armed the lock opens fully and the HUD shows LSD 0%, which is intended.](docs/images/schematic-lsd-matrix.png)
 
@@ -120,7 +158,7 @@ Twelve deep-dive chapters explain every system. In short:
 
 **8. Chassis.** Adaptive dampers follow the Driving Experience in fine steps, and springs, anti-roll bars and steering are retuned for the heavier car without upsetting its balance.
 
-**9. Towing.** Now you have basically unlimited torque, so of course you have to put it to use hauling ridiculous loads. Couple a trailer and the dampers, gearbox, differential and brakes adapt, while self-leveling keeps the rear level. For the really silly stuff there is an optional part that mounts an air compressor, powered by the HV battery, in the boot. Hook the game's dolly, or any other air-braked truck trailer, to the **pintle hook** of the heavy-duty hitch's combination mount, and the air supply connects with the coupling, just like a truck's gladhands. The air system is realistic: every brake application draws on the reservoir, the compressor kicks back in at 7.2 bar, and if the pressure drops below 3.4 bar the trailer's spring brakes clamp on.
+**9. Towing.** Now you have basically unlimited torque, so of course you have to put it to use hauling ridiculous loads. Couple a trailer and the dampers, gearbox, differential and brakes adapt, while self-leveling keeps the rear level. For the really silly stuff there is an optional part that mounts an air compressor, powered by the HV battery, in the boot. Hook the game's dolly, or any other air-braked truck trailer, to the **pintle hook** of the heavy-duty hitch's combination mount, and the air supply connects with the coupling, just like a truck's gladhands. The air system is realistic: every brake application draws on the reservoir, the compressor kicks back in at 7.2 bar, and if the pressure drops below 3.4 bar the trailer's spring brakes clamp on. Since 1.1.0 the DSC also damps trailer sway and pre-brakes for corners (see above).
 
 ![schematic-trailer-mode](docs/images/schematic-trailer-mode.png)
 
@@ -130,13 +168,13 @@ Twelve deep-dive chapters explain every system. In short:
 
 *The 850 W PWM radiator fan stays off until 105 °C, starts at 35 % straight away and rises steplessly to 100 % at 112 °C. At standstill it holds the coolant between 101 and 105 °C, and on the move it stays off until 110 °C. The Performance models add an auxiliary radiator fed only by the airflow while driving, plus an oil cooler, for long full-throttle runs. These figures come from an offline replica of the game's thermal model; the in-game test is still pending.*
 
-**11. Cockpit.** One picture and one colour code on every screen: HUD, Actions app, a cluster with READY needle and on-board computer, and an energy-flow centre screen.
+**11. Cockpit.** One picture and one colour code on every screen: HUD, Actions app, a cluster with READY needle and on-board computer, and an energy-flow centre screen. Since 1.1.0 both displays have switchable views, and the centre screen has a control panel.
 
 ![HUD showing ELECTRIC phase with K0 open and the engine off](docs/images/hud-electric.jpg)
 
 *Electric driving: K0 open, engine off (40e Performance xAllrad)*
 
-**12. Under the hood.** Tuning reference, about 230 data channels for your own apps, the failsafe, and how it was tested: a 34-test in-game QA suite, scripted scenarios and three feedback rounds.
+**12. Under the hood.** Tuning reference, about 230 data channels for your own apps, the failsafe, and how it was tested: an in-game QA suite (36 tests since 1.1.0), scripted scenarios and three feedback rounds.
 
 ![Block diagram on a dark background. The top panel, labelled 'VCU · hybridControl', holds 14 numbered steps arranged as a snake. Row 1, left to right: 1 Inputs, 2 Battery monitor, 3 E-machine envelope (stage caps 265/320/400/500 Nm, rev guard), 4 Pedal map (ECO PRO EV zone 80 % plus a full-EV plateau), 5 Sportiness index. Row 2, right to left: 6 Start/stop policy, 7 Sailing (25-160 km/h, SOC at least 10 %), 8 ICE arbiter + start sequencer (CRANK, SYNC, ENGAGE, BLEND; sole owner of K0, ignition and starter), 9 Launch control (generator load up to 290 Nm, brake-throttle guard), 10 Torque coordinator. Row 3, left to right: 11 EV creep, 12 Recuperation (OFF/LOW/MED/HIGH = 0/0.5/1.2/2.2 m/s²), 13 BATTERY CONTROL (default target 90 %, up to 25 kW on the move, P quiet / N fast), 14 Outputs (launch hold outputs written last, display channels at 20 Hz). A dashed red failsafe box says that if step 8 or 10 fails to load, the engine runs, K0 stays closed and the e-machine leads under the system cap. Coloured side strips mark the domain: electric blue, engine orange, recuperation green, sailing light blue. Below it a blue bar is labelled 'electrics data bus · electrics.values · about 230 etk854hybrid_* channels'. The VCU reads pedal, brake, wheel speed, rpm and the 8HP torque factor from the bus and writes actuator channels to it. Under the bus sit three groups. Powertrain devices (physics, 2 kHz): Engine, K0 clutch, E-machine (own device with a per-tick fill loop and creep floor), Converter + 8-speed. Satellite controllers: 8HP logic, DSC parts, LSD lock scheduler, xAllrad mode, Self-leveling, Adaptive dampers, Cooling, Air compressor, Display data. Displays: HUD app, Actions app, Instrument cluster, Centre screen. Arrows run from Display data to the cluster and centre screen. Dashed command arrows run from the Actions app back to the satellites and to the VCU.](docs/images/schematic-software.png)
 
@@ -155,9 +193,13 @@ Twelve deep-dive chapters explain every system. In short:
 | Alt+G | shift program AUTO / ECO / COMFORT / SPORT / MANUAL |
 | Alt+M | presets |
 | Alt+T / Alt+W | trailer mode / xAllrad AWD or 2WD |
+| Alt+H | centre-screen control panel (MENU) open / close |
+| Alt+, / Alt+. | control panel: rotate left / right |
+| Alt+J / Alt+Backspace | control panel: press / back |
+| Alt+V / Alt+C | centre-screen view / cluster view |
 | Ctrl+Q | DSC / DTC / DSC OFF (game key) |
 
-All actions can be rebound under Options > Controls ("ETK 854: ..."), and almost all are a click in the Actions app.
+All actions can be rebound under Options > Controls ("ETK 854: ..."), and almost all are a click in the Actions app or on the centre-screen panel. The rear-axle steering has no key: select OFF / ON + DSC / ON NO DSC in the Actions app's **R-STEER** row or on the panel's CHASSIS tab.
 
 ![Actions app with drive, EV, charge, recuperation, DSC, gearbox and chassis rows](docs/images/actions-app.jpg)
 
@@ -165,7 +207,7 @@ All actions can be rebound under Options > Controls ("ETK 854: ..."), and almost
 
 ## Requirements and installation
 
-**BeamNG.drive 0.39.4**, no other mods needed.
+**BeamNG.drive 0.40.3** (tested), no other mods needed.
 
 1. Subscribe in the repository, or copy **etk_p2_hybrid_suite.zip** into `%LOCALAPPDATA%\BeamNG\BeamNG.drive\current\mods` **without unpacking it**. Updates keep this name; remove older forum versions (etk854_activehybrid_v1.0.x.zip).
 2. Enable the mod in the mod manager (a game update disables all mods once).
@@ -177,14 +219,19 @@ All actions can be rebound under Options > Controls ("ETK 854: ..."), and almost
 - On the 35d at low revs, pedal travel above roughly 80 % (COMFORT) or 67 % (SPORT) adds no torque: the system torque cap is reached.
 - Reverse is limited to about 35 km/h on purpose.
 - The hybrid UI layout stays after switching to another vehicle, and every spawned ActiveHybrid (also a second or AI car) switches to it.
-- Sailing, EV driving and DSC ignore a trailer; no trailer sway control.
+- Sailing, EV driving and engine start/stop ignore a trailer, except while the trailer stability intervenes.
+- Trailer stability works only with trailer mode on and DSC or DTC; corner pre-braking only with DSC.
+- With a trailer, a brisk turn-in can still give a short pre-braking pulse with the DSC lamp. The last two trailer-stability corrections (ending a corner step in a held bend, the torque limit after a late corner step) are checked offline and in the QA suite, not yet on a long drive.
+- After a vehicle reload with a trailer coupled, the estimated trailer mass appears only after new samples.
+- Rear-axle steering: the turning-circle figure is calculated; I have not measured it in game yet.
+- The control panel takes clicks only while the mouse cursor is visible and no UI app covers the centre screen. After the watchdog reloads a page, the MAP view shows no roads until the vehicle is reloaded (Ctrl+R).
 - Trailer air: one air-braked trailer at a time; the round-3 protection valve is verified in simulation only.
 - When the e-machine is saturated, the 12 V starter takes over the engine start: later, but no harsher. A kickdown out of EV takes about 0.9-1.0 s until the engine is coupled (about 1.1 s when the starter has to step in).
 - Around an engine start the gearbox occasionally takes a gear back.
 - Performance models: their full-throttle cooling is designed offline; sustained full-throttle runs in game and their fuel consumption are still pending.
 - The 40e uses about 20 % more fuel than the real car it is modelled on; electric range is not measured.
 - The LSD drift scenarios are still on the test plan; "LSD 0%" while the car is held at a standstill is intended.
-- Changed units reach the cluster only after a reload, and the trip computer can only be reset from the console.
+- Changed units reach the cluster only after a reload; the trip computer is reset on the panel's DISPLAY tab.
 
 ## Credits and licences
 

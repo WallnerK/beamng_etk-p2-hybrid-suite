@@ -1,66 +1,46 @@
 -- etk854hybrid_iceSequencer.lua - ETK 854 ActiveHybrid - ICE start/stop sequencer
 --
--- User requirement behind this module: "The engine must match its speed to
--- the shaft BEFORE the clutch closes onto the driveline." The old master did
--- a start in ONE frame: starter crank (rpm < 200) + K0 closing at 4/s against
--- a stopped engine + the torque request moved to the (not yet running) ICE.
--- The K0 slip-damping term (frictionClutch.lua:104, up to lockTorque) then
--- decelerated the whole driveline = the jerk the driver felt.
+-- Starts and stops the ICE behind K0 so that the engine speed matches the
+-- motor shaft BEFORE K0 closes: K0 closing onto a slow engine lets the
+-- frictionClutch slip damping (up to lockTorque) brake the driveline (jerk).
 --
--- Sequence (published as etk854hybrid_iceEngageState):
---   OFF     K0 open, ignition off
---   CRANK   variant K0      : E-machine drags the ICE up through a slipping
---                             K0 (torque-controlled capacity, the motor fill
---                             loop cancels the crank torque at the shaft)
---           variant STARTER : K0 open, 12 V starter, nothing reaches the shaft
---   SYNC    K0 OPEN, rev-match: ICE speed controlled onto shaft + offset
---           (idle governor with idleAVOverwrite = reference that follows the
---            shaft's own rate + a rate-limited approach, inertia feed-forward
---            + integral on the VCU throttle channel). Bounded: after the
---            profile's syncMax (0.4-0.7 s) it engages anyway with controlled
---            K0 slip (mode SLIP) - an accelerating shaft never "settles"
---   ENGAGE  rpm matched, K0 closes (governor handed over at r >= 0.3)
---           (SYNC / ENGAGE under the launch module's brake-throttle guard:
---            reference never ahead of the shaft, fill on above the idle
---            band - see guardOn / guardFill)
---   BLEND   K0 locked, ICE torque share ramped in (smoothstep, 0.2..1.0 s)
+-- States (etk854hybrid_iceEngageState):
+--   OFF      K0 open, ignition off
+--   CRANK    K0: E-machine drags the ICE up through a slipping K0 (capacity
+--               control, fill on)
+--            STARTER: K0 open, 12 V starter
+--   SYNC     K0 open, ICE rev-matched onto shaft + offset (idle-governor
+--            reference + inertia feed-forward + integral on the VCU throttle);
+--            after the time budget it engages anyway with K0 slip (SLIP/FORCED)
+--   ENGAGE   K0 closes, governor handed over at GOV_HANDOVER_R
+--   BLEND    K0 locked, ICE share ramped in (smoothstep)
 --   ON
---   RELEASE TORQUE: ICE share ramped out -> OPEN: K0 opens with the ICE held
---           at zero net torque -> ignition cut ONLY after K0 is open
---   IDLE    ICE-off hold after sporty driving (sport index >= ARB.IDLE_S_MIN)
---           or for the rest of the minimum run time in such a phase
---           (arbiter ctx.iceIdleHold): K0 OPEN, ignition
---           on, the engine idles on its own governor - no fuel-cut drag on
---           the driveline; a new request re-engages it
---           without a crank (REFIRE: SYNC -> ENGAGE -> BLEND); the end of the
---           hold switches the ignition off (-> OFF).
---           COMFORT / SPORT only (ARB.IDLE_DE): ECO PRO never idles the ICE
---           decoupled, its hold is spent coupled and then released -> OFF
---           (feedback round 3); an IDLE inherited from COMFORT ends on the
---           first ECO PRO arbiter frame
---   (FAULT is internal and published as OFF with etk854hybrid_iceSeqFault)
+--   RELEASE  TORQUE (share out) -> OPEN (K0 opens at zero net ICE torque);
+--            ignition cut only after K0 is open
+--   IDLE     ICE-off hold spent decoupled (only DEs with ARB.IDLE_DE 1): K0
+--            open, engine on its own governor; a request re-engages w/o crank
+--   FAULT    internal, published as OFF + etk854hybrid_iceSeqFault
 --
--- Decoupled-ICE diagnostics (feedback round 3, the user plays without a
--- telemetry recording): every frame in which the engine turns (>= DIAG.RPM_FRAC
--- x idle) without carrying the driveline gets a class
--- (etk854hybrid_iceDecoupledWhy, see decClass); long segments, episodes and a
--- per-Driving-Experience summary go to beamng.log as [ICESEQ] decoupled* lines
--- (rate-limited), M.getDiag() returns the lifetime totals.
+-- Per-frame outputs (ctx): r = K0 ratio (k0Ratio), g = ICE torque share gate
+-- (iceShareGate), fill = motor fill gain that cancels the K0 torque at the
+-- shaft (seqFillGain), override = ICE throttle 0..1 (iceThrottleOverride,
+-- nil = torqueCoord throttle). slip = rpmIce - rpmShaft [rpm].
+-- CE / VC = stock combustionEngine / vehicleController, VCU / master =
+-- hybridControl, DE = Driving Experience.
 --
--- The sequencer is the ONLY writer of etk854hybrid_k0ClutchRatio, of the
--- ignition/starter calls, of ice.idleAVOverwrite / maxIdleThrottleOverwrite
--- and of ice.starterDisabled (the master's failsafe branch is the documented
--- exception, active only when this file failed to load).
+-- Sole writer of etk854hybrid_k0ClutchRatio, ignition / starter,
+-- ice.idleAVOverwrite / maxIdleThrottleOverwrite and ice.starterDisabled
+-- (except the master's failsafe when this file fails to load).
 --
--- M.arbitrate(ctx, dt) turns the mode policy into the debounced request
--- ctx.iceReq (replaces the old 2 s "time since last transition" dwell):
--- on-debounce, minimum on/off times, and a sportiness-scaled ICE-off hold.
+-- M.arbitrate: mode policy -> debounced ctx.iceReq (on-debounce, minimum
+-- on/off times, sportiness-scaled ICE-off hold; ctx.tsaFreeze keeps the
+-- committed request). Decoupled-ICE diagnostics: per-frame class
+-- (etk854hybrid_iceDecoupledWhy) + rate-limited [ICESEQ] decoupled* lines.
 --
--- Contract: M.isReal, init / initStage2 / updateGFX / reset / getState,
--- arbitrate(ctx, dt), onExternalStall(ctx), getStats(), getDiag(); live
--- levers setParam / setProf / setArb (not persistent).
--- All constants in P / PROF / REL / ARB, all state in st (LuaJIT: 60
--- upvalues per function - every function here stays far below 30).
+-- API: init / initStage2 / updateGFX / reset / getState / arbitrate /
+-- k0WindowOpen / onExternalStall / getDiag; live levers setParam /
+-- setProf / setArb (not persistent). Constants in P / PROF / REL / ARB, state
+-- in st (LuaJIT 60-upvalue limit).
 
 local M = {}
 M.name = "iceSequencer"
@@ -71,31 +51,30 @@ local RPM_TO_AV = 0.104719755
 local AV_TO_RPM = 9.549296596
 
 -- ===========================================================
--- Parameters (P1 spec section 6 "SEQUENCER")
+-- Parameters
 -- ===========================================================
 local P = {
-  -- 'ALWAYS' = production-style warm restart via the E-machine whenever it can be
-  -- done; the 12 V starter only where K0 cannot be used. 'URGENT_ONLY' =
-  -- K0 start only for urgent starts (kickdown, sail exit, SOC force).
+  -- ALWAYS = warm restart via the E-machine whenever possible, 12 V starter
+  -- otherwise; URGENT_ONLY = K0 start only for urgent starts (kickdown,
+  -- sail exit, SOC force)
   K0_START_POLICY     = "ALWAYS",
-  K0_START_MIN_FRAC   = 1.3,     -- shaft >= max(1.3*idle, idle + 250) rpm, else
-  K0_START_MIN_ADD    = 250,     -- the shaft cannot drag the ICE to firing speed
+  K0_START_MIN_FRAC   = 1.3,     -- K0 start needs shaft >= max(1.3*idle, idle + 250) rpm,
+  K0_START_MIN_ADD    = 250,     -- else K0 cannot drag the ICE to firing speed
   K0_START_RESERVE_NM = 30,      -- motor headroom needed = crankNm + this
   CRANK_HEADROOM_NM   = 10,      -- reserve held back from the driver = crankNm + this
   CRANK_MIN_NM        = 70,
   CRANK_MAX_NM        = 220,
-  CRANK_DRAG_FRAC     = 1.0,     -- share of the drag estimate put into the crank torque
-  -- K0 start while the 8HP DOWNshifts, or through any shift for an urgent
-  -- (kickdown) start: the crank torque is cancelled by the motor fill, which
-  -- now stays on during shifts in the slip states (torqueCoord
-  -- updateFillGain). 0 = starter as before.
+  CRANK_DRAG_FRAC     = 1.0,     -- share of the drag estimate in the crank torque
+  -- 1 = K0 start during a downshift (or any shift if urgent); the fill stays
+  -- on in the slip states. 0 = 12 V starter during every shift
   K0_START_IN_DOWNSHIFT = 1,
-  K0_SHIFT_WAIT_S     = 0.5,     -- a non-urgent start waits this long for an upshift to end
+  K0_SHIFT_WAIT_S     = 0.5,     -- non-urgent start waits for an upshift to end
   K0_CAP_DOWN_NMS     = 3000,    -- crank capacity ramp-down after fire
   K0_CAP_KI           = 0.004,   -- [1/(Nm*s)] measured-torque integral on r
   K0_CAP_I_MAX        = 0.2,
-  K0_CRANK_RRATE      = 4.0,     -- [1/s] K0 ratio slew while cranking
+  K0_CRANK_RRATE      = 4.0,     -- [1/s]
   K0_CRANK_RMAX       = 0.6,
+  CRANK_OPEN_R        = 0.01,    -- K0 counted open after the crank (-> SYNC)
   SLIP_EVENT_J        = 15000,   -- K0 thermal protection: per start ...
   SLIP_BUDGET_J       = 60000,   -- ... and leaky budget (typ. crank 4-6 kJ)
   SLIP_BUDGET_TAU_S   = 120,
@@ -104,51 +83,45 @@ local P = {
   REFIRE_FRAC         = 0.60,    -- still spinning: ignition-only restart
   STALL_FRAC          = 0.45,    -- rpm < 0.45*idle for STALL_S = stalled
   STALL_S             = 0.2,
-  STARTER_ENGAGE_FRAC = 0.78,    -- VC:690-698 refuses the starter above 0.8*starterMaxAV
-  -- Warm restart through the 12 V starter: the stock engine kills the
-  -- throttle for starterThrottleKillTime after the starter engages (CE:999-
-  -- 1003, 0.5 s default; the R6 ECUs set 0.30, the i4 keeps 0.5 -> fire
-  -- 583 ms). A hybrid's warm engine fires on the first compressions; with a
-  -- warm block the kill window is cut to STARTER_WARM_KILL_S. A cold engine
-  -- keeps the stock (x2 / x4 cold-scaled) crank.
+  STARTER_ENGAGE_FRAC = 0.78,    -- VC refuses the starter above 0.8*starterMaxAV
+  -- warm block: cut the stock starter throttle-kill window (0.5 s, more
+  -- when cold) - a warm engine fires on the first compressions
   STARTER_WARM_KILL_S = 0.25,
   STARTER_WARM_BLOCK_C = 40,
+  -- crank timeout = throttle-kill window + ADD, clamped to MIN..MAX (MIN
+  -- until the crank's second frame)
+  STARTER_TIMEOUT_MIN_S = 1.5,
+  STARTER_TIMEOUT_MAX_S = 3.0,
+  STARTER_TIMEOUT_ADD_S = 1.0,
   RETRY_PAUSE_S       = 0.4,
   MAX_RETRIES         = 2,
   FAULT_LOCKOUT_S     = 5,
   FAULT_WINDOW_S      = 60,
   FAULT_BURST_N       = 3,
   FAULT_BURST_LOCKOUT_S = 30,
-  SYNC_LEAD_S         = 0.08,    -- shaft rpm prediction (derivative LPF 0.05 s)
-  -- The reference follows the TARGET'S OWN RATE (shaft acceleration, clamped)
-  -- plus the rate-limited approach below. Without this feed-forward the
-  -- reference only closed at syncRefRate - shDot on an accelerating shaft
-  -- (cruise_100 2026-09-30: the ICE chased the 1st-gear shaft into the rev
-  -- ceiling and SYNC ran for 6 s).
-  SYNC_TGTDOT_MAX     = 4000,    -- [rpm/s] clamp of the target-rate feed-forward
+  SYNC_LEAD_S         = 0.08,    -- shaft rpm prediction
+  -- the reference also follows the shaft's own rate, else it chases an
+  -- accelerating low-gear shaft into the rev ceiling
+  SYNC_TGTDOT_MAX     = 4000,    -- [rpm/s] clamp of that feed-forward
   SHDOT_TAU_S         = 0.05,
   SLIPDOT_TAU_S       = 0.03,
   SYNC_CEIL_MARGIN_RPM = 500,    -- never rev-match closer than this to iceMaxRPM
   SYNC_BLOCK_GIVEUP_S = 5,
   SYNC_BLOCK_LOCKOUT_S = 3,
-  -- Reference landing: the rev-match reference approaches its target with
-  -- rate = min(SYNC_REF_RATE, sqrt(2 * SYNC_REF_DECEL * |error|)), so the
-  -- inertia feed-forward tapers out BEFORE the target instead of dropping
-  -- to zero at it (a linear ramp overshot ~130 rpm in the offline harness:
-  -- ICE throttle smoother + turbo lag keep pushing after the ramp ends).
+  -- approach rate = min(syncRefRate, sqrt(2*SYNC_REF_DECEL*|err|)): the
+  -- feed-forward tapers out before the target (a linear ramp overshoots,
+  -- throttle smoother and turbo lag keep pushing)
   SYNC_REF_DECEL      = 12000,   -- [rpm/s^2]
   SYNC_KI             = 0.002,   -- [1/(rpm*s)] integral on the VCU throttle
   SYNC_I_MIN          = -0.10,
   SYNC_I_WINDOW_RPM   = 300,     -- integral frozen outside +-300 rpm
   SYNC_SLIPDOT_MAX    = 1500,    -- [rpm/s] slip must be settled, not crossing
-  -- SYNC budget = profile syncMax + rev-up allowance |target - rpmIce| /
-  -- syncRefRate at SYNC entry (capped SYNC_RAMP_MAX_S). After the budget:
-  -- |slip| <= SYNC_SLIP_ENGAGE_RPM -> SLIP engage (planned strategy, never a
-  -- fault); larger slip keeps syncing up to budget + SYNC_HARD_EXTRA_S, then
-  -- FORCED - the only path that sets seqFault SYNC_TIMEOUT
+  -- SYNC budget = syncMax + min(SYNC_RAMP_MAX_S, |target - rpmIce| / syncRefRate).
+  -- After it: |slip| <= SYNC_SLIP_ENGAGE_RPM -> SLIP engage (planned, no
+  -- fault), else FORCED after SYNC_HARD_EXTRA_S more (seqFault SYNC_TIMEOUT)
   SYNC_SLIP_ENGAGE_RPM = 400,
   SYNC_HARD_EXTRA_S   = 0.5,
-  SYNC_RAMP_MAX_S     = 1.0,     -- cap of the rev-up allowance added to syncMax
+  SYNC_RAMP_MAX_S     = 1.0,
   K0_SLIP_NMS         = 600,     -- SLIP engage: K0 capacity ramp
   SLIP_GOV_RPM        = 60,      -- SLIP/FORCED: governor keeps tracking above this slip
   IDLE_ENGAGE_MARGIN  = 50,      -- shaft below idle - 50: engage at idle (P/N/creep)
@@ -163,27 +136,24 @@ local P = {
   ENGAGE_SHIFT_HOLD_R = 0.8,
   ENGAGE_MAX_S        = 1.2,
   ENGAGE_TIMEOUT_RATE = 2.0,
+  ENGAGE_DONE_R       = 0.98,    -- ENGAGE -> BLEND at r >= this (lock confirmed or ENGAGE_MAX_S)
   KISS_R              = 0.2,     -- stats: slip when K0 starts to carry
   LOCK_SLIP_RPM       = 30,
   LOCK_CONFIRM_S      = 0.04,
   LOCK_MIN_R          = 0.5,
-  K0_HARDEN_RATE      = 8.0,     -- r -> 1 once locked (no slip left = no torque step)
+  K0_HARDEN_RATE      = 8.0,     -- r -> 1 once locked
   URGENT_DEFICIT_NM   = 10,      -- motor saturated -> URGENT blend time
-  -- Traction-aware blend: while the DSE traction control trims the driven
-  -- axle (E-machine or ICE throttle factor below BLEND_TC_TF, written by
-  -- motorTorqueControl on the devices) the ICE share ramps in no faster than
-  -- over T_BLEND_TC. The URGENT blend (0.15-0.2 s) put ~400 Nm of crank
-  -- torque onto an axle that was already at the slip threshold; the ICE
-  -- trim acts through the turbo and is too slow for that step (QA T18 B58
-  -- 2026-10: slip 0.06 -> 0.27 within 0.15 s at BLEND end). T18 B58
-  -- slipPeakLate over 4 runs: no TC blend ~0.255, 0.6 s ~0.24, 0.9 s ~0.21.
-  -- Also slows the kickdown blend on a slipping axle, never a dry start.
+  -- traction control trimming the driven axle (motor or ICE throttleFactor
+  -- < BLEND_TC_TF): blend no faster than T_BLEND_TC - the turbo-lagged ICE
+  -- trim cannot catch a fast share step on an axle at the slip limit
   BLEND_TC_TF         = 0.97,
   T_BLEND_TC          = 0.90,
   RELEASE_ZERO_NM     = 15,
   RELEASE_ZERO_S      = 0.05,
   RELEASE_TORQUE_TIMEOUT_S = 1.0,
   RELEASE_BLOCK_FRAC  = 0.95,    -- NORMAL release blocked while T_cmd > 0.95*motorCap
+  REREQ_ENGAGE_R      = 0.5,     -- re-request in RELEASE:OPEN goes straight to ENGAGE
+  REREQ_ENGAGE_SLIP_RPM = 100,   -- at r >= REREQ_ENGAGE_R and |slip| <= this
   K0_OPEN_EPS         = 0.02,
   K0_CLEANUP_RATE     = 8.0,
   RESERVE_RELEASE_NMS = 1500,    -- crank reserve given back to the driver
@@ -194,19 +164,14 @@ local P = {
   LOCKED_R            = 0.9,
   LOCKED_SLIP_RPM     = 50,
   LOG_BUDGET_PER_S    = 40,
-  -- OFF with the ignition switched on behind the sequencer (nothing in this
-  -- file does that; external writers: the VC stall handling on an ignition
-  -- level change, a dev rig) and the engine running (>= REFIRE_FRAC x idle):
-  -- the ignition is cut after this long and logged. Longer than FIRE_HOLD_S
-  -- and any frame-level ignition transient; 0 disables it (setParam).
+  -- OFF with the ignition switched on externally (VC stall handling, dev rig)
+  -- and the engine running: cut the ignition after this long (> FIRE_HOLD_S
+  -- and frame-level ignition transients); 0 = disabled
   ORPHAN_IGN_S        = 0.25,
 }
 
--- Per start profile. COMFORT values of the LERP keys move toward URGENT
--- with u = clamp01((sportIndex - 0.30) / 0.50).
--- 2026-09-30: syncMax 1.5/1.5/0.9/0.9 -> 0.6/0.7/0.45/0.4 (series car: coupled
--- within ~0.6-1.0 s of the request), faster rev-up and K0 close in COMFORT /
--- ECO PRO (the ICE is matched when K0 closes, so a faster close adds no step).
+-- Start profiles; COMFORT LERP_KEYS move toward URGENT with
+-- u = clamp01((sportIndex - U_S0) / U_SPAN). Coupled ~0.6-1.0 s after the request.
 local PROF = {
   COMFORT = { crankAlpha = 150, capRate = 1200, crankMaxS = 0.9, syncOffset = 30,
               syncRefRate = 4000, syncThrMax = 0.45, syncTol = 60, syncHold = 0.08,
@@ -223,86 +188,47 @@ local PROF = {
 }
 local LERP_KEYS = { crankAlpha = true, capRate = true, syncRefRate = true, syncThrMax = true,
                     k0LockRate = true, tBlend = true, syncMax = true }
--- Release profiles other than NORMAL (NORMAL uses the start profile table)
+-- Release profiles other than NORMAL (NORMAL uses PROF)
 local REL = {
   FAST      = { tRelease = 0.25, k0OpenRate = 5.0 },
   EMERGENCY = { tRelease = 0.0,  k0OpenRate = 20.0 },
 }
--- Arbiter (spec 4.2)
+-- Arbiter (M.arbitrate); per-DE tables
 local ARB = {
   ON_DEBOUNCE_S = { COMFORT = 0.15, ECO_PRO = 0.25, SPORT = 0.15, BATTERY_CONTROL = 0.50 },
   MIN_ON_S      = { COMFORT = 3.0,  ECO_PRO = 2.0,  SPORT = 3.0 },
   MIN_OFF_S     = { COMFORT = 1.0,  ECO_PRO = 1.5,  SPORT = 1.0 },
   HOLD_MIN_S    = { COMFORT = 2.0,  ECO_PRO = 1.5,  SPORT = 2.0 },
   HOLD_MAX_S    = { COMFORT = 20.0, ECO_PRO = 8.0,  SPORT = 20.0 },
-  -- ICE-off hold after the policy said "off" (arbHoldTime), scaled by the
-  -- sportiness index S (2026-10, user feedback "unter 90 aus dem Gas ...";
-  -- the old hold 2 + 18 * smoothstep((S - 0.20) / 0.55) depended on S only):
+  -- ICE-off hold (arbHoldTime), S = sportiness index:
   --   holdS = base + (H_MID - base) * clamp01((S - H_MID_S0) / H_MID_SPAN)
   --                + (HOLD_MAX - H_MID) * smoothstep((S - H_MAX_S0) / H_MAX_SPAN)
-  --   base  = 0 on a LIFT (pedal < LIFT_THR, brake > BRAKE_THR or a pedal
-  --           eased into the EV zone, ctx.iceLightLoad) below LIFT_KMH,
-  --           HOLD_MIN otherwise (above LIFT_KMH, or a pedal above the EV zone)
-  --   minOn above LIFT_KMH without decoupled idle: min(MIN_ON_S, HOLD_MIN_S)
-  --   braking below LIFT_KMH with S < BRAKE_S_MAX[DE] -> hold 0, re-evaluated
-  --           every frame, so it also ends an IDLE hold in progress. ECO PRO
-  --           1.01 = above any reachable S: in ECO every brake ends the hold
-  --           (FAHRMODI promise; the old scalar 0.50 never overlapped the
-  --           S >= 0.60 lift gate, a sporty ECO stop idled to standstill)
-  --   COMFORT lift below 90 km/h: S 0.1 -> 0 s, 0.3 -> 1.2 s, 0.5 -> 4.9 s,
-  --           >= 0.8 -> 20 s; above 90 km/h at S < 0.2: 2.0 s as before
-  --   ECO PRO (IDLE_DE 0, no decoupled idle): the hold is spent COUPLED, at
-  --           most DECOUPLE_S below LIFT_KMH (lift or not) and HOLD_MIN_S
-  --           above, then RELEASE -> OFF
+  --   base = 0 on a lift below LIFT_KMH (pedal < LIFT_THR, brake > BRAKE_THR
+  --          or ctx.iceLightLoad), HOLD_MIN otherwise
+  --   braking below LIFT_KMH with S < BRAKE_S_MAX -> hold 0 (also ends an IDLE;
+  --          ECO PRO 1.01 = every brake)
   LIFT_KMH      = { COMFORT = 90.0, ECO_PRO = 100.0, SPORT = 0.0 },
   H_MID_S       = { COMFORT = 4.0,  ECO_PRO = 2.0,  SPORT = 4.0 },
   H_MID_S0 = 0.20, H_MID_SPAN = 0.30, H_MAX_S0 = 0.45, H_MAX_SPAN = 0.35,
   LIFT_THR = 0.02, BRAKE_THR = 0.05,
   BRAKE_S_MAX   = { COMFORT = 0.50, ECO_PRO = 1.01, SPORT = 0.50 },
-  -- Decoupled idle allowed in this Driving Experience (1) or never (0).
-  -- ECO PRO 0 (feedback round 3, gamepad session: 9 of 12 ECO releases went
-  -- RELEASE -> IDLE, up to 10.5 s): a full-trigger press takes S past 0.60 in
-  -- ~1.1 s and W grows 1/30 per s while e > 0.5 but only shrinks at S < 0.2,
-  -- so the sporty-phase gate below stayed open for minutes. ECO PRO =
-  -- earliest ICE-off; a decoupled idle burns ~0.9 l/h for nothing.
-  -- Live A/B: M.setArb('IDLE_DE', 'ECO_PRO', 1) restores the old behaviour.
+  -- decoupled idle allowed (1) or never (0); ECO PRO spends its hold coupled
   IDLE_DE       = { COMFORT = 1, ECO_PRO = 0, SPORT = 1 },
-  -- Optional abort of an unwanted start in SYNC (K0 open, engine fired) after
-  -- a real lift / brake lasting this long [s]; 0 = off (default everywhere:
-  -- a start in progress completes). Enable per DE only if the live log shows
-  -- SYNC_UNWANTED episodes >= 1 s: M.setArb('SYNC_ABORT_S', 'ECO_PRO', 0.4).
+  -- abort an unwanted start in SYNC after a real lift / brake this long [s];
+  -- 0 = off (a start in progress completes)
   SYNC_ABORT_S  = { COMFORT = 0, ECO_PRO = 0, SPORT = 0 },
-  -- minimum run time on a lift below LIFT_KMH while no decoupled idle is
-  -- allowed (MIN_ON_S would otherwise keep a fresh start coupled in fuel cut)
-  MIN_ON_LIFT_S = 0.5,
-  -- Hold = decoupled idle (2026-09-30): once the policy has said "off" for
-  -- DECOUPLE_S the K0 opens and the engine idles for the rest of the hold
-  -- instead of dragging the car in fuel cut. A shorter lift (gear change,
-  -- a breath between two throttle applications, corner entry) keeps it
-  -- coupled, so pumping the pedal does not cycle the K0. Only in a DE with
-  -- IDLE_DE 1, when at least
-  -- IDLE_MIN_S of hold would be left AND S >= IDLE_S_MIN (a genuinely sporty
-  -- phase, where the H_MAX part of the hold starts to grow). Below IDLE_S_MIN
-  -- a running IDLE ends (-> OFF) and a lift below LIFT_KMH is capped to the
-  -- coupled DECOUPLE_S window: an engine idling decoupled while a calm
-  -- driver rolls electrically is what the user reported (QA T24A 2026-09-30:
-  -- 3 x 1.6 s IDLE at S 0.30, pedal 0.10, 75-82 km/h).
-  -- IDLE_S_MIN_LIFT: the same gate for a lift below LIFT_KMH. 0.45 was
-  -- reached by any sustained ~0.72 pedal (sportIndex uDem = smoothstep((p -
-  -- 0.5) / 0.45)), so an ordinary brisk merge idled the engine decoupled for
-  -- ~3.7 s after the lift (review 2026-10). 0.60 needs a sustained >= 0.76
-  -- pedal. QA T20a (lift at S 0.92-0.93, S tau ~27 s) keeps IDLE until
-  -- S 0.60 is reached ~12 s later, past its 8 s criterion.
+  MIN_ON_LIFT_S = 0.5,           -- minimum run time on a lift without decoupled idle
+  -- Decoupled idle: once the policy has said "off" for DECOUPLE_S, K0 opens and
+  -- the engine idles for the rest of the hold instead of dragging in fuel cut;
+  -- a shorter lift stays coupled (no K0 cycling on a pumped pedal). Needs
+  -- IDLE_DE 1, >= IDLE_MIN_S hold left and S >= IDLE_S_MIN (IDLE_S_MIN_LIFT on
+  -- a lift below LIFT_KMH, so a brisk merge does not idle it decoupled)
   DECOUPLE_S    = { COMFORT = 1.2,  ECO_PRO = 0.8,  SPORT = 1.2 },
   IDLE_MIN_S = 1.0,
   IDLE_S_MIN = 0.45, IDLE_S_MIN_LIFT = 0.60,
-  -- ... and outside SPORT a sporty WINDOW (sportIndex W, ctx.sportWindow)
-  -- of at least this: a single kickdown is not a sporty phase (CR-VCU1)
-  IDLE_W_MIN = 0.12,
-  -- On-debounce while a K0 start is possible right now (k0WindowOpen): a
-  -- tip-in ramps the delivered torque at 750-2500 Nm/s, so the regular
-  -- 0.15 / 0.25 s debounce let the ramp eat the crank headroom and the start
-  -- fell back to the 12 V starter.
+  IDLE_W_MIN = 0.12,             -- outside SPORT also sportWindow >= this (not one kickdown)
+  -- on-debounce while k0WindowOpen: the tip-in torque ramp would otherwise eat
+  -- the crank headroom and send the start to the 12 V starter
   K0_WINDOW_DEBOUNCE_S = { COMFORT = 0.05, ECO_PRO = 0.10, SPORT = 0.05, BATTERY_CONTROL = 0.50 },
 }
 
@@ -310,25 +236,24 @@ local ARB = {
 -- State
 -- ===========================================================
 local st = {
-  ice = nil, k0 = nil, motor = nil,
+  ice = nil, k0 = nil, motor = nil, gb = nil,
   state = "OFF", variant = "NONE", prof = "COMFORT", u = 0,
   relProfile = "NORMAL", relPhase = "TORQUE", engageMode = "NORMAL",
   r = 0, g = 0, x = 0, t = 0, now = 0,
   override = 0, fill = 0, reserve = 0, crankNm = 120,
   tReq = 0, startUrgent = false, fired = false, fireHoldT = 0, retries = 0,
   tcap = 0, rI = 0, k0Abort = false, tcapF = 0,
-  starterOn = false, crankT = 0, crankFrames = 0, crankTimeout = 1.5, pauseT = 0, shiftWaitT = 0,
-  ref = 0, sI = 0, rpmT = 0, idleEngage = false, syncBlocked = false,
+  starterOn = false, crankT = 0, crankFrames = 0, crankTimeout = P.STARTER_TIMEOUT_MIN_S, pauseT = 0, shiftWaitT = 0,
+  ref = 0, sI = 0, idleEngage = false, syncBlocked = false,
   syncHoldT = 0, syncT = 0, blockedT = 0, stallT = 0, syncTimeoutLogged = false,
+  syncBudget = nil,     -- SYNC time budget, set on the first SYNC frame
   lockT = 0, lockConfirmed = false, abortSlipT = 0, kissLogged = false,
   govArmed = false, engTimeoutLogged = false, zeroT = 0,
   k0T = 0, iceMeas = 0, slipDot = 0, shDot = 0, lastSlip = 0, lastSh = 0,
   eEvent = 0, eBudget = 0,
   onElapsed = 99, offElapsed = 99, lockoutT = 0,
   arbOnT = 0, arbHoldT = 0, holdRemain = 0, holdKind = "none",
-  -- arbiter diagnostics of the current frame (M.arbitrate): the effective
-  -- want after every override, IDLE gate 1/0 (-1 = not evaluated), minimum
-  -- run time left, lift-rule inputs; SYNC abort timer; orphan ignition timer
+  -- arbiter diagnostics of this frame (arbIdleOk -1 = not evaluated)
   arbWant = false, arbIdleOk = -1, minOnLeft = 0, arbSlow = false, arbLift = false, arbBraking = false,
   abortT = 0, orphanT = 0,
   seqFault = "none", faultTimes = {},
@@ -336,12 +261,10 @@ local st = {
   ptStarterT = 0,
   logWinT = 0, logN = 0,
   m = { rpmIce = 0, rpmSh = 0, slip = 0, slipAV = 0, idle = 800, iMax = 7000,
-        Iice = 0.5, dragEst = 40, k0raw = 0 },
+        Iice = 0.5, dragEst = 40 },
   stats = {},
   stop = {},
-  -- decoupled-ICE diagnostics (updateDecDiag): current class / segment /
-  -- episode, lifetime totals per "DE:CLASS" (survive reset), the summary
-  -- window (per DE, at most DIAG.SUMMARY_S)
+  -- decoupled-ICE diagnostics (updateDecDiag); tot / cnt survive reset
   dec = { why = "NONE", n = 0, epN = 0, segT0 = 0, epT0 = 0, epDk = "COMFORT", chain = "", chainN = 0,
           dk = "COMFORT", v0 = 0, rpm0 = 0, S0 = 0, W0 = 0, idleOk0 = -1, kind0 = "none", hold0 = 0,
           reason0 = "?", req0 = 0, unwT = 0,
@@ -351,32 +274,19 @@ local st = {
 -- ===========================================================
 -- Helpers
 -- ===========================================================
-local function clamp(v, lo, hi)
-  if v < lo then return lo end
-  if v > hi then return hi end
-  return v
-end
-
-local function clamp01(v)
-  if v ~= v then return 0 end
-  if v < 0 then return 0 end
-  if v > 1 then return 1 end
-  return v
-end
+local U = require("controller/etk854hybrid/etk854hybrid_util")
+local clamp = U.clamp
+local clamp01 = U.clamp01NanZero -- NaN -> 0
 
 local function rampTo(cur, target, rate, dt)
   if cur < target then return min(target, cur + rate * dt) end
   return max(target, cur - rate * dt)
 end
 
-local function smoothstep(t)
-  t = clamp01(t)
-  return t * t * (3 - 2 * t)
-end
+local smoothstep = U.smoothstep -- t through clamp01NanZero
 
--- Inverse of smoothstep on [0,1] (monotonic -> bisection). Used when a
--- RELEASE/TORQUE share gate g is handed back to BLEND, whose state is the
--- PHASE x with g = smoothstep(x): passing g itself as x would step g.
+-- Inverse smoothstep (bisection): RELEASE hands g back to BLEND, whose state
+-- is the phase x with g = smoothstep(x).
 local function invSmoothstep(g)
   g = clamp01(g)
   local lo, hi = 0, 1
@@ -397,8 +307,7 @@ local function pv(key)
   return v
 end
 
--- Transition / event log with a hard per-second budget (a misbehaving loop
--- must never flood beamng.log).
+-- Event log with a hard per-second budget (never flood beamng.log).
 local function slog(fmt, ...)
   if st.now - st.logWinT >= 1 then st.logWinT = st.now; st.logN = 0 end
   st.logN = st.logN + 1
@@ -411,8 +320,8 @@ local function slog(fmt, ...)
   log("I", "etk854hybrid.iceSeq", string.format(fmt, ...))
 end
 
--- Ignition / starter through the vehicleController (VC:690-713), edge-based
--- on the REAL device state so an external ignition change cannot desync us.
+-- Ignition / starter through the vehicleController; edge test on the real
+-- device state, so an external ignition change cannot desync us.
 local function setIgn(on)
   local ice = st.ice
   if ice and ice.ignitionCoef == (on and 1 or 0) then return end
@@ -426,8 +335,8 @@ local function setStarter(on)
   st.starterOn = on
 end
 
--- Every exit of SYNC/ENGAGE, OFF, FAULT, reset and external stall. CE reset
--- zeroes idleAVOverwrite (CE:1333) but NOT maxIdleThrottleOverwrite.
+-- On every exit of the governor phases. CE reset zeroes idleAVOverwrite but
+-- NOT maxIdleThrottleOverwrite.
 local function clearIdleOverwrite()
   local ice = st.ice
   if ice then
@@ -447,52 +356,35 @@ local function crankNmFor(alpha)
   return clamp(m.Iice * alpha + m.dragEst * P.CRANK_DRAG_FRAC, P.CRANK_MIN_NM, P.CRANK_MAX_NM)
 end
 
--- Brake-throttle guard (etk854hybrid_launchControl updateGuard: brake +
--- pedal at a standstill, ctx.launchGuardNm = cap on the torque into the
--- converter; nil during the launch hold, whose PRELOAD loads the converter
--- on purpose). torqueCoord caps the motor request and the ICE share
--- (BLEND / ON) at the cap; the slip states have to keep the ICE out of it:
--- while the guard is on, the rev-match never runs ahead of the shaft (no
--- SYNC_LEAD_S lead on a rising shaft, no syncOffset) and the motor fill
--- cancels the K0 torque in every ENGAGE mode once the motor has spun the
--- shaft out of the idle band (guardFill; an IDLE engage has fill 0 otherwise,
--- writeOutputs then withholds ctx.iceIdleEngage). The value is the launch
--- module's previous frame (it runs after the sequencer).
--- Why: manual arm in S, brake 1.0, pedal 1.0, B58 (launch_hold_manual_s
--- 2026-09-30 20:33:40): the starter start engaged as IDLE (shaft < idle - 50)
--- while the capped motor (151 Nm) spun the shaft up at ~5000 rpm/s; once the
--- shaft passed idle - 50 the governor reference became shaft + 0.08 s x
--- shDot + 50 rpm, i.e. ~450 rpm ahead with the URGENT governor at full
--- authority. The sticking K0 (slip 0 +- 11 rpm, r 0.12 -> 0.28) passed the
--- ICE torque on (K0 = shaft - motor: +24 -> +88 -> +150 -> +220 Nm), which
--- accelerated the shaft further and moved the reference again: shaft 652 ->
--- 1995 rpm in 0.27 s, converter pump load 334 Nm (= 2.2 x the 154 Nm cap),
--- the brakes slipped (2.75 km/h, turbine 598 rpm) until the governor handed
--- over at r 0.30. With the reference at max(shaft, idle) the ICE carries
--- only its own inertia; the shaft settles where the pump load equals the
--- motor's capped torque, as in pure EV.
+-- Brake-throttle guard of the launch module (brake + pedal at standstill,
+-- ctx.launchGuardNm = converter input torque cap, previous frame; not during
+-- the launch hold, whose preload loads the converter on purpose). While on,
+-- torqueCoord caps motor and ICE share, and the rev-match never leads the
+-- shaft (no lead, no syncOffset): a leading reference makes the closing K0
+-- push the shaft, which moves the reference again - positive feedback until
+-- the brakes slip.
 local function guardOn(ctx)
   return ctx.launchGuardNm ~= nil and not ctx.launchHold
 end
 
--- Fill of an IDLE engage under the guard: only with the shaft at or above
--- idle - IDLE_ENGAGE_MARGIN (the per-frame idle test of syncTrack). Below
--- it the ICE governor creeps the shaft up to idle as before - the converter
--- load there is the pump load at idle (~40 Nm) - and a fill against the
--- governor (motor in regen) would stall the engine when the guard cuts the
--- cap to 0 (launch anti-creep cut; offline: IDLE engage -> stall -> crank).
+-- Fill for an IDLE engage under the guard, only with the shaft at or above
+-- idle - IDLE_ENGAGE_MARGIN: below it a fill would fight the ICE governor and
+-- stall the engine when the guard cuts the cap to 0.
 local function guardFill(ctx)
   local m = st.m
   return guardOn(ctx) and m.rpmSh >= m.idle - P.IDLE_ENGAGE_MARGIN
 end
 
+-- K0 commanded locked: BLEND / ON / RELEASE:TORQUE (s = st.state)
+local function k0LockedState(s)
+  return s == "ON" or s == "BLEND" or (s == "RELEASE" and st.relPhase == "TORQUE")
+end
+
 -- ===========================================================
--- K0 capacity model = stock frictionClutch (FC:82-110, calculateInertia
--- FC:189-194). With persistent slip the clutch angle sits on its bound
--- maxClutchAngle*r, so   T = min(LTeff, spring(a) + lockDamp*|slipAV|*r)
--- with a = maxClutchAngle*r, spring = a<=1 and a^2*lockSpring or a*lockSpring.
--- lockSpring / lockDamp / maxClutchAngle are runtime fields (the jbeam keys
--- maxClutchAngle / lockDamp are NOT read by frictionClutch.lua).
+-- K0 capacity model = stock frictionClutch under persistent slip (angle on
+-- its bound a = maxClutchAngle*r):
+--   T = min(LTeff, spring(a) + lockDamp*|slipAV|*r),  spring = a<=1 and a^2*lockSpring or a*lockSpring
+-- (runtime device fields; the jbeam keys maxClutchAngle / lockDamp are not read)
 -- ===========================================================
 local function k0Model()
   local k0 = st.k0
@@ -544,7 +436,7 @@ local function measure(ctx, dt)
   m.iMax = (c and c.iceMaxRPM and c.iceMaxRPM()) or 7000
   m.rpmIce = (type(ice.outputAV1) == "number") and ice.outputAV1 * AV_TO_RPM or (ctx.iceRpm or 0)
   m.rpmSh = ctx.rpmMotor or m.rpmIce
-  -- a shaft at rest reads as a denormal (~1e-323); keep logs and maths clean
+  -- a shaft at rest reads as a denormal (~1e-323)
   if abs(m.rpmSh) < 1e-3 then m.rpmSh = 0 end
   if abs(m.rpmIce) < 1e-3 then m.rpmIce = 0 end
   local slip = m.rpmIce - m.rpmSh
@@ -556,25 +448,17 @@ local function measure(ctx, dt)
   end
   st.lastSlip, st.lastSh = slip, m.rpmSh
   m.Iice = (type(ice.inertia) == "number") and ice.inertia or 0.5
-  -- drag the crank torque has to overcome (spec 5: friction + engine brake
-  -- + dynamic friction at idle speed)
+  -- drag to overcome when cranking (friction + engine brake + dynamic at idle)
   m.dragEst = (ice.friction or 15) * (ice.wearFrictionCoef or 1) + (ice.engineBrakeTorque or 0)
               + (ice.dynamicFriction or 0) * m.idle * RPM_TO_AV
   local k0raw = (k0 and type(k0.torqueDiff) == "number") and k0.torqueDiff or 0
-  m.k0raw = k0raw
   if dt > 0 then
     st.k0T = st.k0T + (k0raw - st.k0T) * min(1, dt / P.K0T_TAU_S)
-    -- slip power -> heat [J], only while the sequencer actually slips the
-    -- clutch. In BLEND / ON / RELEASE:TORQUE K0 is commanded locked (r = 1,
-    -- capacity 1150 Nm above anything the driveline carries); the "slip" read
-    -- there is the elastic wind-up of the frictionClutch spring (tens to
-    -- hundreds of rpm of ringing at +-200 Nm), energy that is stored and
-    -- returned, not dissipated. Integrating |T * slip| of that ringing filled
-    -- the 60 kJ budget in cruise and in P/N charging (QA 2026-09-30: 130 kJ
-    -- while parked) and silently disabled every K0 start in favour of the
-    -- 12 V starter.
+    -- slip heat [J], not while commanded locked: the "slip" there is elastic
+    -- spring wind-up and would fill the budget in cruise (every start on the
+    -- 12 V starter)
     local s = st.state
-    local locked = s == "ON" or s == "BLEND" or (s == "RELEASE" and st.relPhase == "TORQUE")
+    local locked = k0LockedState(s)
     local e = locked and 0 or abs(k0raw * m.slipAV) * dt
     st.eEvent = st.eEvent + e
     st.eBudget = st.eBudget * exp(-dt / P.SLIP_BUDGET_TAU_S) + e
@@ -585,12 +469,12 @@ local function measure(ctx, dt)
       st.iceMeas = st.k0T
     end
   end
-  -- stall detector shared by ENGAGE/BLEND/ON/SYNC
+  -- shared stall detector
   if m.rpmIce < P.STALL_FRAC * m.idle then st.stallT = st.stallT + dt else st.stallT = 0 end
 end
 
 -- ===========================================================
--- Statistics / summary lines (spec 5.11)
+-- Statistics / summary lines
 -- ===========================================================
 local function resetStartStats()
   local s = st.stats
@@ -631,9 +515,8 @@ local function recordFire(ctx)
   local ms = max(1, (st.now - st.tReq) * 1000)
   st.stats.fireMs = ms
   ctx.iceFireMs = ms
-  -- iceRestartMs is TRANSIENT (fire -> coupled): QA T11 polls for a new value
-  -- > 0 and the HUD labels the ICE "START" while it is > 0. The persistent
-  -- figure for diagnostics / new QA is etk854hybrid_iceFireMs.
+  -- iceRestartMs is transient (fire -> coupled; QA and HUD "START"),
+  -- iceFireMs persists
   electrics.values.etk854hybrid_iceRestartMs = ms
   electrics.values.etk854hybrid_iceFireMs = ms
   slog("[ICESEQ] fire type=%s rpmIce=%.0f after %.0fms", st.variant, st.m.rpmIce, ms)
@@ -702,7 +585,7 @@ end
 local function beginCrankStarter(ctx, why)
   enter("CRANK", why)
   st.variant = "STARTER"
-  st.crankT, st.crankFrames, st.crankTimeout, st.pauseT = 0, 0, 1.5, 0
+  st.crankT, st.crankFrames, st.crankTimeout, st.pauseT = 0, 0, P.STARTER_TIMEOUT_MIN_S, 0
   st.fireHoldT = 0
   st.override, st.fill = 0, 0
 end
@@ -715,11 +598,9 @@ local function beginSync(ctx, why)
   st.syncTimeoutLogged = false
   st.syncBudget = nil     -- set on the first SYNC frame (needs the target)
   st.stats.syncT0 = st.now
-  -- Kill the stock start flare: after a starter start CE adds
-  -- idleAVStartOffset (CE:621, idleRPMStartCoef default 2 = up to 2x idle,
-  -- decaying at 1/s) to EVERY idle-governor target - including our
-  -- rev-match reference. The starter is off here, so resetting the
-  -- smoother keeps it at 0 (CE updateGFX feeds it idleAV*coef*0).
+  -- Kill the stock start flare: CE adds idleAVStartOffset (up to 2x idle,
+  -- decaying) to every governor target, including our reference. With the
+  -- starter off, a smoother reset keeps it at 0.
   if (ice.starterEngagedCoef or 0) <= 0 and ice.idleAVStartOffsetSmoother
      and ice.idleAVStartOffsetSmoother.reset then
     ice.idleAVStartOffsetSmoother:reset()
@@ -777,36 +658,39 @@ local function beginRelease(ctx, profile, phase, why)
   end
 end
 
+-- IDLE: entered from RELEASE once K0 is open
+local function beginIdle(ctx, why)
+  enter("IDLE", why)
+  st.g, st.override, st.fill = 0, 0, 0
+  clearIdleOverwrite()
+  electrics.values.etk854hybrid_iceRestartMs = 0
+end
+
 -- ===========================================================
--- OFF -> start request: variant choice (spec 5.1)
+-- OFF -> start request: variant choice
 -- ===========================================================
--- Returns allowed, reason (the reason lands in the CRANK entry log line, so
--- every STARTER start says why the E-machine could not do it).
+-- lowest shaft speed at which K0 can drag the ICE to firing speed
+local function k0MinShaftRpm(idle)
+  return max(P.K0_START_MIN_FRAC * idle, idle + P.K0_START_MIN_ADD)
+end
+
+-- Returns allowed, reason (logged on CRANK entry: why a STARTER start).
 local function k0StartAllowed(ctx)
   local m = st.m
   if P.K0_START_POLICY == "URGENT_ONLY" and not st.startUrgent then return false, "policy" end
   if (ctx.gearSign or 0) == 0 then return false, "N/P" end
   if ctx.isShifting then
-    -- urgent (kickdown) starts crank through any shift: the kickdown shift
-    -- may not be flagged as a downshift yet in the frame the request lands
-    -- (B58S AWD kickdown_ev60 2026-09-30: "starter-start:shifting")
+    -- urgent: any shift (the kickdown may not be flagged as a downshift yet)
     local gb = st.gb
     local down = gb and gb.isShiftingDown == true
     if not (P.K0_START_IN_DOWNSHIFT > 0 and (down or st.startUrgent)) then return false, "shifting" end
   end
   if ctx.evLockoutActive then return false, "evLockout" end
-  if m.rpmSh < max(P.K0_START_MIN_FRAC * m.idle, m.idle + P.K0_START_MIN_ADD) then return false, "shaftSlow" end
+  if m.rpmSh < k0MinShaftRpm(m.idle) then return false, "shaftSlow" end
   if st.eBudget >= P.SLIP_BUDGET_J then return false, string.format("k0Heat%.0fkJ", st.eBudget / 1000) end
-  -- Headroom against the torque the E-machine DELIVERS (the coordinator's
-  -- jerk-limited ramp, last frame, before the shift factor), not against the
-  -- demand: from the first CRANK frame on updateReserve() holds crankNm +
-  -- CRANK_HEADROOM_NM back from the driver (torqueCoord motorCapEff), so a
-  -- demand that keeps rising - kickdown, tip-in - can no longer take the
-  -- crank torque away and abort the crank; it only pauses the torque build-up
-  -- for the ~0.2 s of the crank. The demand-based test sent every rolling
-  -- demand start to the 12 V starter, because a demand start means
-  -- demand > motor cap by definition (sweep 2026-09-30: 0 K0 starts in 40
-  -- rolling starts, "headroom0<119Nm").
+  -- headroom against the DELIVERED motor torque (coordinator ramp), not the
+  -- demand (> cap by definition for a demand start); updateReserve then
+  -- holds the crank torque back from the driver during CRANK
   local cap = ctx.motorCapNm or 0
   local used = max(0, ctx.motorBaseRawNm or ctx.motorBaseNm or 0)
   st.crankNm = crankNmFor(pv("crankAlpha"))
@@ -816,31 +700,25 @@ local function k0StartAllowed(ctx)
   return true, "k0"
 end
 
--- Public: could a K0 start be begun THIS frame? Used by the master policy
--- (tip-in anticipation) and by the arbiter (skip the on-debounce while the
--- motor still has the crank torque free - the torque ramp closes that
--- window within ~0.1-0.2 s). Same test as the variant choice, without the
--- policy / shifting gates.
+-- Public: could a K0 start begin THIS frame? (master tip-in anticipation,
+-- arbiter short debounce). k0StartAllowed without the policy / shift gates.
 local function k0WindowOpen(ctx)
   local m = st.m
   if (ctx.gearSign or 0) == 0 or ctx.evLockoutActive or ctx.isShifting then return false end
   if st.state ~= "OFF" or not st.ice or st.ice.isDisabled then return false end
   if st.eBudget >= P.SLIP_BUDGET_J then return false end
   local rpmSh = ctx.rpmMotor or m.rpmSh
-  if rpmSh < max(P.K0_START_MIN_FRAC * m.idle, m.idle + P.K0_START_MIN_ADD) then return false end
+  if rpmSh < k0MinShaftRpm(m.idle) then return false end
   local used = max(0, ctx.motorBaseRawNm or ctx.motorBaseNm or 0)
   return (ctx.motorCapNm or 0) - used >= crankNmFor(pv("crankAlpha")) + P.K0_START_RESERVE_NM
 end
 M.k0WindowOpen = k0WindowOpen
 
--- CE deactivateStarter (combustionEngine.lua:1021-1029) restores
--- starterThrottleKillCoef to 1 ONLY if the kill timer already ran out, and
--- setIgnition(0) (CE:1047-1051) zeroes the timer but not the coef. A starter
--- crank withdrawn inside starterThrottleKillTime (0.5 s, x2 petrol / x4
--- diesel cold, CE:1001-1002) therefore leaves the coef stuck at 0 and CE:737
--- multiplies every throttle by it: the engine can no longer fire. Only a new
--- activateStarter (CE:997-1003) or a reset (CE:1351) clears it - our K0 and
--- REFIRE paths never call activateStarter, so re-arm it on every start.
+-- BeamNG quirk: a starter crank withdrawn inside the throttle-kill window
+-- leaves CE starterThrottleKillCoef stuck at 0 (deactivateStarter only
+-- restores it after the timer ran out), so the engine can never fire again.
+-- Only activateStarter or a reset clears it; K0 / REFIRE starts never call
+-- activateStarter, so re-arm it on every start.
 local function rearmThrottleKill()
   local ice = st.ice
   if not ice or (ice.starterEngagedCoef or 0) > 0 then return end
@@ -850,12 +728,9 @@ local function rearmThrottleKill()
   end
 end
 
--- "Fired" needs more than rpm: with K0 dragging the ICE toward a shaft
--- >= 1.3*idle, rpm alone is reached without any combustion. Require that CE
--- can actually produce torque (CE:737 throttle = ... * starterThrottleKillCoef
--- * ignitionCoef; CE:754 * outputTorqueState). combustionTorque itself is not
--- usable: above idle the governor drops idleThrottle to ~0, so a fired but
--- dragged engine legitimately shows combustionTorque ~ -friction (CE:802).
+-- "Fired" needs more than rpm (K0 drags the ICE to that speed without
+-- combustion): CE must be able to produce torque. combustionTorque is no
+-- test - a fired but dragged engine shows ~ -friction (governor at ~0).
 local function canCombust()
   local ice = st.ice
   if not ice or ice.isDisabled then return false end
@@ -865,7 +740,7 @@ end
 
 local function openStart()
   rearmThrottleKill()
-  st.variant = "NONE"   -- the CRANK/SYNC entry log must not show the last start's variant
+  st.variant = "NONE"   -- entry logs must not show the last start's variant
   st.tReq = st.now
   st.eEvent, st.retries = 0, 0
   st.seqFault = "none"
@@ -897,17 +772,13 @@ local function stOff(ctx, dt)
   st.g, st.override, st.fill = 0, 0, 0
   st.offElapsed = st.offElapsed + dt
   if ctx.iceReq and not st.ice.isDisabled then
-    -- A non-urgent request that lands in an 8HP UPshift waits for the end of
-    -- the shift (<= K0_SHIFT_WAIT_S) instead of falling back to the 12 V
-    -- starter: 60 km/h in 7th, 0.05 pedal, forced restart in the middle of a
-    -- 7->8 upshift -> "starter-start:shifting" (QA T19c N57 2026-09-30).
-    -- Only while rolling fast enough for a K0 start; urgent starts and
-    -- downshifts (kickdown) go ahead at once.
+    -- non-urgent request during an upshift: wait for its end (K0 start
+    -- instead of the 12 V starter) if the shaft is fast enough
     local m = st.m
     local gb = st.gb
     if ctx.isShifting and not st.startUrgent and not (gb and gb.isShiftingDown == true)
        and (ctx.gearSign or 0) ~= 0 and st.shiftWaitT < P.K0_SHIFT_WAIT_S
-       and m.rpmSh >= max(P.K0_START_MIN_FRAC * m.idle, m.idle + P.K0_START_MIN_ADD) then
+       and m.rpmSh >= k0MinShaftRpm(m.idle) then
       st.shiftWaitT = st.shiftWaitT + dt
       return
     end
@@ -916,10 +787,8 @@ local function stOff(ctx, dt)
     startRequest(ctx)
   else
     st.shiftWaitT = 0
-    -- Orphan ignition (P.ORPHAN_IGN_S): OFF has no exit for an engine whose
-    -- ignition was switched on behind the sequencer (only beginOff /
-    -- beginFault / the EMERGENCY release cut it) - it would run decoupled
-    -- for good. Not while our starter is engaged.
+    -- orphan ignition (ORPHAN_IGN_S): else an externally started engine would
+    -- run decoupled for good
     local ice, m = st.ice, st.m
     if P.ORPHAN_IGN_S > 0 and (ice.ignitionCoef or 0) > 0 and not st.starterOn
        and m.rpmIce >= P.REFIRE_FRAC * m.idle then
@@ -936,9 +805,8 @@ local function stOff(ctx, dt)
   end
 end
 
--- CRANK / K0: e-machine slip start (spec 5.2). Model feed-forward
--- (k0RatioFor) + measured-torque integral; the motor fill loop cancels the
--- crank torque at the shaft, the master's torqueCoord reserves it.
+-- CRANK / K0: slip start, model feed-forward (k0RatioFor) + measured-torque
+-- integral.
 local function stCrankK0(ctx, dt)
   local m = st.m
   st.fill, st.override = 1, 0
@@ -986,14 +854,14 @@ local function stCrankK0(ctx, dt)
   local rDes = 0
   if st.tcap > 0 then rDes = clamp(k0RatioFor(st.tcap, m.slipAV) + st.rI, 0, P.K0_CRANK_RMAX) end
   st.r = rampTo(st.r, rDes, P.K0_CRANK_RRATE, dt)
-  -- K0 must be OPEN before the rev-match (user requirement beats a drag assist)
-  if st.fired and st.tcap <= 0 and st.r <= 0.01 then
+  -- K0 fully open before the rev-match
+  if st.fired and st.tcap <= 0 and st.r <= P.CRANK_OPEN_R then
     st.r = 0
     beginSync(ctx, "k0-fired")
   end
 end
 
--- CRANK / STARTER (spec 5.3): K0 open, nothing reaches the driveline.
+-- CRANK / STARTER: K0 open.
 local function stCrankStarter(ctx, dt)
   local m, ice = st.m, st.ice
   st.override, st.fill = 0, 0
@@ -1009,7 +877,7 @@ local function stCrankStarter(ctx, dt)
   end
   st.r = 0
   if st.pauseT > 0 then st.pauseT = st.pauseT - dt; return end
-  -- fired: CE disengages the starter itself above 1.1*starterMaxAV (CE:445)
+  -- fired: CE disengages the starter itself above 1.1*starterMaxAV
   local starterEng = (ice.starterEngagedCoef or 0) > 0
   if m.rpmIce >= P.FIRE_FRAC * m.idle and not starterEng and canCombust() then
     st.fireHoldT = st.fireHoldT + dt
@@ -1027,7 +895,7 @@ local function stCrankStarter(ctx, dt)
     if (ice.outputAV1 or 0) < P.STARTER_ENGAGE_FRAC * starterMaxAV() then
       setIgn(true)
       setStarter(true)
-      st.crankT, st.crankFrames, st.crankTimeout = 0, 0, 1.5
+      st.crankT, st.crankFrames, st.crankTimeout = 0, 0, P.STARTER_TIMEOUT_MIN_S
     end
     return
   end
@@ -1040,9 +908,9 @@ local function stCrankStarter(ctx, dt)
        and (ice.starterThrottleKillTimer or 0) > P.STARTER_WARM_KILL_S then
       ice.starterThrottleKillTimer = P.STARTER_WARM_KILL_S
     end
-    -- activateStarter kills the throttle for starterThrottleKillTime (x2 petrol
-    -- / x4 diesel when cold, CE:997-1003): allow that plus one second
-    st.crankTimeout = clamp(1.0 + (ice.starterThrottleKillTimer or 0.5), 1.5, 3.0)
+    -- throttle-kill time (longer when cold) plus STARTER_TIMEOUT_ADD_S
+    st.crankTimeout = clamp(P.STARTER_TIMEOUT_ADD_S + (ice.starterThrottleKillTimer or 0.5),
+                            P.STARTER_TIMEOUT_MIN_S, P.STARTER_TIMEOUT_MAX_S)
   end
   if st.crankT > st.crankTimeout then
     setStarter(false)
@@ -1057,13 +925,10 @@ local function stCrank(ctx, dt)
   if st.variant == "K0" then stCrankK0(ctx, dt) else stCrankStarter(ctx, dt) end
 end
 
--- Rev-match actuator shared by SYNC and the governor phase of ENGAGE
--- (spec 5.4): rate-limited speed reference -> stock idle governor
--- (idleAVOverwrite, 100 Hz P-controller CE:706-721, precedent
--- hydraulicsCombustionEngineControl.lua:35-39) + GFX feed-forward
--- throttleForTorque(Iice * dRef/dt) + integral, applied through the VCU
--- throttle channel (CE:737 takes the MAX of governor and VCU throttle).
--- Under the brake-throttle guard (guardOn) no positive lead and no offset.
+-- Rev-match actuator (SYNC and the governor phase of ENGAGE): speed reference
+-- -> stock idle governor (idleAVOverwrite) + feed-forward
+-- throttleForTorque(Iice * dRef/dt) + integral on the VCU throttle channel
+-- (CE uses the max of governor and VCU throttle).
 local function syncTrack(ctx, dt)
   local m, ice = st.m, st.ice
   local idle = m.idle
@@ -1079,8 +944,7 @@ local function syncTrack(ctx, dt)
   end
   local prev = st.ref
   local refErr = rpmT - st.ref
-  -- follow the target's own rate (shaft acceleration) + a rate-limited,
-  -- softly landing approach; the target is never overshot within a frame
+  -- target rate + softly landing approach, never past the target
   local tgtDot = 0
   if not idleEngage and not ctx.isShifting then
     tgtDot = clamp(st.shDot, -P.SYNC_TGTDOT_MAX, P.SYNC_TGTDOT_MAX)
@@ -1099,13 +963,11 @@ local function syncTrack(ctx, dt)
   local ff = 0
   if tc and tc.throttleForTorque then ff = tc.throttleForTorque(m.Iice * refDotAV, m.rpmIce, ctx) end
   local err = st.ref - m.rpmIce
-  -- integral only for the static error once the reference has landed; while
-  -- it moves, the feed-forward carries the acceleration (no wind-up)
+  -- integral only once the reference has landed (no wind-up)
   if abs(err) < P.SYNC_I_WINDOW_RPM and abs(refErr) < pv("syncTol") then
     st.sI = clamp(st.sI + P.SYNC_KI * err * dt, P.SYNC_I_MIN, thrMax)
   end
   st.override = clamp(ff + st.sI, 0, thrMax)
-  st.rpmT = rpmT
   st.idleEngage = idleEngage
   st.syncBlocked = (not idleEngage) and (m.rpmSh + off > ceilRpm)
   return rpmT, idleEngage, st.syncBlocked
@@ -1151,24 +1013,13 @@ local function stSync(ctx, dt)
     beginEngage(ctx, idleEngage and "IDLE" or "NORMAL", "matched")
     return
   end
-  -- Bounded SYNC: an accelerating shaft may never meet the settle test
-  -- (tolerance + slip rate + hold), so after syncMax the K0 closes anyway
-  -- with a capacity-controlled slip while the governor keeps tracking; the
-  -- fill cancels the K0 torque. Not during a ratio change (target jumps),
-  -- never while blocked above the rev ceiling (the 8HP upshifts then).
-  -- The budget is syncMax (convergence) PLUS the time the reference needs
-  -- to rev the engine to the target at the profile's syncRefRate: a starter
-  -- start into a kickdown gear (1100 -> ~5500 rpm, 0.65 s at 7000 rpm/s)
-  -- used to run into the 0.40 s URGENT timeout while the engine was still
-  -- accelerating on the ramp, i.e. before the rev-match could even settle.
+  -- Bounded SYNC (budget see P): an accelerating shaft may never settle; the
+  -- rev-up share keeps a large rev-up from timing out while still on the ramp.
   if not st.syncBudget then
     st.syncBudget = pv("syncMax") + min(P.SYNC_RAMP_MAX_S, abs(rpmT - m.rpmIce) / max(1, pv("syncRefRate")))
   end
   local sMax = st.syncBudget
   if st.syncT > sMax and not blocked and not ctx.isShifting then
-    -- SLIP engage after the budget is the planned strategy for a target
-    -- that keeps moving: no fault, not even when it comes after the slow
-    -- phase below. Only the hard fallback (FORCED) is a sequencer fault.
     if abs(m.slip) <= P.SYNC_SLIP_ENGAGE_RPM then
       beginEngage(ctx, "SLIP", "sync-timeout")
       return
@@ -1185,9 +1036,8 @@ local function stSync(ctx, dt)
   end
 end
 
--- ENGAGE (spec 5.5): K0 closes onto a matched shaft; the fill cancels the
--- K0 torque at the shaft, the governor keeps the ICE on the reference until
--- the clutch carries it.
+-- ENGAGE: K0 closes onto a matched shaft; the fill cancels the K0 torque,
+-- the governor holds the ICE on the reference until K0 carries it.
 local function stEngage(ctx, dt)
   local m = st.m
   if not ctx.iceReq then
@@ -1196,18 +1046,14 @@ local function stEngage(ctx, dt)
     return
   end
   if st.stallT >= P.STALL_S then beginRelease(ctx, "EMERGENCY", "OPEN", "stall"); return end
-  -- IDLE engage hands the creep torque to the ICE governor (no fill), except
-  -- under the brake-throttle guard once the shaft has left the idle band:
-  -- there the fill keeps the K0 torque out of the capped converter input
-  -- (guardFill)
+  -- IDLE engage: the ICE governor carries the creep torque (no fill, except
+  -- guardFill)
   st.fill = (st.engageMode == "IDLE" and not guardFill(ctx)) and 0 or 1
-  -- IDLE engage closes onto a shaft BELOW idle by design (P/N/creep), its
-  -- large slip is the point - the hold-and-rematch rule is for NORMAL only
+  -- hold-and-rematch on large slip: NORMAL only (IDLE engages below idle)
   local slipBad = st.engageMode == "NORMAL" and abs(m.slip) > P.ENGAGE_ABORT_SLIP_RPM
                   and st.r < P.ENGAGE_ABORT_R
-  -- SLIP / FORCED close on a shaft that is still moving away: the governor
-  -- keeps the ICE on the reference until the slip is small, so K0 does not
-  -- have to drag the engine (no torque taken from the driveline)
+  -- SLIP / FORCED: the governor keeps tracking until the slip is small, so
+  -- K0 need not drag the engine
   local slipGov = (st.engageMode == "SLIP" or st.engageMode == "FORCED")
                   and abs(m.slip) > P.SLIP_GOV_RPM and not st.lockConfirmed
   if st.r < P.GOV_HANDOVER_R or slipBad or slipGov then
@@ -1218,7 +1064,7 @@ local function stEngage(ctx, dt)
   end
 
   if ctx.isShifting and st.r < P.ENGAGE_SHIFT_HOLD_R and not st.lockConfirmed then
-    -- hold r: the shaft speed jumps during the ratio change
+    -- hold r: shaft speed jumps during the ratio change
   elseif st.engageMode == "FORCED" or st.engageMode == "SLIP" then
     local capRate = (st.engageMode == "SLIP") and P.K0_SLIP_NMS or P.K0_FORCED_NMS
     st.tcapF = st.tcapF + capRate * dt
@@ -1257,7 +1103,7 @@ local function stEngage(ctx, dt)
     end
     st.r = min(1, st.r + P.ENGAGE_TIMEOUT_RATE * dt)
   end
-  if st.r >= 0.98 and (st.lockConfirmed or st.t > P.ENGAGE_MAX_S) then
+  if st.r >= P.ENGAGE_DONE_R and (st.lockConfirmed or st.t > P.ENGAGE_MAX_S) then
     st.r = 1
     clearIdleOverwrite()
     st.govArmed = false
@@ -1271,8 +1117,8 @@ local function stEngage(ctx, dt)
   end
 end
 
--- BLEND (spec 5.6): ICE share in with smoothstep(g); the motor gives the
--- same torque back through torqueCoord, the fill covers ICE lag.
+-- BLEND: ICE share in with smoothstep(x); torqueCoord takes the same torque
+-- off the motor, the fill covers ICE lag.
 local function stBlend(ctx, dt)
   st.r, st.fill, st.override = 1, 1, nil
   if st.stallT >= P.STALL_S or st.ice.isDisabled then
@@ -1285,12 +1131,11 @@ local function stBlend(ctx, dt)
     tb = PROF.URGENT.tBlend
     st.stats.motorSat = true
   end
-  -- traction control active on the driven axle: slower ICE share ramp
+  -- traction control active: slower ramp
   local mtf = st.motor and tonumber(st.motor.throttleFactor) or 1
   local itf = tonumber(st.ice.throttleFactor) or 1
   if min(mtf, itf) < P.BLEND_TC_TF then
     tb = max(tb, P.T_BLEND_TC)
-    st.stats.blendTc = true
   end
   st.x = min(1, st.x + dt / max(tb, 0.05))
   st.g = smoothstep(st.x)
@@ -1316,20 +1161,19 @@ local function stOn(ctx, dt)
   end
 end
 
--- RELEASE (spec 5.8): TORQUE (share out) -> OPEN (K0 opens, ICE at zero net
--- torque or in fuel cut) -> ignition off ONLY after K0 is open (fixes S4).
+-- RELEASE: TORQUE (share out) -> OPEN (K0 opens) -> ignition off or IDLE.
 local function stRelease(ctx, dt)
   local m = st.m
   local prof = st.relProfile
   local overrun = (ctx.torqueTargetNm or 0) <= 1 or (ctx.throttleRaw or 0) < 0.02
   if ctx.iceReq and prof ~= "EMERGENCY" then
-    -- still coupled: just blend back in (not a new start)
+    -- still coupled: blend back in (not a new start)
     if st.relPhase == "TORQUE" then beginBlend(ctx, invSmoothstep(st.g), "re-request"); return end
-    -- K0 partly open, ICE running: counts as a (re)start for the statistics
+    -- K0 partly open: counts as a restart
     openStart()
     st.variant = "REFIRE"
     recordFire(ctx)
-    if st.r >= 0.5 and abs(m.slip) <= 100 then beginEngage(ctx, "NORMAL", "re-request"); return end
+    if st.r >= P.REREQ_ENGAGE_R and abs(m.slip) <= P.REREQ_ENGAGE_SLIP_RPM then beginEngage(ctx, "NORMAL", "re-request"); return end
     beginSync(ctx, "re-request")
     return
   end
@@ -1347,9 +1191,8 @@ local function stRelease(ctx, dt)
     end
     return
   end
-  -- OPEN. The fill stays on in overrun as well: the drag credit to the
-  -- recuperation only applies while LOCKED, so here the motor cancels the
-  -- K0 drag instead (consistent handover, no coast-decel bump).
+  -- OPEN: fill on also in overrun - the recuperation drag credit only applies
+  -- while locked, so the motor cancels the K0 drag here (no coast-decel bump)
   st.g, st.fill = 0, 1
   local rate = (prof == "NORMAL") and pv("k0OpenRate") or REL[prof].k0OpenRate
   st.r = max(0, st.r - rate * dt)
@@ -1359,8 +1202,8 @@ local function stRelease(ctx, dt)
     local torqueMs = ((st.stop.openT0 or st.now) - (st.stop.t0 or st.now)) * 1000
     local openMs = (st.now - (st.stop.openT0 or st.now)) * 1000
     if ctx.iceIdleHold and prof ~= "EMERGENCY" and not st.ice.isDisabled then
-      -- ICE-off hold: decoupled, the engine keeps idling (ignition stays on)
-      st.beginIdle(ctx, "released-hold")
+      -- ICE-off hold: keep idling decoupled
+      beginIdle(ctx, "released-hold")
       log("I", "etk854hybrid.iceSeq", string.format(
         "[ICESEQ] stop#%d prof=%s torque=%.0fms open=%.0fms k0NmAtOpen=%.1f -> IDLE (hold %.1fs)",
         st.stopN, prof, torqueMs, openMs, k0Nm, st.holdRemain))
@@ -1373,14 +1216,6 @@ local function stRelease(ctx, dt)
   end
 end
 
--- IDLE (ICE-off hold, see the header): enter from RELEASE once K0 is open
-local function beginIdle(ctx, why)
-  enter("IDLE", why)
-  st.g, st.override, st.fill = 0, 0, 0
-  clearIdleOverwrite()
-  electrics.values.etk854hybrid_iceRestartMs = 0
-end
-
 local function stIdle(ctx, dt)
   st.r = rampTo(st.r, 0, P.K0_CLEANUP_RATE, dt)
   st.g, st.override, st.fill = 0, 0, 0
@@ -1391,7 +1226,7 @@ local function stIdle(ctx, dt)
     return
   end
   if ctx.iceReq then
-    -- the engine is running: rev-match straight away, no crank
+    -- engine running: rev-match, no crank
     openStart()
     st.variant = "REFIRE"
     setIgn(true)
@@ -1408,16 +1243,13 @@ local function stFault(ctx, dt)
   if st.r <= 0 then beginOff(ctx, "fault-cleared") end
 end
 
-st.beginIdle = beginIdle   -- stRelease (defined above) enters IDLE through st
-
 local STATES = {
   OFF = stOff, CRANK = stCrank, SYNC = stSync, ENGAGE = stEngage,
   BLEND = stBlend, ON = stOn, RELEASE = stRelease, IDLE = stIdle, FAULT = stFault,
 }
 
--- Legacy semantics for bisecting regressions (ctx.iceSeqPassthrough):
--- request -> ignition + starter if rpm < 200, K0 ramps at 4/s, state jumps
--- OFF <-> ON, share gate 1, no fill. Exactly what the old master did.
+-- Unsequenced start for bisecting regressions (ctx.iceSeqPassthrough):
+-- OFF <-> ON in one frame, K0 ramps at 4/s, no fill.
 local function stPassthrough(ctx, dt)
   local m = st.m
   if ctx.iceReq and st.state ~= "ON" then
@@ -1439,7 +1271,7 @@ local function stPassthrough(ctx, dt)
 end
 
 -- ===========================================================
--- Arbiter (spec 4.2): policy -> debounced request ctx.iceReq
+-- Arbiter: policy -> debounced request ctx.iceReq
 -- ===========================================================
 local function deKey(ctx)
   local d = ctx.deMode
@@ -1452,14 +1284,14 @@ local function arbWantOn(ctx, dt, urgent, bypass, dk)
   st.abortT = 0
   ctx.iceIdleHold = false
   if ctx.iceReq then
-    -- escalate a start already in progress (kickdown during the sequence)
+    -- escalate a start in progress (kickdown)
     if urgent and (st.state == "CRANK" or st.state == "SYNC" or st.state == "ENGAGE" or st.state == "BLEND") then
       st.startUrgent = true
     end
     return
   end
   if st.state ~= "OFF" and st.state ~= "FAULT" then
-    -- engine still turning (release in progress or blocked): take it back
+    -- engine still turning (release, blocked release, IDLE): take it back
     ctx.iceReq = true
     st.arbOnT = 0
     return
@@ -1467,9 +1299,7 @@ local function arbWantOn(ctx, dt, urgent, bypass, dk)
   st.arbOnT = st.arbOnT + dt
   local mk = (ctx.edriveMode == "BATTERY_CONTROL") and "BATTERY_CONTROL" or dk
   local deb = ARB.ON_DEBOUNCE_S[mk]
-  -- short debounce while a K0 start is possible, and for a fast pedal
-  -- (master policy ctx.iceStartFast: the driver wants the power now, but
-  -- without the URGENT start profile)
+  -- short debounce while a K0 start is possible or on a fast pedal
   if ctx.iceK0Window or ctx.iceStartFast then deb = min(deb, ARB.K0_WINDOW_DEBOUNCE_S[mk]) end
   if urgent or bypass or (st.arbOnT >= deb and st.offElapsed >= ARB.MIN_OFF_S[dk]) then
     ctx.iceReq = true
@@ -1478,29 +1308,23 @@ local function arbWantOn(ctx, dt, urgent, bypass, dk)
   end
 end
 
--- ICE-off hold for this frame (see ARB): hold time, minimum run time, whether
--- the hold may be spent as a decoupled IDLE, and the hold kind for telemetry.
+-- ICE-off hold of this frame (see ARB): hold time, minimum run time, IDLE
+-- allowed, hold kind (telemetry).
 local function arbHoldTime(ctx, dk)
   local S = ctx.sportIndex or 0
   local slow = (ctx.speedKmh or 0) < ARB.LIFT_KMH[dk]
   local braking = (ctx.brakeRaw or 0) > ARB.BRAKE_THR
-  -- a partial lift onto the E-machine (master policy ctx.iceLightLoad: pedal
-  -- inside the EV zone, load below demandOff) counts as a lift too, otherwise
-  -- easing from 0.52 to 0.25 at 70 km/h kept a fresh start coupled for
-  -- HOLD_MIN_S / MIN_ON_S (review 2026-10)
+  -- easing off into the EV zone (ctx.iceLightLoad) counts as a lift
   local lift = slow and (braking or (ctx.throttleRaw or 0) < ARB.LIFT_THR
                          or ctx.iceLightLoad == true)
-  st.arbSlow, st.arbLift, st.arbBraking = slow, lift, braking      -- diag (arbFlags)
+  st.arbSlow, st.arbLift, st.arbBraking = slow, lift, braking      -- arbFlags
   local base = lift and 0 or ARB.HOLD_MIN_S[dk]
   local hMid, hMax = ARB.H_MID_S[dk], ARB.HOLD_MAX_S[dk]
   local holdS = base + (hMid - base) * clamp01((S - ARB.H_MID_S0) / ARB.H_MID_SPAN)
                 + (hMax - hMid) * smoothstep((S - ARB.H_MAX_S0) / ARB.H_MAX_SPAN)
   local minOnS = ARB.MIN_ON_S[dk]
-  -- "sporty" = a high index AND (outside SPORT) a sporty WINDOW: one
-  -- kickdown lifts S to ~0.9 for 20+ s but W only by ~0.07 (sportIndex
-  -- W_GROW_S 30 s while e > 0.5); a sustained sporty section (QA T20a: three
-  -- 3 s full-throttle bursts) reaches W 0.15-0.3 (CR-VCU1, round 2).
-  -- Never in a Driving Experience without decoupled idle (ARB.IDLE_DE: ECO PRO).
+  -- "sporty" = high S AND (outside SPORT) sporty window W: one kickdown
+  -- lifts S to ~0.9 but W only by ~0.07
   local idleDe = (ARB.IDLE_DE[dk] or 1) > 0
   local idleOk = idleDe and S >= (lift and ARB.IDLE_S_MIN_LIFT or ARB.IDLE_S_MIN)
     and (dk == "SPORT" or (ctx.sportWindow or 0) >= ARB.IDLE_W_MIN)
@@ -1509,19 +1333,12 @@ local function arbHoldTime(ctx, dk)
     holdS = min(holdS, ARB.DECOUPLE_S[dk])
     minOnS = ARB.MIN_ON_LIFT_S
   elseif slow and not idleDe then
-    -- no decoupled idle in this DE (ECO PRO) and no lift below LIFT_KMH (the
-    -- policy let the engine go with the pedal just above the EV zone): the
-    -- coupled hold is bounded like a lift, not stretched by S to HOLD_MAX_S
-    -- (8 s in fuel cut / light load); minimum run time as above LIFT_KMH
+    -- no IDLE in this DE, no lift: coupled hold bounded like a lift
     holdS = min(holdS, ARB.DECOUPLE_S[dk])
     minOnS = min(minOnS, ARB.HOLD_MIN_S[dk])
   elseif not slow and not idleOk then
-    -- above LIFT_KMH outside sporty phases the hold stays coupled (no IDLE):
-    -- bound the fuel-cut time of a fresh start to the hold, not MIN_ON_S,
-    -- and the coupled hold itself to HOLD_MIN_S. CR-VCU1 (round 2): after
-    -- a COMFORT kickdown at ~100 km/h the S-scaled hold (up to 20 s) kept
-    -- the engine COUPLED for ~12 s in fuel cut / light load; calm = off
-    -- after HOLD_MIN_S, sporty = decoupled idle (idleOk branch)
+    -- above LIFT_KMH, not sporty: coupled hold and minimum run time capped
+    -- to HOLD_MIN_S (less fuel-cut drag)
     minOnS = min(minOnS, ARB.HOLD_MIN_S[dk])
     holdS = min(holdS, ARB.HOLD_MIN_S[dk])
   end
@@ -1541,13 +1358,10 @@ local function arbWantOff(ctx, dt, hard, prof, dk)
     st.holdRemain, st.arbHoldT, st.abortT = 0, 0, 0
     return
   end
-  -- nothing to hold: the engine is off or on its way off
+  -- engine off or on its way off: nothing to hold
   if not ctx.iceReq and not ctx.iceIdleHold then st.holdRemain, st.abortT = 0, 0; return end
-  -- a start in progress completes (no abort loops); the hold counts from BLEND/ON.
-  -- Optional exception (ARB.SYNC_ABORT_S, default 0 = off): an unwanted start
-  -- still in SYNC (fired, K0 open - never in CRANK) on a real lift / brake is
-  -- withdrawn after SYNC_ABORT_S; stSync takes its "withdrawn" path to OFF, a
-  -- re-request while the engine still spins is a REFIRE without a crank.
+  -- a start in progress completes (the hold counts from BLEND/ON), except the
+  -- optional SYNC abort (ARB.SYNC_ABORT_S)
   if ctx.iceReq and st.state ~= "ON" and st.state ~= "BLEND" then
     local ab = ARB.SYNC_ABORT_S[dk] or 0
     local realLift = (ctx.throttleRaw or 0) < ARB.LIFT_THR or (ctx.brakeRaw or 0) > ARB.BRAKE_THR
@@ -1570,34 +1384,24 @@ local function arbWantOff(ctx, dt, hard, prof, dk)
   st.holdKind = kind
   st.arbIdleOk = idleOk and 1 or 0
   st.holdRemain = max(0, holdS - st.arbHoldT)
-  -- The minimum run time is ENGINE time (ON and IDLE count, stIdle), not
-  -- coupling time: a start just before a lift used to keep the K0 closed for
-  -- the rest of the 3 s in fuel cut - in 2nd gear at 3900 rpm that is 1 m/s^2
-  -- of engine braking on top of the selected recuperation level (QA T17 LOW
-  -- 2026-09-30: 1.01 against a 0.50 target). After sporty driving it is
-  -- idled out decoupled; on a calm lift below LIFT_KMH it is MIN_ON_LIFT_S.
+  -- minimum run time is engine time (ON + IDLE), not coupling time
   local minOnLeft = max(0, minOnS - st.onElapsed)
   st.minOnLeft = minOnLeft
   if st.holdRemain <= 0 and minOnLeft <= 0 then
-    -- hold over: release (still coupled) or ignition off (IDLE)
+    -- hold over: release (coupled) or ignition off (IDLE)
     ctx.iceReq, ctx.iceIdleHold = false, false
     ctx.releaseProfile = "NORMAL"
   elseif not idleOk then
-    -- no decoupled idle outside sporty phases or in a DE without it (ECO
-    -- PRO, ARB.IDLE_DE): a running IDLE ends (-> OFF; also one inherited
-    -- from COMFORT on a DE switch), a coupled hold stays coupled until it
-    -- runs out
+    -- no decoupled idle: a running IDLE ends (also one inherited on a DE
+    -- switch), a coupled hold stays coupled until it runs out
     if not ctx.iceReq then ctx.iceIdleHold = false end
   elseif ctx.iceReq and st.arbHoldT >= ARB.DECOUPLE_S[dk]
       and max(st.holdRemain, minOnLeft) >= ARB.IDLE_MIN_S then
-    -- hold = decoupled idle: K0 opens, the engine idles for the rest of the
-    -- hold (or of its minimum run time), a new request re-engages it without
-    -- a crank. Less than IDLE_MIN_S left: stays coupled and is released.
+    -- spend the rest of the hold decoupled
     ctx.iceReq, ctx.iceIdleHold = false, true
     ctx.releaseProfile = "NORMAL"
   end
-  -- the cause of every decoupled idle in beamng.log (the user plays without
-  -- a telemetry recording); COMFORT / SPORT only since IDLE_DE
+  -- log the cause of every decoupled idle
   if ctx.iceIdleHold and not hadIdle then
     slog("[ICESEQ] arb idle-hold de=%s kind=%s S=%.2f W=%.2f hold=%.1fs minOnLeft=%.1fs v=%.0f thr=%.2f brk=%.2f",
       dk, kind, ctx.sportIndex or 0, ctx.sportWindow or 0, st.holdRemain, minOnLeft,
@@ -1622,32 +1426,30 @@ function M.arbitrate(ctx, dt)
   if (ctx.launchArmed or ctx.launchReady or ctx.launchActive) and not ctx.evOnly then
     want, urgent = true, true
   end
+  -- trailer stability acting: keep the committed request (no start, no stop);
+  -- sailing, QA override, lockout and key-off still win
+  if ctx.tsaFreeze and ctx.sailIceRequest == nil and ctx.qaIceOverride == nil then
+    want, hard, urgent = (ctx.iceReq == true), false, false
+  end
   if hard and not ctx.iceForced then prof = "FAST" end   -- standstill, MAX EV
   if ctx.qaIceOverride ~= nil then
     want = (ctx.qaIceOverride == true)
     bypass = true
     hard = not want
   end
-  -- lockout and key-off are hard offs even when the policy forces the ICE:
-  -- they must win over the NORMAL profile chosen above, otherwise stOn's
-  -- RELEASE_BLOCK keeps the ICE coupled while the torque demand stays high
+  -- lockout and key-off (ignitionLevel < 2) are hard FAST offs even when the
+  -- policy forces the ICE (a NORMAL release could be blocked by stOn)
   if st.lockoutT > 0 then want, hard, prof = false, true, "FAST" end
-  -- key off / accessory (electrics ignitionLevel < 2): the driver switched
-  -- the car off - never (re)start the engine behind the key
   if (electrics.values.ignitionLevel or 2) < 2 then want, hard, prof = false, true, "FAST" end
   local dk = deKey(ctx)
-  -- diagnostics of this frame: the effective want after every override (the
-  -- decoupled classifier's "unwanted"), the hold-rule inputs are only
-  -- evaluated by arbHoldTime (-1 / false otherwise)
+  -- effective want after every override (decClass "unwanted")
   st.arbWant = want
   st.arbIdleOk, st.minOnLeft, st.arbSlow, st.arbLift, st.arbBraking = -1, 0, false, false, false
   if want then arbWantOn(ctx, dt, urgent, bypass, dk) else arbWantOff(ctx, dt, hard, prof, dk) end
   local ev = electrics.values
   ev.etk854hybrid_iceOffHoldS = st.holdRemain
-  -- which hold rule is running: none | hold | lift | brake (arbHoldTime)
-  ev.etk854hybrid_iceHoldKind = st.holdKind
-  -- arbiter diagnostics (ECO no-idle analysis, feedback round 3)
-  ev.etk854hybrid_arbIdleOk    = st.arbIdleOk          -- 1/0, -1 = not evaluated this frame
+  ev.etk854hybrid_iceHoldKind = st.holdKind            -- none | hold | lift | brake
+  ev.etk854hybrid_arbIdleOk    = st.arbIdleOk          -- 1/0, -1 = not evaluated
   ev.etk854hybrid_arbIdleHold  = ctx.iceIdleHold and 1 or 0
   ev.etk854hybrid_arbHoldT     = st.arbHoldT
   ev.etk854hybrid_arbMinOnLeft = st.minOnLeft
@@ -1656,47 +1458,34 @@ function M.arbitrate(ctx, dt)
   ev.etk854hybrid_arbFlags = (want and 1 or 0) + (hard and 2 or 0) + (urgent and 4 or 0) + (bypass and 8 or 0)
     + (ctx.iceForced and 16 or 0) + (ctx.iceLightLoad and 32 or 0) + (st.arbSlow and 64 or 0)
     + (st.arbLift and 128 or 0) + (st.arbBraking and 256 or 0) + (((ARB.IDLE_DE[dk] or 1) > 0) and 512 or 0)
-  -- The COMMITTED request (after the on-debounce). The 8HP
-  -- (etk854hybrid_8hpCore) then plans the gear with the ICE torque that is
-  -- about to come instead of downshifting for the E-machine alone
-  -- (ice_start_comfort 2026-09-30: 4->2, engaged at 5300 rpm). Not the raw
-  -- policy want: at the motor corner speed the demand start flickers with
-  -- every gear change (cruise_100: iceUp -> want gone -> evSat downshift ->
-  -- want again, 1->2->3->2->3).
+  -- committed (debounced) request for the 8HP gear planning; the raw want
+  -- flickers at the motor corner speed and would make the gears hunt
   ev.etk854hybrid_iceRequested = ctx.iceReq and 1 or 0
 end
 
 -- ===========================================================
--- Decoupled-ICE diagnostics (feedback round 3). Stateless per-frame class
--- (the state machine itself is not touched), segments (class changes) and
--- episodes (NONE -> ... -> NONE) with rate-limited [ICESEQ] log lines:
---   decoupled#N CLASS dur de v S W idleOk hold policy req unwanted next
---                                       (segment >= DIAG.LOG_MIN_S[CLASS])
---   decoupled-episode#N dur de chain=A>B>C   (episode >= EP_LOG_MIN_S)
---   decoupled-summary de=DE Ns CLASS=sum s/n ...  (per DE window, at most
---                                       every SUMMARY_S, only when non-empty)
--- Thresholds: SYNC ECO median 0.65 s / max 0.80 s -> 1.0; K0 crank budget
--- crankMaxS 0.6-1.0 -> 1.2; starter fire ~350 ms, retry timeout 1.5-3 s ->
--- 2.0; RELEASE OPEN 1/3 s -> 0.6; spin-down ECO p90 0.65 s, COMFORT <= 2.0 s
--- -> 2.0; ENGAGE <= ENGAGE_MAX_S 1.2 -> 1.0; IDLE engage at 1.2/s -> 1.5.
--- An ordinary stop or start therefore writes nothing.
+-- Decoupled-ICE diagnostics (read-only): per-frame class, segments (class
+-- changes) and episodes (NONE -> ... -> NONE), logged as
+--   decoupled#N            segment >= DIAG.LOG_MIN_S[CLASS]
+--   decoupled-episode#N    episode >= EP_LOG_MIN_S
+--   decoupled-summary      per DE window, at most every SUMMARY_S
+-- LOG_MIN_S sits just above the normal phase duration: an ordinary start or
+-- stop logs nothing.
 -- ===========================================================
 local DIAG = {
-  RPM_FRAC = 0.30,          -- "turning": rpmIce >= 0.30 x idle (~210 rpm); below that the spin-down is silent
+  RPM_FRAC = 0.30,          -- "turning" = rpmIce >= 0.30 x idle
   LOG_MIN_S = { IDLE_HOLD = 0, IDLE_MINON = 0, OFF_IGN_ON = 0, SYNC_BLOCKED = 0, FAULT = 0,
                 SYNC_UNWANTED = 0.3, CRANK_UNWANTED = 0.3, RELEASE_OPEN = 0.6, SPINDOWN = 2.0,
                 CRANK_K0 = 1.2, CRANK_STARTER = 2.0, SYNC = 1.0, SYNC_IDLE = 1.0, ENGAGE = 1.0, ENGAGE_IDLE = 1.5 },
   EP_LOG_MIN_S = 1.5, SUMMARY_S = 120, CHAIN_MAX = 8,
 }
 
--- NONE | IDLE_HOLD | IDLE_MINON | RELEASE_OPEN | SPINDOWN | OFF_IGN_ON |
--- CRANK_K0 | CRANK_STARTER | CRANK_UNWANTED | SYNC | SYNC_IDLE | SYNC_BLOCKED |
--- SYNC_UNWANTED | ENGAGE | ENGAGE_IDLE | FAULT ("unwanted" = the arbiter's
--- effective want is off while the start completes)
+-- Class of a turning but decoupled ICE, NONE otherwise ("UNWANTED" = start
+-- completing while the arbiter's effective want is off).
 local function decClass()
   local s, m, ice = st.state, st.m, st.ice
   if not ice or m.rpmIce < DIAG.RPM_FRAC * m.idle then return "NONE" end
-  if s == "ON" or s == "BLEND" or (s == "RELEASE" and st.relPhase == "TORQUE") then return "NONE" end
+  if k0LockedState(s) then return "NONE" end
   if s == "ENGAGE" and st.r >= P.LOCK_MIN_R then return "NONE" end
   if s == "IDLE" then return (st.holdRemain > 0) and "IDLE_HOLD" or "IDLE_MINON" end
   if s == "RELEASE" then return "RELEASE_OPEN" end
@@ -1711,13 +1500,12 @@ local function decClass()
     return st.idleEngage and "SYNC_IDLE" or "SYNC"
   end
   if s == "ENGAGE" then return (st.engageMode == "IDLE") and "ENGAGE_IDLE" or "ENGAGE" end
-  if s ~= "OFF" then return "NONE" end                     -- passthrough / unknown state
+  if s ~= "OFF" then return "NONE" end                     -- passthrough
   if (ice.ignitionCoef or 0) > 0 and not st.starterOn then return "OFF_IGN_ON" end
   return "SPINDOWN"
 end
 
--- "DE:CLASS=sum s/n" pairs of the summary window, sorted (DE = the DE in
--- which the segment began; an IDLE inherited from COMFORT stays COMFORT:)
+-- "DE:CLASS=sum s/n" pairs, sorted (DE in which the segment began)
 local function fmtWin(win, winN)
   local keys = {}
   for k in pairs(win) do keys[#keys + 1] = k end
@@ -1766,7 +1554,7 @@ local function updateDecDiag(ctx, dt)
   end
   if cls ~= "NONE" and not st.arbWant then d.unwT = d.unwT + dt end
   d.sumT = d.sumT + dt
-  if dk ~= d.lastDk or d.sumT >= DIAG.SUMMARY_S then           -- per-DE window summary
+  if dk ~= d.lastDk or d.sumT >= DIAG.SUMMARY_S then           -- window summary
     if d.winAny then
       slog("[ICESEQ] decoupled-summary de=%s %.0fs %s", d.lastDk, d.sumT, fmtWin(d.win, d.winN))
     end
@@ -1776,7 +1564,7 @@ local function updateDecDiag(ctx, dt)
   end
 end
 
--- Lifetime totals since the vehicle (Lua VM) was loaded, per "DE:CLASS":
+-- Lifetime totals per "DE:CLASS" since vehicle load:
 -- controller.getControllerSafe('hybridControl').getCtx().modules.iceSeq.getDiag()
 function M.getDiag()
   local d = st.dec
@@ -1790,9 +1578,8 @@ end
 local function updateReserve(dt)
   local want = 0
   if st.state == "CRANK" and st.variant == "K0" and not st.fired and not st.k0Abort then
-    -- + CRANK_HEADROOM_NM: stCrankK0 aborts when cap - motorBase - that
-    -- margin drops below CRANK_MIN_NM; reserving only crankNm left a 70 Nm
-    -- crank (the CRANK_MIN floor) 10 Nm short under a saturating demand
+    -- + CRANK_HEADROOM_NM: stCrankK0's abort test subtracts that margin, so
+    -- crankNm alone would abort a minimum crank under a saturating demand
     want = st.crankNm + P.CRANK_HEADROOM_NM
   end
   if want >= st.reserve then
@@ -1802,13 +1589,9 @@ local function updateReserve(dt)
   end
 end
 
--- Starter guard (was C:1468-1478). The AI/arcade gearbox cranks any
--- non-running engine on throttle/brake unless engine.starterDisabled
--- (vehicleController.lua:296-320, the ONLY reader). The sequencer owns every
--- start, so the flag is held in EVERY state except while our own starter is
--- engaged - including CRANK/K0, where an arcade auto-crank would put the
--- starter on the engine while K0 drags it. Never on a damaged engine
--- (disable()/lockUp() own the flag there, CE:264-292).
+-- Starter guard: the arcade gearbox auto-cranks a stopped engine unless
+-- engine.starterDisabled, so the flag is held in every state except while our
+-- own starter is engaged. Not on a damaged engine (CE owns the flag there).
 local function applyStarterGuard(ctx)
   local ice = st.ice
   if not ice or ice.isDisabled then return end
@@ -1825,14 +1608,11 @@ local function trackStartStats(ctx)
     local motor = st.motor
     if motor and type(motor.etkShaftNm) == "number" then
       local tcmd = ctx.torqueTargetNm or 0
-      -- shaft torque without the EV creep floor (etk854hybrid_motorShaft
-      -- creepFloor, last tick): creep is no part of the commanded torque, a
-      -- start while creeping must not count it as a coordination error
+      -- without the EV creep floor (not part of the commanded torque)
       local shaftNm = motor.etkShaftNm - (motor.etkCreepNm or 0)
       local dev = abs(shaftNm - tcmd)
       if dev > st.stats.maxDev then st.stats.maxDev = dev end
-      -- against what was physically available (motor cap + measured ICE/K0
-      -- torque, which is negative while K0 drags the engine): the QA T21 bound
+      -- QA bound: vs what was available (motor cap + measured ICE/K0 torque)
       local ach = min(tcmd, (ctx.motorCapNm or 0) + st.iceMeas)
       local devA = abs(shaftNm - ach)
       if devA > st.stats.maxDevAch then st.stats.maxDevAch = devA end
@@ -1846,7 +1626,7 @@ local function writeOutputs(ctx)
   local m = st.m
   ctx.iceEngageState = (s == "FAULT") and "OFF" or s
   ctx.iceOn = (s ~= "OFF" and s ~= "FAULT")
-  ctx.iceCoupled = (s == "BLEND" or s == "ON" or (s == "RELEASE" and st.relPhase == "TORQUE"))
+  ctx.iceCoupled = k0LockedState(s)
   ctx.iceShareGate = st.g
   ctx.iceThrottleOverride = st.override
   ctx.seqFillGain = st.fill
@@ -1855,8 +1635,7 @@ local function writeOutputs(ctx)
   ctx.k0SlipRpm = m.slip
   ctx.iceMeasNm = st.iceMeas
   ctx.iceSyncBlocked = (s == "SYNC") and st.syncBlocked or false
-  -- (read by torqueCoord updateFillGain: fill 0 for an IDLE engage; not under
-  -- the brake-throttle guard above the idle band, see guardFill)
+  -- torqueCoord: fill 0 for an IDLE engage (see guardFill)
   ctx.iceIdleEngage = (s == "ENGAGE" and st.engageMode == "IDLE" and not guardFill(ctx))
     or (s == "SYNC" and st.idleEngage) or false
   ctx.iceRelPhase = (s == "RELEASE") and st.relPhase or nil
@@ -1877,11 +1656,9 @@ local function publish(ctx)
   ev.etk854hybrid_iceStartType = st.variant
   ev.etk854hybrid_iceSeqFault = st.seqFault
   ev.etk854hybrid_iceSyncBlocked = ctx.iceSyncBlocked and 1 or 0
-  -- motor fill loop measurement select (etk854hybrid_motorShaft): 1 = K0
-  -- carries the engine -> measure combustion torque, 0 = measure K0 torque
+  -- motor fill loop measures combustion torque (1, K0 carries) or K0 torque (0)
   ev.etk854hybrid_fillLocked = (ctx.iceCoupled or (s == "ENGAGE" and st.lockConfirmed)) and 1 or 0
-  -- decoupled-ICE diagnostics (updateDecDiag). The converter pump / motor
-  -- shaft speed is etk854hybrid_pumpRpm (motor device, one channel only).
+  -- decoupled-ICE diagnostics (shaft speed: etk854hybrid_pumpRpm of the motor)
   local d = st.dec
   local dec = d.why ~= "NONE"
   ev.etk854hybrid_iceDecoupledWhy      = d.why
@@ -1918,8 +1695,7 @@ function M.updateGFX(ctx, dt)
   publish(ctx)
 end
 
--- External stall (master's N-charge recovery): EMERGENCY open -> OFF; the
--- restart then comes through the arbiter like any other start.
+-- External stall (master's N-charge recovery): EMERGENCY open -> OFF.
 function M.onExternalStall(ctx)
   if st.state == "OFF" or st.state == "FAULT" then return end
   if st.state == "RELEASE" and st.relProfile == "EMERGENCY" then return end
@@ -1949,16 +1725,13 @@ local function resetState(ctx)
   st.arbWant, st.arbIdleOk, st.minOnLeft = false, -1, 0
   st.arbSlow, st.arbLift, st.arbBraking = false, false, false
   st.abortT, st.orphanT = 0, 0
-  -- decoupled diagnostics: the open segment / episode is dropped, the
-  -- lifetime totals (st.dec.tot / cnt) survive a reset
+  -- drop the open diag segment, keep the lifetime totals
   st.dec.why, st.dec.segT0, st.dec.epT0 = "NONE", st.now, st.now
   st.seqFault, st.variant = "none", "NONE"
   st.inStart = false
   st.idleEngage, st.syncBlocked, st.govArmed = false, false, false
-  -- Spawn / reset state: follow the engine. CE reset spawns it running at
-  -- idle when the vehicle ignition level says so (CE:1302-1314). The engine
-  -- DEVICE decides, not electrics.engineRunning: the 8HP shift logic reports
-  -- that as hybrid READY (etk854hybrid_8hp.lua H12), i.e. 1 in EV as well.
+  -- Spawn / reset: follow the engine device (CE may spawn it running), not
+  -- electrics.engineRunning, which the 8HP reports as hybrid READY (1 in EV)
   local running = true
   if st.ice then
     local c = ctx and ctx.modules and ctx.modules.curves
@@ -2015,12 +1788,8 @@ end
 
 function M.updateFixedStep(ctx, dt) end
 
-function M.getStats(ctx)
-  return (ctx and ctx.iceSeqLast) or nil
-end
-
--- Live tuning (console / dev server): M.setParam('CRANK_DRAG_FRAC', 0.6).
--- Only existing numeric keys of P, returns the old value; not persistent.
+-- Live tuning (not persistent, returns the old value / nil):
+-- M.setParam('CRANK_DRAG_FRAC', 0.6)
 function M.setParam(key, value)
   if type(P[key]) ~= "number" or type(value) ~= "number" then return nil end
   local old = P[key]
@@ -2028,7 +1797,7 @@ function M.setParam(key, value)
   return old
 end
 
--- Live tuning of a start profile value: M.setProf('URGENT', 'syncRefRate', 9000)
+-- M.setProf('URGENT', 'syncRefRate', 9000)
 function M.setProf(prof, key, value)
   local t = PROF[prof]
   if not t or type(t[key]) ~= "number" or type(value) ~= "number" then return nil end
@@ -2037,11 +1806,7 @@ function M.setProf(prof, key, value)
   return old
 end
 
--- Live tuning of the arbiter (A/B levers, not persistent; returns the old
--- value, nil for an unknown / non-numeric key):
---   M.setArb('IDLE_DE', 'ECO_PRO', 1)        per-DE table entry
---   M.setArb('SYNC_ABORT_S', 'ECO_PRO', 0.4)
---   M.setArb('IDLE_W_MIN', 0.2)              scalar
+-- M.setArb('IDLE_DE', 'ECO_PRO', 1) per-DE entry, M.setArb('IDLE_W_MIN', 0.2) scalar
 function M.setArb(key, a, b)
   local t = ARB[key]
   if type(t) == "table" then

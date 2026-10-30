@@ -1,26 +1,18 @@
--- batteryMonitor.lua - ETK 854 Hybrid - Phase 2
--- Owner of all battery state and derived capability scaling.
--- Implements PLAN_POWERTRAIN_COORDINATION.md section 3 (SOC bands, EV-Lockout,
--- cold derate) with the module interface from PLAN_SYSTEM_ARCHITECTURE.md.
+-- batteryMonitor.lua - ETK 854 Hybrid - battery state monitor
+-- Battery state and derived scaling: SOC bands, EV lockout below SOC_CRIT,
+-- cold derate of EV drive power, regen taper near full.
 --
--- Reads:  energyStorage.getStorage("mainBattery"), obj:getEnvironmentTemperature
--- Writes electrics channels:
---   etk854hybrid_batterySoc           (0..100, percent)
---   etk854hybrid_batteryFraction      (0..1)
---   etk854hybrid_batteryBand          ("CRIT"/"LOW1"/"LOW2"/"NORMAL_LO"/"NORMAL"/"TOP1"/"TOP2")
---   etk854hybrid_evAvailable          (0/1 - EV drive power gate)
---   etk854hybrid_regenAllowed         (0/1 - regen acceptance gate)
---   etk854hybrid_evPowerFraction      (0..1 - scale factor for EV drive)
---   etk854hybrid_regenAcceptFraction  (0..1 - scale factor for regen)
--- Writes ctx (consumed by torqueRequest / brakeCoord / iceManager later):
---   ctx.soc, ctx.socPercent, ctx.evPowerFraction, ctx.regenAcceptFraction
---   ctx.batteryBand, ctx.evLockoutActive, ctx.evColdDeratingFraction
+-- Reads:  energyStorage "mainBattery", obj:getEnvironmentTemperature
+-- Writes: etk854hybrid_batterySoc [%], _batteryFraction, _batteryBand,
+--   _evAvailable / _regenAllowed (0/1), _evPowerFraction / _regenAcceptFraction;
+--   ctx.soc, socPercent, evPowerFraction, regenAcceptFraction, batteryBand,
+--   evLockoutActive, evColdDeratingFraction
 
 local M = {}
 M.name = "batteryMonitor"
 
 -- ===========================================================
--- SOC Band Thresholds (per PLAN_POWERTRAIN_COORDINATION 3.1)
+-- SOC band thresholds
 -- 0   5    10   15   20             95   98  100 %
 -- |   |CRIT|LOW1|LOW2|  NORMAL       |TOP1|TOP2|
 -- ===========================================================
@@ -31,18 +23,16 @@ local SOC_NORMAL_LO = 0.20
 local SOC_TOP1      = 0.95
 local SOC_TOP2      = 0.98
 
--- Lockout: once SOC drops below 5%, suppress EV drive for 30 s.
--- Release only when timer expires AND SOC has recovered above LOW1 (10%).
-local EV_LOCKOUT_S       = 30
-local EV_LOCKOUT_RELEASE = SOC_LOW1
+local EV_LOCKOUT_S       = 30         -- [s] no EV drive after dropping below CRIT
+local EV_LOCKOUT_RELEASE = SOC_LOW1   -- re-arm above this SOC
 
--- Cold-battery derating proxy (no jbeam thermal model yet).
-local COLD_DERATE_HOT_C  =   5    -- >=  5 degC: no derate
-local COLD_DERATE_COLD_C = -20    -- <= -20 degC: max derate
-local COLD_DERATE_MIN    = 0.5    -- floor at 50% available when frozen
+-- cold derate from the ambient temperature (no battery thermal model)
+local COLD_DERATE_HOT_C  =   5    -- no derate above
+local COLD_DERATE_COLD_C = -20    -- full derate below
+local COLD_DERATE_MIN    = 0.5    -- EV power factor at full derate
 
 -- ===========================================================
--- Module State (survives hot-require; reset clears it)
+-- State
 -- ===========================================================
 local state = {
   soc              = 1.0,
@@ -53,7 +43,7 @@ local state = {
   coldDerate       = 1.0,
   evLockoutTimer   = 0,
   evLockoutActive  = false,
-  lastSocSign      = "normal",
+  critLatched      = false,
   coldRefreshTimer = 0,
   initialized      = false,
 }
@@ -61,11 +51,8 @@ local state = {
 -- ===========================================================
 -- Helpers
 -- ===========================================================
-local function clamp01(t)
-  if t < 0 then return 0 end
-  if t > 1 then return 1 end
-  return t
-end
+local U = require("controller/etk854hybrid/etk854hybrid_util")
+local clamp01 = U.clamp01
 
 local function lerp(a, b, t)
   return a + (b - a) * clamp01(t)
@@ -81,11 +68,7 @@ local function classifyBand(soc)
   return "TOP2"
 end
 
--- 0   below 5%
--- ramp 0->0.5 between 5..10%
--- ramp 0.5->0.8 between 10..15%
--- ramp 0.8->1.0 between 15..20%
--- 1.0 above 20%
+-- 0 at 5 %, linear to 0.5 / 0.8 / 1.0 at 10 / 15 / 20 %
 local function evDrivePowerFraction(soc)
   if soc <= SOC_CRIT      then return 0.0 end
   if soc <= SOC_LOW1      then return lerp(0.0, 0.5, (soc - SOC_CRIT)  / (SOC_LOW1 - SOC_CRIT)) end
@@ -94,15 +77,14 @@ local function evDrivePowerFraction(soc)
   return 1.0
 end
 
--- 1.0 below 95%, tapers to 0 between 95..98%, 0 above 98%
+-- 1.0 below 95 %, linear to 0 at 98 %
 local function regenAcceptFraction(soc)
   if soc >= SOC_TOP2 then return 0.0 end
   if soc >= SOC_TOP1 then return lerp(1.0, 0.0, (soc - SOC_TOP1) / (SOC_TOP2 - SOC_TOP1)) end
   return 1.0
 end
 
--- Cold-battery derate. pcall-wrapped: getEnvironmentTemperature may not exist
--- in all BeamNG versions or contexts (e.g., during reset).
+-- pcall: getEnvironmentTemperature may be missing (version, reset)
 local function refreshColdDerating()
   local ok, ambK = pcall(function() return obj:getEnvironmentTemperature() end)
   if not ok or type(ambK) ~= "number" then return 1.0 end
@@ -121,10 +103,8 @@ local function readBatterySoc(fallback)
   return fallback or 1.0
 end
 
--- Lockout state machine.
--- - Latches on first SOC<CRIT crossing (sets 30s timer + "crit" sign)
--- - Releases when timer hits 0 (driver may still see 0 EV power until SOC>CRIT)
--- - Sign returns to "normal" only after timer expired AND SOC>LOW1 (hysteresis)
+-- Lockout latches (critLatched) on the first drop below CRIT, ends with the
+-- timer; it can latch again only after the timer AND SOC > EV_LOCKOUT_RELEASE.
 local function updateLockout(soc, dt)
   if state.evLockoutTimer > 0 then
     state.evLockoutTimer = state.evLockoutTimer - dt
@@ -134,21 +114,22 @@ local function updateLockout(soc, dt)
     end
   end
 
-  if soc < SOC_CRIT and state.lastSocSign ~= "crit" then
+  if soc < SOC_CRIT and not state.critLatched then
     state.evLockoutTimer  = EV_LOCKOUT_S
     state.evLockoutActive = true
-    state.lastSocSign     = "crit"
+    state.critLatched     = true
     if guihooks and guihooks.message then
-      guihooks.message("ETK 854: Battery critical - EV disabled 30s", 5, "vehicle.hybridbattery")
+      guihooks.message(string.format("ETK 854: Battery critical - EV disabled %ds", EV_LOCKOUT_S),
+                       5, "vehicle.hybridbattery")
     end
-  elseif soc > EV_LOCKOUT_RELEASE and state.lastSocSign == "crit"
+  elseif soc > EV_LOCKOUT_RELEASE and state.critLatched
          and state.evLockoutTimer <= 0 then
-    state.lastSocSign = "normal"
+    state.critLatched = false
   end
 end
 
 -- ===========================================================
--- Channel & ctx publish (single source of truth per write)
+-- Publish
 -- ===========================================================
 local function publish(ctx)
   electrics.values.etk854hybrid_batterySoc          = state.socPercent
@@ -182,20 +163,22 @@ local function recomputeFromSoc(soc)
 end
 
 -- ===========================================================
--- Lifecycle (matches _stub.lua interface)
+-- Lifecycle
 -- ===========================================================
-function M.init(ctx)
-  -- Read initial SOC; carry through transient nils during spawn.
+-- re-sync lockout, cold derate and the derived values to the current SOC
+local function resync(ctx)
   local soc = readBatterySoc(1.0)
-
   state.evLockoutTimer   = 0
   state.evLockoutActive  = (soc < SOC_CRIT)
-  state.lastSocSign      = (soc < SOC_CRIT) and "crit" or "normal"
+  state.critLatched      = (soc < SOC_CRIT)
   state.coldRefreshTimer = 0
   state.coldDerate       = refreshColdDerating()
-
   recomputeFromSoc(soc)
   publish(ctx)
+end
+
+function M.init(ctx)
+  resync(ctx)
   state.initialized = true
 
   if ctx and ctx.dbg then
@@ -207,46 +190,33 @@ function M.init(ctx)
 end
 
 function M.updateGFX(ctx, dt)
-  if not ctx or ctx.resetting then return end
+  if not ctx then return end
   dt = dt or 0
 
-  -- 1. SOC read (transient-nil safe)
+  -- keeps the last SOC while the storage is missing
   local soc = readBatterySoc(state.soc)
 
-  -- 2. Cold derate refresh at ~1 Hz (ambient is slow-varying)
+  -- cold derate at ~1 Hz
   state.coldRefreshTimer = state.coldRefreshTimer + dt
   if state.coldRefreshTimer >= 1.0 then
     state.coldRefreshTimer = 0
     state.coldDerate = refreshColdDerating()
   end
 
-  -- 3. Lockout state machine
   updateLockout(soc, dt)
-
-  -- 4. Derived bands + scaling
   recomputeFromSoc(soc)
-
-  -- 5. Publish channels + ctx
   publish(ctx)
 end
 
 function M.updateFixedStep(ctx, dt)
-  -- Battery state does not need physics-rate updates
 end
 
 function M.reset(ctx)
-  local soc = readBatterySoc(1.0)
-  state.evLockoutTimer   = 0
-  state.evLockoutActive  = (soc < SOC_CRIT)
-  state.lastSocSign      = (soc < SOC_CRIT) and "crit" or "normal"
-  state.coldRefreshTimer = 0
-  state.coldDerate       = refreshColdDerating()
-  recomputeFromSoc(soc)
-  publish(ctx)
+  resync(ctx)
 end
 
 -- ===========================================================
--- Public read accessors (for debug console / other modules)
+-- Accessors
 -- ===========================================================
 function M.getState()
   return {
@@ -262,7 +232,7 @@ function M.getState()
   }
 end
 
--- Expose pure helpers so other modules / tests can call without duplicating
+-- pure helpers for other modules / tests
 M._classifyBand          = classifyBand
 M._evDrivePowerFraction  = evDrivePowerFraction
 M._regenAcceptFraction   = regenAcceptFraction

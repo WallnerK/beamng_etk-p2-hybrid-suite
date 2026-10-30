@@ -4,22 +4,18 @@
   <meta charset="UTF-8">
   <title>ETK 854 ActiveHybrid - cluster</title>
   <!--
-    ETK 854 ActiveHybrid instrument cluster page.
-    Loaded by the base-game controller gauges/genericGauges ("gauge") into the
-    web view "@etk800_gauges_screen" (512 x 256, see etk854hybrid_gauges.jbeam).
-    Lua -> JS entry points (global functions):
-      setup(config)            once, after the web view is created
-      updateData(data)         every UI frame while a player is seated
-      updateMode(p)            DSE drive-mode change (modeName / modeColor)
-      messageQueue(msg), messageClearById(id), messageClearAll()
-                               popup API (hasPopupMessageSupport = true)
-    The stubs below buffer every call until etk854hybrid_gauges_screen.js has
-    run, so an early setup()/updateData() is never lost.
-    Opened in a desktop browser (no `beamng` object) the page runs a demo;
-    #demo=<state> pins a state (ready, ev, hybrid, boost, regen, sail,
-    charge, ice, sport, bc, maxed, toast, off, nodata; trailer air: air,
-    airlow, trlbrk, airshut; on-board computer: fuel, idle, imperial;
-    ECO PRO demand caret: eco (pedal sweep), eco50, eco82, eco88).
+    ETK 854 ActiveHybrid instrument cluster page, loaded by genericGauges into
+    the web view "@etk800_gauges_screen" (512 x 256).
+    Lua -> JS: setup(config) once, updateData(data) per UI frame while seated,
+    updateMode(p) on a DSE mode change, messageQueue / messageClearById /
+    messageClearAll (popup API). The stubs below buffer calls until
+    etk854hybrid_gauges_screen.js has run.
+    In a desktop browser (no `beamng`) the page runs a demo: #demo=<state>
+    (anim cycles; ready ev start hybrid boost regen sail charge ice sport bc
+    maxed dsc manual hintdn toast off nodata air airlow trlbrk airshut fuel idle
+    imperial eco eco50 eco82 eco88), &gear=plain,
+    &view=HYBRID|EFFICIENCY|SPORT|MINIMAL|AUTO.
+    Groups with data-views show only in the listed views (H E S M), by opacity.
   -->
   <script>
     (function () {
@@ -41,6 +37,9 @@
       };
     })();
   </script>
+  <!-- frame watchdog: reloads the page when the engine stops rendering it
+       (0.39.4 replaceVehicle freeze) -->
+  <script src="../etk854hybrid_webview_watchdog.js"></script>
   <link rel="stylesheet" type="text/css" href="etk854hybrid_gauges_screen.css">
 </head>
 <body>
@@ -58,11 +57,18 @@
   </defs>
 
   <!-- ===================== CENTRE COLUMN (x ~95-221) ===================== -->
+  <!-- HYBRID view; EFFICIENCY / SPORT / MINIMAL follow the power meter, the
+       toast is drawn last -->
   <!-- driving experience + EV mode strategy -->
+  <g data-views="HES">
   <text id="deMode" class="b" x="158.5" y="32" font-size="15" letter-spacing="1.2" text-anchor="middle" fill="#e6ebf2">COMFORT</text>
   <rect id="deRule" x="126" y="37" width="65" height="1.2" fill="url(#gRule)" opacity="0.55"/>
+  </g>
+  <g data-views="HE">
   <text id="edMode" x="158.5" y="51" font-size="10.5" letter-spacing="0.6" text-anchor="middle" fill="#8cc8ff">AUTO EV</text>
+  </g>
 
+  <g data-views="H">
   <g id="mid">
     <!-- state of charge -->
     <text id="soc" class="b" x="158.5" y="84" font-size="27" text-anchor="middle" fill="#e6ebf2"><tspan id="socVal">--</tspan><tspan id="socPct" font-size="13" dx="1">%</tspan></text>
@@ -76,14 +82,6 @@
 
     <!-- hybrid phase -->
     <text id="phase" class="b" x="158.5" y="148" font-size="12.5" letter-spacing="1" text-anchor="middle" fill="#8cc8ff">READY</text>
-  </g>
-
-  <!-- toast (mode changes / popup messages) covers the mid block -->
-  <g id="toast" opacity="0">
-    <rect x="112" y="58" width="93" height="96" fill="#000"/>
-    <text id="toastSub" x="158.5" y="88" font-size="9.5" letter-spacing="1.3" text-anchor="middle" fill="#8b95a5"></text>
-    <text id="toastTitle" class="b" x="158.5" y="110" font-size="16" letter-spacing="0.8" text-anchor="middle" fill="#e6ebf2"></text>
-    <text id="toastInfo" x="158.5" y="126" font-size="10.5" letter-spacing="0.6" text-anchor="middle" fill="#8cc8ff"></text>
   </g>
 
   <!-- energy flow glyph: ICE -K0- E-machine, battery left, wheels right -->
@@ -122,13 +120,9 @@
   </g>
 
   <!-- ======================= ON-BOARD COMPUTER ========================
-       Data: customModules.etk854hybrid_gaugeData "fuel" (header item 10).
-       Through the stock opacity mask only a sliver of the SPEEDOMETER bowl
-       is visible (x 63..92, y 165..210: the texture starts at the
-       speedometer centre, x -24); it carries the instantaneous consumption
-       as a vertical bar + number. Tank / fuel range / trip averages use the
-       free band between the flow glyph (bottom y 205.5) and the bottom
-       strip (glyph tops ~228), visible from x 73 (y 215) to x 244 (y 215). -->
+       Instantaneous consumption in the visible sliver of the speedometer
+       bowl (x 63..92, y 165..210); tank / fuel range / trip averages in the
+       band between flow glyph and bottom strip (visible x 73..244 at y 215). -->
   <g id="obc" opacity="0">
     <rect id="fiTrack" x="64.5" y="167" width="4" height="40" rx="1.5" fill="#161b23"/>
     <rect id="fiBar" x="64.5" y="207" width="4" height="0" rx="1.5" fill="#ffab3d"/>
@@ -137,36 +131,45 @@
     <text id="obcL" x="78" y="221" font-size="9" fill="#8b95a5"><tspan id="fuelVal" class="b" fill="#e6ebf2">--</tspan><tspan id="fuelUnit" dx="1.5">L</tspan><tspan id="frngVal" dx="5" fill="#c9d1dc">--</tspan><tspan id="frngUnit" dx="1.5">km</tspan></text>
     <text id="obcR" x="240" y="221" font-size="9" text-anchor="end" fill="#8b95a5">AVG<tspan id="avgF" class="b" dx="2" fill="#ffab3d">--</tspan><tspan id="avgFU" dx="1.5">L</tspan><tspan id="avgE" class="b" dx="5" fill="#2b8bff">--</tspan><tspan id="avgEU" dx="1.5">kWh</tspan><tspan id="avgPer" dx="2">/100km</tspan></text>
   </g>
+  </g>
 
-  <!-- bottom strip: odometer | clock | outside temperature -->
+  <!-- bottom strip: odometer | clock | outside temperature (MINIMAL: clock only) -->
+  <g data-views="HES">
   <text id="odo" x="68" y="236" font-size="11" fill="#8b95a5"></text>
-  <text id="clock" class="b" x="158.5" y="236.5" font-size="13" text-anchor="middle" fill="#e6ebf2"></text>
   <text id="temp" x="255" y="236" font-size="11" text-anchor="end" fill="#8b95a5"></text>
+  </g>
+  <text id="clock" class="b" x="158.5" y="236.5" font-size="13" text-anchor="middle" fill="#e6ebf2"></text>
 
   <!-- ====================== REV COUNTER BOWL (x ~225-447) ================== -->
+  <g data-views="H">
   <text id="prog" class="b" x="336" y="157" font-size="11" letter-spacing="1.1" text-anchor="middle" fill="#e6ebf2"></text>
+  </g>
 
+  <g data-views="HM">
   <rect id="gearBox" x="317" y="163.5" width="44" height="27" rx="3" fill="none" stroke="#c9d1dc" stroke-width="1.6"/>
   <text id="gear" class="b" x="339" y="184.5" font-size="19" text-anchor="middle" fill="#e6ebf2">P</text>
-  <!-- OEM-style shift recommendation (electrics etk854hybrid_gearHint, from
-       etk854hybrid_gaugeData): a triangle above the recommended gear in the
-       right part of the gear box; the engaged gear moves left meanwhile -->
+  <!-- shift recommendation (etk854hybrid_gearHint): triangle + gear in the
+       right part of the box, the engaged gear moves left -->
   <g id="gHint" opacity="0">
     <path id="gHintTri" d="M354 167.5 L358.5 174 H349.5 Z" fill="#e6ebf2"/>
     <text id="gHintTxt" class="b" x="354" y="187" font-size="11.5" text-anchor="middle" fill="#e6ebf2"></text>
   </g>
+  </g>
 
   <!-- system power at the wheels (ICE + e-machine), below the gear -->
+  <g data-views="H">
   <text id="kwTxt" class="b" x="339" y="208" font-size="15" text-anchor="middle" fill="#e6ebf2"><tspan id="kw">0</tspan><tspan id="kwUnit" font-size="9" dx="2" fill="#8b95a5">kW</tspan></text>
+  </g>
 
+  <!-- status chips: every view (filtered by the script) -->
   <g id="chip1" opacity="0">
     <rect id="chip1Box" x="367" y="164" width="40" height="12" rx="6" fill="#0b0e13" stroke="#394150" stroke-width="1.2"/>
     <text id="chip1Txt" class="b" x="387" y="173.2" font-size="9" letter-spacing="0.6" text-anchor="middle" fill="#e6ebf2"></text>
     <!-- optional status dot at the chip's right end (AIR: compressor running) -->
     <circle id="chip1Dot" cx="401" cy="170" r="1.7" fill="#8cc8ff" opacity="0"/>
   </g>
-  <!-- second chip left of the gear box (right-aligned to x 313); the right
-       side has no room for a second row: the arc end passes there -->
+  <!-- second chip left of the gear box (no room for a second row on the
+       right: the arc end passes there) -->
   <g id="chip2" opacity="0">
     <rect id="chip2Box" x="273" y="164" width="40" height="12" rx="6" fill="#0b0e13" stroke="#394150" stroke-width="1.2"/>
     <text id="chip2Txt" class="b" x="293" y="173.2" font-size="9" letter-spacing="0.6" text-anchor="middle" fill="#e6ebf2"></text>
@@ -174,6 +177,7 @@
   </g>
 
   <!-- power meter (paths are generated by the script from ARC) -->
+  <g data-views="HES">
   <g id="meter" fill="none">
     <path id="mTrack" stroke="#161b23" stroke-width="9"/>
     <path id="zCharge" stroke="#2ad99c" stroke-width="2.4" opacity="0.55"/>
@@ -184,12 +188,95 @@
     <path id="mBarI" stroke="#e6ebf2" stroke-width="9"/>
     <path id="mBarR" stroke="#2ad99c" stroke-width="9"/>
     <g id="mTicks" stroke-linecap="butt"></g>
-    <!-- ECO PRO demand caret (pedal map v3) just outside the arc, tip towards
-         the centre: EV zone / EV MAX edge (pulsing) / hybrid band.
-         Geometry and opacity are written by the script (no CSS animation). -->
+    <!-- ECO PRO demand caret outside the arc (geometry / opacity by script) -->
     <path id="mDem" d="M0 0" fill="#8cc8ff" stroke="#000" stroke-width="0.8" stroke-linejoin="round" opacity="0"/>
     <path id="mLblPath" stroke="none" fill="none"/>
     <text id="mLblC" font-size="8.5" letter-spacing="1" fill="#2ad99c" opacity="0.85"><textPath id="mLblCPath" href="#mLblPath" startOffset="50%" text-anchor="middle">CHARGE</textPath></text>
+  </g>
+  </g>
+
+  <!-- ========================= EFFICIENCY view ============================
+       Column: EV range, SOC, phase, recuperation, trip averages. Bowl: pedal
+       zone, small gear, instantaneous consumption, emphasised demand caret. -->
+  <g id="vEff" data-views="E" opacity="0">
+    <g id="efMid">
+      <text id="efRngLbl" x="158.5" y="69" font-size="10" letter-spacing="1.4" text-anchor="middle" fill="#35d0b5">EV RANGE</text>
+      <text id="efRng" class="b" x="158.5" y="97" font-size="28" text-anchor="middle" fill="#e6ebf2"><tspan id="efRngVal">--</tspan><tspan id="efRngUnit" font-size="12" dx="2" fill="#8b95a5">km</tspan></text>
+      <rect x="131.5" y="104" width="54" height="4" rx="2" fill="#161b23"/>
+      <rect id="efSocBar" x="131.5" y="104" width="0" height="4" rx="2" fill="url(#gSoc)"/>
+      <rect id="efSocTgt" x="160" y="101.5" width="2" height="9" fill="#e6ebf2" opacity="0"/>
+      <text id="efSoc" x="158.5" y="121" font-size="10" letter-spacing="0.6" text-anchor="middle" fill="#8b95a5">SOC<tspan id="efSocVal" class="b" dx="3" fill="#e6ebf2">--</tspan><tspan dx="1">%</tspan></text>
+      <text id="efPhase" class="b" x="158.5" y="138" font-size="12.5" letter-spacing="1" text-anchor="middle" fill="#8cc8ff">READY</text>
+      <text id="efRegen" x="158.5" y="152" font-size="10" letter-spacing="0.8" text-anchor="middle" fill="#2ad99c"></text>
+    </g>
+    <text id="efTrip" x="158.5" y="172" font-size="10" letter-spacing="0.6" text-anchor="middle" fill="#8b95a5">TRIP<tspan id="efTripVal" class="b" dx="3" fill="#e6ebf2">--</tspan><tspan id="efTripUnit" dx="1.5">km</tspan></text>
+    <text id="efAvgE" x="158.5" y="190" font-size="10" text-anchor="middle" fill="#8b95a5"><tspan id="efAvgEVal" class="b" font-size="14" fill="#2b8bff">--</tspan><tspan id="efAvgEUnit" dx="2">kWh/100km</tspan></text>
+    <text id="efAvgF" x="158.5" y="207" font-size="10" text-anchor="middle" fill="#8b95a5"><tspan id="efAvgFVal" class="b" font-size="14" fill="#ffab3d">--</tspan><tspan id="efAvgFUnit" dx="2">L/100km</tspan></text>
+
+    <text id="efPedal" class="b" x="340" y="156" font-size="10.5" letter-spacing="1.1" text-anchor="middle" fill="#8cc8ff"></text>
+    <rect id="efGearBox" x="326" y="160" width="28" height="16" rx="3" fill="none" stroke="#8b95a5" stroke-width="1.2"/>
+    <text id="efGear" class="b" x="340" y="172.5" font-size="12.5" text-anchor="middle" fill="#e6ebf2">P</text>
+    <!-- two lines: side by side they would reach the CHARGE label -->
+    <text id="efCons" class="b" x="340" y="196" font-size="21" text-anchor="middle" fill="#8b95a5">--</text>
+    <text id="efConsUnit" x="340" y="206.5" font-size="9" letter-spacing="0.3" text-anchor="middle" fill="#8b95a5"></text>
+    <g id="efDem" opacity="0">
+      <path id="efDemBg" d="M0 0" fill="none" stroke="#000" stroke-width="3.6"/>
+      <path id="efDemLn" d="M0 0" fill="none" stroke="#8cc8ff" stroke-width="1.6"/>
+      <path id="efDemTri" d="M0 0" fill="#8cc8ff" stroke="#000" stroke-width="0.8" stroke-linejoin="round"/>
+    </g>
+  </g>
+
+  <!-- =========================== SPORT view ===============================
+       Column: stability mode, speed, e-boost stage, SOC, ICE / EV split,
+       peak power. Bowl: shift program, large gear with shift hint, kW. -->
+  <g id="vSport" data-views="S" opacity="0">
+    <text id="spDsc" x="158.5" y="51" font-size="10.5" letter-spacing="0.8" text-anchor="middle" fill="#8cc8ff"></text>
+    <g id="spMid">
+      <text id="spSpd" class="b" x="158.5" y="96" font-size="36" text-anchor="middle" fill="#e6ebf2">0</text>
+      <text id="spSpdUnit" x="158.5" y="109" font-size="10" letter-spacing="1" text-anchor="middle" fill="#8b95a5">km/h</text>
+      <text id="spBoostLbl" x="158.5" y="126" font-size="10" letter-spacing="1.2" text-anchor="middle" fill="#8b95a5">E-BOOST</text>
+      <rect id="spPip1" x="131.5" y="130" width="16" height="4" rx="1" fill="#161b23"/>
+      <rect id="spPip2" x="150.5" y="130" width="16" height="4" rx="1" fill="#161b23"/>
+      <rect id="spPip3" x="169.5" y="130" width="16" height="4" rx="1" fill="#161b23"/>
+      <text id="spSoc" x="158.5" y="150" font-size="10" letter-spacing="0.6" text-anchor="middle" fill="#8b95a5">SOC<tspan id="spSocVal" class="b" dx="3" fill="#2b8bff">--</tspan><tspan dx="1">%</tspan></text>
+    </g>
+    <text x="110" y="183" font-size="10" letter-spacing="0.4" fill="#8b95a5">ICE</text>
+    <rect x="130" y="177.5" width="46" height="5" rx="1.5" fill="#161b23"/>
+    <rect id="spIceBar" x="130" y="177.5" width="0" height="5" rx="1.5" fill="#e6ebf2"/>
+    <text id="spIceKw" class="b" x="207" y="183" font-size="11" text-anchor="end" fill="#e6ebf2">0</text>
+    <text x="110" y="199" font-size="10" letter-spacing="0.4" fill="#8b95a5">EV</text>
+    <rect x="130" y="193.5" width="46" height="5" rx="1.5" fill="#161b23"/>
+    <rect id="spEvBar" x="130" y="193.5" width="0" height="5" rx="1.5" fill="#2b8bff"/>
+    <text id="spEvKw" class="b" x="207" y="199" font-size="11" text-anchor="end" fill="#e6ebf2">0</text>
+    <text id="spPeak" x="158.5" y="221" font-size="10" letter-spacing="0.6" text-anchor="middle" fill="#8b95a5">PEAK<tspan id="spPeakVal" class="b" dx="3" fill="#e6ebf2">0</tspan><tspan dx="1.5">kW</tspan></text>
+
+    <text id="spProg" class="b" x="336" y="157" font-size="11" letter-spacing="1.1" text-anchor="middle" fill="#ff5a3c"></text>
+    <rect id="spGearBox" x="317" y="160" width="46" height="34" rx="4" fill="none" stroke="#ff5a3c" stroke-width="1.8"/>
+    <text id="spGear" class="b" x="340" y="187" font-size="28" text-anchor="middle" fill="#e6ebf2">P</text>
+    <g id="spHint" opacity="0">
+      <path id="spHintTri" d="M355 165 L360.5 173 H349.5 Z" fill="#e6ebf2"/>
+      <text id="spHintTxt" class="b" x="355" y="189" font-size="14" text-anchor="middle" fill="#e6ebf2"></text>
+    </g>
+    <text id="spKwTxt" class="b" x="340" y="209" font-size="16" text-anchor="middle" fill="#e6ebf2"><tspan id="spKw">0</tspan><tspan font-size="9" dx="2" fill="#8b95a5">kW</tspan></text>
+  </g>
+
+  <!-- ========================== MINIMAL view ==============================
+       Gear (HYBRID's), SOC, EV range, clock, warning chips; rest unlit. -->
+  <g id="vMin" data-views="M" opacity="0">
+    <g id="mnMid">
+      <text id="mnSocLbl" x="158.5" y="64" font-size="10" letter-spacing="1.4" text-anchor="middle" fill="#8b95a5">BATTERY</text>
+      <text id="mnSoc" class="b" x="158.5" y="94" font-size="30" text-anchor="middle" fill="#e6ebf2"><tspan id="mnSocVal">--</tspan><tspan font-size="14" dx="1">%</tspan></text>
+      <text id="mnRngLbl" x="158.5" y="118" font-size="10" letter-spacing="1.4" text-anchor="middle" fill="#2b8bff">EV</text>
+      <text id="mnRng" class="b" x="158.5" y="137" font-size="17" text-anchor="middle" fill="#e6ebf2"><tspan id="mnRngVal">--</tspan><tspan id="mnRngUnit" font-size="11" dx="2" fill="#8b95a5">km</tspan></text>
+    </g>
+  </g>
+
+  <!-- toast (mode changes / popups), covers the mid block of every view -->
+  <g id="toast" opacity="0">
+    <rect x="112" y="58" width="93" height="96" fill="#000"/>
+    <text id="toastSub" x="158.5" y="88" font-size="9.5" letter-spacing="1.3" text-anchor="middle" fill="#8b95a5"></text>
+    <text id="toastTitle" class="b" x="158.5" y="110" font-size="16" letter-spacing="0.8" text-anchor="middle" fill="#e6ebf2"></text>
+    <text id="toastInfo" x="158.5" y="126" font-size="10.5" letter-spacing="0.6" text-anchor="middle" fill="#8cc8ff"></text>
   </g>
 </svg>
 <script src="etk854hybrid_gauges_screen.js"></script>

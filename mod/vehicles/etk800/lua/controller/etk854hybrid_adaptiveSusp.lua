@@ -1,45 +1,26 @@
--- ETK 854 ActiveHybrid - Adaptivfahrwerk-Bruecke
+-- ETK 854 ActiveHybrid - adaptive damper bridge
 --
--- Koppelt die Daempferhaerte an den VCU-Fahrmodus
--- electrics.values.etk854hybrid_deMode ("COMFORT" / "ECO_PRO" / "SPORT").
+-- Maps the VCU drive mode (etk854hybrid_deMode) to a step of the stock
+-- adaptiveDampers actuators etk854hybrid_damperF/R (ladder p080..p150, 5 % steps).
+-- The ladder is walked step by step (default 110 %/s): a single 5 % step is
+-- imperceptible and does not excite the solver like a soft -> hard jump.
+-- Trailer mode raises the step to at least trailerPercent (a floor).
+-- Trailer detection and its channels belong to etk854hybrid_selfLeveling and
+-- the trailer API here delegates; without it (stock rear spring) a manual
+-- switch here writes trailerMode / levelState (one writer per channel).
 --
--- Der Controller schreibt NICHT selbst an Beams. Er waehlt lediglich eine
--- Modusstufe des Stock-Actuators
---   lua/vehicle/controller/drivingDynamics/actuators/adaptiveDampers.lua
--- aus, der in etk854hybrid_chassis.jbeam unter den Namen
--- "etk854hybrid_damperF" / "etk854hybrid_damperR" instanziert ist und dort
--- eine Leiter p080..p150 (Daempfung in 5-%-Schritten) mitbringt.
---
--- Weiche Uebergaenge entstehen dadurch, dass die Leiter Stufe fuer Stufe
--- abgefahren wird (Vorgabe 110 %/s, also ca. 0.45 s von 90 % auf 140 %).
--- Jeder Einzelschritt aendert die Daempfung um 5 % - das ist unterhalb der
--- Wahrnehmungsschwelle und regt den Solver nicht an, im Gegensatz zu einem
--- direkten Sprung soft -> hard.
---
--- Publizierte Kanaele:
---   electrics.values.etk854hybrid_suspMode     (String: COMFORT/ECO_PRO/SPORT)
---   electrics.values.etk854hybrid_suspFirmness (Zahl: aktuelle Haerte in %)
---
--- Anhaengermodus (P6): etk854hybrid_trailerMode == 1 hebt die Leiterstufe
--- auf mindestens trailerPercent an (UNTERGRENZE, SPORT bleibt straffer).
--- Erkennung, Niveauregulierung und die Kanaele trailerMode/levelState gehoeren
--- dem Controller etk854hybrid_selfLeveling (Teil etk854hybrid_spring_R); die
--- API hier (setTrailerMode/toggleTrailerMode/getTrailerMode/getLevelState)
--- delegiert nur. Ist die Serienfeder hinten verbaut (kein selfLeveling),
--- fuehrt diese Bruecke einen manuellen Schalter und schreibt die beiden
--- Kanaele selbst -> genau ein Schreiber pro Kanal.
+-- Publishes: etk854hybrid_suspMode (= deMode), etk854hybrid_suspFirmness [%]
 
 local M = {}
 
 M.type = "auxiliary"
--- adaptiveDampers laeuft mit defaultOrder 80; wir kommen danach dran.
-M.defaultOrder = 85
+M.defaultOrder = 85 -- after adaptiveDampers (80)
 
 local max = math.max
 local min = math.min
 local floor = math.floor
 
--- Leiter, identisch zu den "modes"-Zeilen in etk854hybrid_chassis.jbeam.
+-- Must match the "modes" rows in etk854hybrid_chassis.jbeam.
 local LADDER = {
   minPercent = 80,
   maxPercent = 150,
@@ -50,27 +31,26 @@ local LADDER_STEPS = (LADDER.maxPercent - LADDER.minPercent) / LADDER.stepPercen
 local frontName = "etk854hybrid_damperF"
 local rearName = "etk854hybrid_damperR"
 
-local modeIndex = {} -- deMode -> Leiterindex 0..14
+local modeIndex = {} -- deMode -> ladder index 0..14
 local defaultIndex = 4 -- 100 %
 
-local rampIndexPerSecond = 4 -- wird aus rampPercentPerSecond berechnet
+local rampIndexPerSecond = 4 -- set in init
 
-local currentIndex = nil -- float, faehrt zum Ziel
-local appliedIndex = nil -- zuletzt tatsaechlich gesetzte ganzzahlige Stufe
+local currentIndex = nil -- float, ramps towards the target
+local appliedIndex = nil -- last applied integer step
 local currentMode = "COMFORT"
 
-local paramTable = {damperMode = "p100"} -- wiederverwendet, kein GC-Druck
+local paramTable = {damperMode = "p100"} -- reused
 
--- Anhaenger-Zustand gebuendelt in EINER Tabelle (LuaJIT-Limit 60 Upvalues).
+-- One table: LuaJIT 60-upvalue limit.
 local T = {
   levelingName = "etk854hybrid_selfLeveling",
   trailerIndex = 7, -- 115 %
-  manualTrailer = nil -- nur ohne selfLeveling: Fahrer-Schalter
+  manualTrailer = nil -- driver switch, only without selfLeveling
 }
 
--- controller.getController (controller.lua:232) statt ...Safe: liefert nil
--- ohne "Didn't find controller"-Logzeile pro Frame, wenn die Serienfeder
--- hinten verbaut ist. Reiner Tabellenzugriff, daher jeden Frame ok.
+-- getController, not ...Safe: no "Didn't find controller" log per frame
+-- with the stock rear spring.
 local function getLeveling()
   local c = controller.getController(T.levelingName)
   if c and c.getTrailerMode then
@@ -94,10 +74,7 @@ local function indexToPercent(idx)
   return LADDER.minPercent + idx * LADDER.stepPercent
 end
 
--- getControllerSafe liefert bei fehlendem Part eine No-Op-Tabelle
--- (lua/vehicle/controller.lua:236) -> kein nil-Check noetig, und die
--- Abstimmung funktioniert auch, wenn nur eine der beiden Achsen das
--- Adaptiv-Teil verbaut hat.
+-- getControllerSafe: no-op for an axle without the adaptive part.
 local function applyIndex(idx)
   local modeName = indexToModeName(idx)
   paramTable.damperMode = modeName
@@ -119,7 +96,7 @@ local function updateGFX(dt)
 
   local trailer
   if getLeveling() then
-    -- selfLeveling (defaultOrder 83) hat diesen Frame schon publiziert.
+    -- selfLeveling (order 83) has published this frame.
     trailer = electrics.values.etk854hybrid_trailerMode == 1
   else
     trailer = T.manualTrailer == true
@@ -167,12 +144,9 @@ local function init(jbeamData)
   electrics.values.etk854hybrid_suspFirmness = indexToPercent(defaultIndex)
 end
 
--- adaptiveDampers.reset() ist leer (Zeile 42-43): nach einem Fahrzeug-Reset
--- stellt die Engine die jbeam-Basiswerte wieder her, der Actuator glaubt aber
--- weiter an die alte Stufe. Darum hier den Anwendungszustand verwerfen, damit
--- der naechste Frame die aktuelle Stufe frisch aufsetzt.
--- Der manuelle Anhaenger-Schalter (T.manualTrailer) bleibt ueber den Reset
--- erhalten - Fahrereinstellung.
+-- A vehicle reset restores the jbeam base damping, but adaptiveDampers.reset()
+-- is empty: drop the applied state so the next frame re-applies the step.
+-- The manual trailer switch survives.
 local function reset()
   currentIndex = nil
   appliedIndex = nil
@@ -182,7 +156,7 @@ local function trailerMessage(on)
   guihooks.message(on and "Trailer mode ON (firmer damping)" or "Trailer mode OFF", 3, "etk854hybrid_level")
 end
 
--- nil = Automatik (Kupplungserkennung im selfLeveling), true/false = Pin.
+-- nil = auto (coupler detection in selfLeveling), true/false = pin.
 local function setTrailerMode(b)
   local lev = getLeveling()
   if lev then
@@ -190,7 +164,7 @@ local function setTrailerMode(b)
     return
   end
   local old = T.manualTrailer == true
-  -- Explizit statt "b ~= nil and b or nil": das wuerde false zu nil machen.
+  -- Not "b ~= nil and b or nil": that turns false into nil.
   if b == nil then
     T.manualTrailer = nil
   else

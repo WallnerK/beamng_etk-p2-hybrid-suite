@@ -1,73 +1,38 @@
--- ETK 854 ActiveHybrid - electric cooling fan manager (OEM-style PWM fan)
+-- ETK 854 ActiveHybrid - stepless PWM electric cooling fan
 --
--- Why this exists: the base thermal model
---   lua/vehicle/powertrain/combustionEngineThermals.lua (updateWaterCoolingGFX
---   :687-961)
--- knows exactly ONE binary electric fan stage (on at radiatorFanTemperature,
--- off at thermostat * 1.05, :714-731), and its fan airspeed, thermostat and
--- radiator coefficient are module locals without setters. A real production car has
--- a stepless 600-850 W brushless PWM fan commanded by the engine ECU from coolant
--- and oil temperature plus load pre-control, with after-run after key-off.
+-- The base thermal model (combustionEngineThermals.lua) has one binary fan
+-- stage; fan airspeed, thermostat and radiator coefficient are module locals
+-- without setters.
+-- This controller emulates a PWM fan driven by coolant / oil temperature with
+-- load pre-control and after-run; the base fan remains as the failsafe stage.
 --
--- Emulation: the fan's ONLY physical effect in the base model is a higher
--- radiator face velocity through
---   airCoef = max(v / (15 + v), 0.1)        (:766)
---   Q_rad   = (Tc - Tenv) * radCoef * thermostat * airCoef * coolantEff (:772)
--- so we compute the extra heat flow our PWM airspeed would add OVER the
--- airspeed the base model used in the PREVIOUS frame (ram air or its own
--- failsafe fan, debugData.radiatorAirSpeed; controller.updateGFX runs before
--- powertrain.updateGFX, main.lua:88/:92, and engineThermalData is refreshed
--- only inside the thermals updateGFX, :917-933) and remove that energy from the
--- integrator state engine.thermals.coolantTemperature (a public module field
--- read every frame at :717/:745/:771/:789). Using the max()-delta means no
--- double counting: at speed, or with the base failsafe fan running, the delta
--- is zero by construction (up to a self-correcting one-frame lag at the
--- failsafe hand-over, below 1 frame x dQ).
+-- Emulation: the base fan only raises the radiator face velocity,
+--   airCoef = max(v / (15 + v), 0.1)
+--   Q_rad   = (Tc - Tenv) * radCoef * thermostat * airCoef * coolantEff
+-- The extra Q of the PWM airspeed over the base one (radiatorAirSpeed =
+-- max(ram air, base fan)) is removed directly from the coolant integrator
+-- engine.thermals.coolantTemperature.
+-- engineThermalData is one frame old (controllers update before the
+-- powertrain); the delta is zero at speed or with the failsafe fan running,
+-- so nothing is counted twice.
 --
--- Fan law (2026-09-30 feedback: "later, only when clearly too hot, audible"):
---   command duty 0 or dutyMin..1: on at fanOnTemp, linear dutyZeroTemp ->
---   dutyFullTemp, off below fanOffTemp after minOnTime. Load pre-control only
---   from feedForwardMinTemp (map-thermostat emulation; the jbeam sets it to
---   fanOnTemp, which makes it a no-op). Speed gate: no request while the
---   radiator ram air is >= the full-duty fan airspeed (the fan adds nothing
---   there, :765), unless the coolant override is latched (set at
---   speedGateOverrideTemp, cleared speedGateOverrideHyst below it) or the oil
---   is hot. The rotor speed ("spin") follows the command with inertia;
---   airflow, power and sound follow the spin, the published duty follows the
---   command, the HUD stage follows max(command, audible spin).
+-- Fan law: duty 0 or dutyMin..1; on at fanOnTemp, linear dutyZeroTemp ->
+-- dutyFullTemp, off below fanOffTemp after minOnTime; load pre-control from
+-- feedForwardMinTemp. Speed gate: no request while ram air >= the full-duty
+-- fan airspeed, unless the coolant override is latched or the oil is hot.
+-- The rotor (spin) follows the command with inertia; airflow, power and sound
+-- follow the spin, the HUD stage max(command, audible spin).
 --
--- Sound: own loop source on the base fan event (the base fan sound source is a
--- module local without setter, :143/:145/:1876-1881). vol = volumeMax *
--- sqrt(spin), pitch pitchMin..pitchMax. volumeMax should equal
--- mainEngine.radiatorFanVolume so the base failsafe (pitch 1, :719-721) takes
--- over at the same level.
+-- Sound: own loop on the base fan event, vol = volumeMax * sqrt(spin); muted
+-- while the base failsafe fan plays (volumeMax = radiatorFanVolume).
+-- Steam wisps: stock particles at wispEmitNode, pushed away from the radiator
+-- top (out through the hood/grille gap); tiers faint 46 / light 46 / heavy 48,
+-- none from wispStopTemp or while the stock leak / head-gasket steam runs.
 --
--- Steam wisps (optional, wispsEnabled): stock particle types only, emitted
--- with obj:addParticleByNodesRelative (same call as the base radiator steam,
--- :873-878). Emitter: body node wispEmitNode (f15, front crossmember top at
--- x 0, y -1.95, z 0.835, etk800_body_wagon.jbeam:236), pushed away from our
--- radiator top hyb_rad1 (y -1.78, z 0.80), i.e. forward and ~12 deg up towards
--- the hood front edge h4 (y -2.11, z 0.835, etk800_hood.jbeam:96), so the
--- steam leaves through the hood/grille gap instead of rising through the
--- closed hood panel. Fallback without that node: straight up hyb_rad2 ->
--- hyb_rad1. Tiers: faint (type 46, low rate) from wispFaintTemp while the
--- fan runs or after key-off, light 46 from wispOnTemp, heavy 48 from
--- wispHeavyTemp. Handed over to the stock cap steam, which
--- starts above 120 C (:806-812), and suppressed whenever the stock radiator /
--- head-gasket steam already runs (:707-708, :873-885).
---
--- Published electrics:
---   etk854hybrid_fanDuty       0..1  commanded fan duty, 0 or >= dutyMin (failsafe = 1)
---   etk854hybrid_fanStage      0..3  HUD stage of max(duty, spin > stageMinSpin): 0 off,
---                                    1 < 0.60, 2 < 0.90, 3 >= 0.90 / failsafe
---   etk854hybrid_fanFailsafe   0/1   base binary fan (>= radiatorFanTemperature)
---   etk854hybrid_fanPowerW     W     electrical fan power
---   etk854hybrid_coolingExtraKW kW   extra radiator heat flow of the PWM fan
---   etk854hybrid_ambientC      C     environment temperature seen by thermals
---   etk854hybrid_fanSpin       0..1  rotor speed (drives airflow and sound)
---   etk854hybrid_fanSfx        0/1   own fan sound source playing
---   etk854hybrid_wispType      0/46/48 particle type emitted this frame window (0 = none)
---   etk854hybrid_wispCount     n     wisp particles emitted since the last reset
+-- Electrics (etk854hybrid_*): fanDuty 0..1 (command, failsafe 1), fanStage 0..3
+-- (HUD: 1 < 0.6, 2 < 0.9, 3 >= 0.9 / failsafe), fanFailsafe 0/1, fanPowerW W,
+-- coolingExtraKW kW, ambientC C, fanSpin 0..1, fanSfx 0/1, wispType 0/46/48,
+-- wispCount n (since reset).
 
 local M = {}
 
@@ -81,8 +46,8 @@ local abs = math.abs
 local sqrt = math.sqrt
 local random = math.random
 
--- All tunables in ONE table (LuaJIT 60-upvalue limit). Defaults mirror
--- etk854hybrid_cooling.jbeam; every key can be overridden from jbeam.
+-- Tunables in one table (LuaJIT 60-upvalue limit); defaults mirror
+-- etk854hybrid_cooling.jbeam, every key overridable from jbeam.
 local CFG = {
   engineName = "mainEngine",
   fanOnTemp = 105.0,
@@ -91,35 +56,27 @@ local CFG = {
   dutyFullTemp = 112.0,
   dutyMin = 0.35,
   minOnTime = 30,
-  -- command slew between dutyMin and 1 (PWM controller smoothing)
+  -- command slew within dutyMin..1
   rampUpPerSecond = 0.15,
   rampDownPerSecond = 0.05,
   -- rotor inertia: 0 -> 0.35 in 2 s, 0.35 -> 0 in 7 s
   spinUpPerSecond = 0.175,
   spinDownPerSecond = 0.05,
-  fanAirSpeedMin = 1.7, -- airCoef floor 0.1 == 1.67 m/s (:766)
+  fanAirSpeedMin = 1.7, -- airCoef floor 0.1 == 1.67 m/s
   fanAirSpeedMax = 5.0,
-  -- Speed gate on the radiator ram air (0.8 * |frontAirflow|, :765).
-  -- speedGateAirSpeed <= 0 means "use fanAirSpeedMax".
+  -- speed gate on ram air (ramAirFactor * |frontAirflow|, m/s); <= 0: fanAirSpeedMax
   speedGateAirSpeed = 0,
   speedGateReleaseAirSpeed = 4.0,
   speedGateOverrideTemp = 110,
-  -- override latched at >= speedGateOverrideTemp, released below
-  -- speedGateOverrideTemp - speedGateOverrideHyst (no on/off chatter at 110 C)
-  speedGateOverrideHyst = 2.0,
-  -- Pre-control, two load gates: standstill N-charge (etk854hybrid_chargeMode
-  -- PARK/NEUTRAL_MAX, load ~0.23 on the N57S curve) vs. generic high load.
-  -- Only active from feedForwardMinTemp on (no temperature-independent fan);
-  -- feedForwardMinTemp >= fanOnTemp makes it a no-op (dutyMin is reached
-  -- there by the fan law anyway). The speed gate zeroes any request from
-  -- fanAirSpeedMax on, so feedForwardMaxAirSpeed above that has no effect.
+  speedGateOverrideHyst = 2.0, -- override release below OverrideTemp - Hyst
+  -- load pre-control: low gate in a standstill charge (chargeMode PARK /
+  -- NEUTRAL_MAX), drive gate otherwise; feedForwardMinTemp >= fanOnTemp = no-op
   feedForwardLoad = 0.18,
   feedForwardLoadDrive = 0.55,
   feedForwardMaxAirSpeed = 5.0,
   feedForwardDuty = 0.35,
   feedForwardMinTemp = 105.0,
-  -- HUD stage: the rotor counts as running above this spin (audible,
-  -- vol = 0.9 * sqrt(0.05) = 0.2), so the FAN chip stays while it is heard
+  -- HUD: the rotor counts as running above this spin (still audible, vol ~0.2)
   stageMinSpin = 0.05,
   oilFullFanTemp = 125,
   afterRunMaxTime = 660,
@@ -131,37 +88,36 @@ local CFG = {
   volumeMax = 0.90,
   pitchMin = 0.75,
   pitchMax = 1.00,
-  sfxStopSpin = 0.003, -- below this rotor speed the loop is stopped (vol ~0.05)
-  -- steam wisps from the radiator top (stock particle types, see header)
+  sfxStopSpin = 0.003, -- loop stopped below this spin
+  -- steam wisps (see header)
   wispsEnabled = true,
   wispOnTemp = 110,
   wispHeavyTemp = 115,
-  wispStopTemp = 119, -- stock cap steam starts above 120 C (:156, :806)
-  wispMaxAirspeed = 3.0, -- electrics.airspeed m/s
+  wispStopTemp = 119, -- stock cap steam starts above 120 C
+  wispMaxAirspeed = 3.0, -- m/s
   wispRateMin = 0.7, -- particles/s at wispOnTemp
-  wispRateMax = 3.5, -- particles/s from wispHeavyTemp on
-  -- faint tier below wispOnTemp: only while the rotor runs at least
-  -- wispFaintMinSpin (fan on) or after key-off (heat soak)
+  wispRateMax = 3.5, -- particles/s from wispHeavyTemp
+  -- faint tier below wispOnTemp: rotor >= wispFaintMinSpin or after key-off
   wispFaintTemp = 106,
   wispFaintRate = 0.3, -- particles/s
   wispFaintMinSpin = 0.35,
-  -- emitter node name ("" = straight up from hyb_rad1, direction hyb_rad2 -> hyb_rad1)
-  wispEmitNode = "f15",
-  wispSpeedMin = 0.6, -- m/s away from hyb_rad1 (or hyb_rad2 in the fallback)
+  wispEmitNode = "f15", -- "" = straight up from hyb_rad1
+  wispSpeedMin = 0.6, -- m/s
   wispSpeedRand = 0.6,
-  wispLightType = 46, -- BNGP_46 condensation_exhaust, faintest
-  wispHeavyType = 48, -- BNGP_48 steam_light_coolant (stock rad leak <= 95 C, :875)
+  wispLightType = 46, -- condensation_exhaust (faintest)
+  wispHeavyType = 48, -- steam_light_coolant (stock leak steam)
   wispMinCoolantEff = 0.5, -- no wisps once half the coolant is gone
-  -- optional quiet hiss with the heavy wisps (0 = off, no source created)
-  hissEvent = "event:>Vehicle>Failures>failure_radiator", -- same event as base :1872
+  -- optional hiss with the heavy wisps (hissVolumeMax 0 = off)
+  hissEvent = "event:>Vehicle>Failures>failure_radiator",
   hissVolumeMin = 0.05,
   hissVolumeMax = 0.0,
   -- base-model constants (combustionEngineThermals.lua)
-  coolantSpecHeat = 4000, -- :152
-  minCoolantMass = 1.5, -- :154
-  maxCoolantTemp = 130, -- :157
-  airCoefHalf = 15, -- :766
-  airCoefFloor = 0.1, -- :766
+  ramAirFactor = 0.8, -- radiator ram air = ramAirFactor * |frontAirflow|
+  coolantSpecHeat = 4000, -- J/(kg K)
+  minCoolantMass = 1.5, -- kg
+  maxCoolantTemp = 130, -- C
+  airCoefHalf = 15, -- m/s, airCoef = v / (15 + v)
+  airCoefFloor = 0.1,
   kelvinOffset = 273.15
 }
 
@@ -170,8 +126,8 @@ local S = {
   ok = false,
   engine = nil,
   thermals = nil,
-  td = nil, -- thermals.debugData.engineThermalData (updated in place, :917-957)
-  radCoef = 0, -- radiatorArea * radiatorEffectiveness (W/K), :1801
+  td = nil, -- thermals.debugData.engineThermalData (updated in place)
+  radCoef = 0, -- radiatorArea * radiatorEffectiveness (W/K)
   sfx = nil,
   sfxPlaying = false,
   sfxVol = 0,
@@ -249,8 +205,7 @@ local function updateSound(spin, failsafe)
   if not S.sfx then
     return
   end
-  -- While the base failsafe fan runs, the base code plays the same event at
-  -- radiatorFanVolume / pitch 1 (:719-723); stay silent to avoid doubling.
+  -- the base failsafe fan plays the same event; stay silent to avoid doubling
   if failsafe or spin <= CFG.sfxStopSpin then
     stopSound()
     return
@@ -266,8 +221,7 @@ local function updateSound(spin, failsafe)
   end
 end
 
--- Resolves the engine and its thermals module. Returns true when the base
--- thermal model is active and has a coolant radiator.
+-- true when the base thermal model is active with a coolant radiator
 local function resolve()
   S.ok = false
   local engine = powertrain.getDevice(CFG.engineName)
@@ -288,16 +242,13 @@ local function resolve()
   S.thermals = th
   S.td = td
   S.radCoef = radCoef
-  -- Same nodes the base fan sound / radiator steam use (nodes.radiator[1..2],
-  -- :1815, :876-877, :1877-1881): engineGroup "radiator" = hyb_rad1 (top),
-  -- hyb_rad2 (bottom) in jbeam order.
+  -- engineGroup "radiator" as the base fan sound uses: hyb_rad1 (top), hyb_rad2 (bottom)
   local rad = ed.radiator
   local radNodes = type(rad) == "table" and rad._engineGroup_nodes or nil
   S.soundNode = (radNodes and radNodes[1]) or engine.engineNodeID
   S.radTop = radNodes and radNodes[1] or nil
   S.radBottom = radNodes and radNodes[2] or nil
-  -- wisp emitter: named body node pushed away from the radiator top, else
-  -- the radiator top pushed away from the radiator bottom (straight up)
+  -- wisp emitter: named node away from the radiator top, else top away from bottom
   S.wispNode = S.radTop
   S.wispRef = S.radBottom
   if S.radTop and CFG.wispEmitNode ~= "" then
@@ -323,10 +274,9 @@ local function drawBattery(powerW, dt)
   end
 end
 
--- Engine ECU fan request (0 or dutyMin..1) from temperatures, load, ram air and
--- key state.
-local function fanRequest(tc, dt, failsafe, thermostat, ram)
-  local ignition = electrics.values.ignitionLevel or 2
+-- Fan request (0 or dutyMin..1) from temperatures, load, ram air and key state
+-- (ignition = ignitionLevel or 2).
+local function fanRequest(tc, dt, failsafe, thermostat, ram, ignition)
   local keyOn = ignition >= 2
   if keyOn then
     S.keyOffTime = 0
@@ -334,7 +284,7 @@ local function fanRequest(tc, dt, failsafe, thermostat, ram)
     S.keyOffTime = S.keyOffTime + dt
   end
 
-  -- Speed gate with hysteresis (state kept even while the failsafe runs).
+  -- speed gate and coolant override, both with hysteresis (kept during failsafe)
   local gateAir = CFG.speedGateAirSpeed > 0 and CFG.speedGateAirSpeed or CFG.fanAirSpeedMax
   if S.speedGated then
     if ram < CFG.speedGateReleaseAirSpeed then
@@ -343,7 +293,6 @@ local function fanRequest(tc, dt, failsafe, thermostat, ram)
   elseif ram >= gateAir then
     S.speedGated = true
   end
-  -- Coolant override of the gate, latched with hysteresis.
   if tc >= CFG.speedGateOverrideTemp then
     S.gateOverride = true
   elseif tc < CFG.speedGateOverrideTemp - CFG.speedGateOverrideHyst then
@@ -369,12 +318,9 @@ local function fanRequest(tc, dt, failsafe, thermostat, ram)
     want = 1
   end
 
-  -- Pre-control: a running ICE at high load with little ram air gets the fan
-  -- somewhat before fanOnTemp (emulates the map thermostat's lower target at
-  -- high load), but never below feedForwardMinTemp. ignitionCoef is 0 while
-  -- the VCU has the ICE shut down. Low gate only while the VCU runs a
-  -- standstill charge (etk854hybridControl publishes chargeMode
-  -- "PARK"/"NEUTRAL_MAX"; "CRUISE" is driving charge).
+  -- Pre-control (map-thermostat emulation): running ICE (ignitionCoef 0 = shut
+  -- down by the VCU) at high load with little ram air. Low load gate only for
+  -- a standstill charge ("CRUISE" is a driving charge).
   local e = S.engine
   if tc >= CFG.feedForwardMinTemp and keyOn and thermostat >= 0.5 and (e.ignitionCoef or 0) > 0 and not e.isStalled then
     local cm = electrics.values.etk854hybrid_chargeMode
@@ -384,9 +330,8 @@ local function fanRequest(tc, dt, failsafe, thermostat, ram)
     end
   end
 
-  -- Ram air already beats the fan's full airspeed: the fan adds nothing
-  -- (radiatorAirSpeed = max(0.8 * airflow, fanAirSpeed), :765), so stay off
-  -- unless the coolant (latched override) or the oil is clearly too hot.
+  -- ram air beats the full fan airspeed: the fan adds nothing
+  -- (radiatorAirSpeed = max(ram, fan))
   if S.speedGated and not S.gateOverride and not oilHot then
     want = 0
   end
@@ -397,9 +342,9 @@ local function fanRequest(tc, dt, failsafe, thermostat, ram)
   return want
 end
 
--- Steam wisps + optional hiss. Rate-limited by a tick accumulator like the
--- base particles (:796-800) so the density does not depend on frame rate.
-local function updateWisps(dt, tc, td)
+-- Steam wisps + optional hiss; the tick accumulator keeps the density
+-- independent of the frame rate.
+local function updateWisps(dt, tc, td, ignition)
   S.wispType = 0
   S.wispRate = 0
   if not CFG.wispsEnabled or not S.wispNode or not S.wispRef then
@@ -411,12 +356,12 @@ local function updateWisps(dt, tc, td)
   local ok = tc >= CFG.wispOnTemp
   if not ok and tc >= CFG.wispFaintTemp then
     -- faint tier: fan working or heat soak after key-off
-    faint = S.spin >= CFG.wispFaintMinSpin or (electrics.values.ignitionLevel or 2) < 2
+    faint = S.spin >= CFG.wispFaintMinSpin or ignition < 2
     ok = faint
   end
   ok = ok and tc < CFG.wispStopTemp and air < CFG.wispMaxAirspeed
   if ok then
-    -- the stock effects already steam in these cases (:707-708, :873-885)
+    -- the stock effects already steam in these cases
     local th = S.thermals
     if th.headGasketBlown or (td.coolantEfficiency or 1) < CFG.wispMinCoolantEff then
       ok = false
@@ -443,9 +388,7 @@ local function updateWisps(dt, tc, td)
   S.wispTick = min(S.wispTick + rate * dt, 3)
   while S.wispTick >= 1 do
     S.wispTick = S.wispTick - 1
-    -- negative velocity = away from node2 (hyb_rad1 behind -> forward out of
-    -- the hood/grille gap; fallback hyb_rad2 below -> upwards); same sign
-    -- convention as fire.lua:95 and the exhaust smoke (:447, :504)
+    -- negative velocity = away from the reference node (as the base exhaust smoke)
     obj:addParticleByNodesRelative(S.wispNode, S.wispRef, -(CFG.wispSpeedMin + CFG.wispSpeedRand * random()), ptype, 0, 1)
     S.wispCount = S.wispCount + 1
   end
@@ -483,9 +426,10 @@ local function updateGFX(dt)
   local tEnv = obj:getEnvTemperature() - CFG.kelvinOffset
   local failsafe = td.fanActive == true
   local thermostat = td.thermostatStatus or 0
-  local ram = abs(obj:getFrontAirflowSpeed()) * 0.8
+  local ram = abs(obj:getFrontAirflowSpeed()) * CFG.ramAirFactor
 
-  local want = fanRequest(tc, dt, failsafe, thermostat, ram)
+  local ignition = electrics.values.ignitionLevel or 2
+  local want = fanRequest(tc, dt, failsafe, thermostat, ram, ignition)
   if want > 0 then
     if not S.running then
       S.running = true
@@ -496,8 +440,7 @@ local function updateGFX(dt)
     S.running = false
   end
 
-  -- Commanded duty: 0, or a slewed value in dutyMin..1 (a PWM fan starts at
-  -- its minimum duty, it does not creep up from 0).
+  -- command: 0 or slewed within dutyMin..1 (a PWM fan starts at minimum duty)
   local duty = S.duty
   if want <= 0 then
     duty = 0
@@ -529,8 +472,7 @@ local function updateGFX(dt)
     fanAir = CFG.fanAirSpeedMin + (airMax - CFG.fanAirSpeedMin) * spin
   end
 
-  -- Extra heat flow over what the base model applied in the previous frame
-  -- (td is one frame old here, see header).
+  -- extra heat flow over the base model's (td is one frame old, see header)
   S.extraW = 0
   local air0 = td.radiatorAirSpeed or 0
   if fanAir > air0 and thermostat > 0 then
@@ -550,7 +492,7 @@ local function updateGFX(dt)
   drawBattery(S.powerW, dt)
 
   updateSound(spin, failsafe)
-  updateWisps(dt, tc, td)
+  updateWisps(dt, tc, td, ignition)
   electrics.values.etk854hybrid_ambientC = tEnv
   publish(duty, failsafe)
 end
@@ -614,7 +556,7 @@ local function initSounds()
   if not S.ok or not S.soundNode then
     return
   end
-  -- same arguments as the base electric fan source (:1881)
+  -- same arguments as the base electric fan source
   S.sfx = obj:createSFXSource2(CFG.fanSoundEvent, "AudioDefaultLoop3D", "etk854hybridCoolingFan", S.soundNode, 0)
   S.sfxPlaying = false
   if CFG.wispsEnabled and CFG.hissVolumeMax > 0 and S.radTop then
@@ -627,11 +569,9 @@ local function reset()
   resetState()
 end
 
--- Dev/test hook (not bound to any input): sets the coolant temperature to tC
--- through the same public field the PWM emulation writes. Block and cylinder
--- wall are set too, otherwise the 24000 W/K coolant-block coupling (:695)
--- pulls the coolant back within seconds. holdS > 0 pins the coolant value for
--- that many seconds (re-written every frame before the fan logic).
+-- Dev/test hook: sets coolant, block and cylinder wall (else the coupling pulls
+-- the coolant back within seconds) to tC, clamped -40..maxCoolantTemp; holdS > 0
+-- pins the coolant that long. false when the thermals are unavailable.
 local function debugSetCoolant(tC, holdS)
   tC = tonumber(tC)
   if not S.ok or not tC then
@@ -652,6 +592,7 @@ local function debugSetCoolant(tC, holdS)
   return true
 end
 
+-- State snapshot for the QA suite / dev tools (allocates, not for per-frame use).
 local function getState()
   return {
     duty = S.duty,

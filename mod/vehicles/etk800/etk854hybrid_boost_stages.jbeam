@@ -1,48 +1,24 @@
 {
 // ====================================================================
-// ETK 854 ActiveHybrid - E-Boost Stages as selectable configurator parts
+// ETK 854 ActiveHybrid - E-Boost stages (slot etk854hybrid_boost_stage,
+// opened by etk854hybrid_powertrain.jbeam)
 // ====================================================================
-//
-// These parts occupy the "etk854hybrid_boost_stage" slot that
-// etk854hybrid_powertrain.jbeam opens under the ActiveHybrid powertrain.
-//
-// MECHANISM
-// ---------
-// Every part below contributes ONE custom dict section:
-//     "etk854hybridBoostStage": { "stage": N, "label": "..." }
-// jbeam merges each part's sections into the single flat vehicle table
-// (F:\...\BeamNG.drive\lua\common\jbeam\slotSystem.lua:73 unifyParts ->
-//  line 83/101: a section a parent does not define is taken over verbatim,
-//  a dict section is merged key by key).  The merged table is readable from
-//  vehicle Lua as `v.data.etk854hybridBoostStage` - the very same access
-//  path our own etk854hybrid_motorShaft.lua:531 already uses for the custom
-//  `soundConfigP2v2Motor` section, and the one base-game controllers use in
-//  their init (see lua\vehicle\controller\pyrotechnicCharge.lua:50/65).
-//
-// The VCU (etk854hybridControl.lua M.init) reads that section:
-//   stage >= 0  -> the fitted part pins the stage, the $ebooststage tuning
-//                  slider is ignored                       -> log "(part)"
-//   stage <  0  -> "E-Boost: Tuning-Regler" is fitted, the $ebooststage
-//                  slider decides                          -> log "(tuning)"
-//
-// Battery figures: 13.5 kWh LiPo pack.  The discharge/charge budgets scale
-// with the stage so the C-rate stays inside what high-performance PHEV
-// cells actually do (~7 C at stage 0 up to ~17 C at stage 3).  They mirror
-// BOOST_STAGES in etk854hybridControl.lua 1:1 - keep both in sync.
-//
-// SYSTEM TORQUE CAP: a stage is a hardware package, so it also raises the
-// combined ICE+motor ceiling at the converter input by capBonusNm
-// (BOOST_STAGES in etk854hybridControl.lua): +0 / +100 / +220 / +370 Nm on
-// top of the ECU-dependent base (680 Nm series, 950 Nm on the 500 PS N57S).
-// Without that the extra motor torque would simply be trimmed away again at
-// full load and every stage would feel the same above ~60 % pedal.
+// Each part sets v.data.etk854hybridBoostStage = {stage, label}, read by the
+// VCU at init: stage >= 0 pins the stage, stage < 0 leaves it to the
+// $ebooststage tuning slider.
+// The figures in the descriptions mirror BOOST_STAGES in
+// etk854hybridControl.lua (keep in sync). Battery limits scale with the stage
+// so the C-rate stays plausible (~7 C to ~17 C). A stage is a hardware
+// package, so it also raises the system torque cap by +0 / +100 / +220 /
+// +370 Nm over the ECU base (680 / 820 B58S / 950 N57S); otherwise the extra
+// motor torque would be trimmed away at full load.
 // ====================================================================
 
 "etk854hybrid_boost_stage_0": {
     "information": {
         "authors": "Deuflhard",
         "name": "E-Boost Stage 0 (Stock, 265 Nm / 83 kW)",
-        "description": "Stock specification, modeled on current premium plug-in hybrids. E-machine 265 Nm / 83 kW. 13.5 kWh battery: discharge limit 95 kW (~7 C), regen limit 55 kW (~4 C). System torque cap: base value of the fitted ECU without a bonus (680 Nm on B58/N57, 950 Nm on N57S).",
+        "description": "Stock specification, modeled on current premium plug-in hybrids. E-machine 265 Nm / 83 kW. 13.5 kWh battery: discharge limit 95 kW (~7 C), regen limit 55 kW (~4 C). System torque cap: base value of the fitted ECU without a bonus (680 Nm on I4/B58/N57, 820 Nm on B58S, 950 Nm on N57S).",
         "value": 0
     },
     "slotType": "etk854hybrid_boost_stage",
@@ -57,7 +33,7 @@
     "information": {
         "authors": "Deuflhard",
         "name": "E-Boost Stage 1 (320 Nm / 110 kW)",
-        "description": "Uprated inverter and software. E-machine 320 Nm / 110 kW. 13.5 kWh battery: discharge limit 125 kW (~9 C), regen limit 65 kW (~5 C). Noticeably stronger launch, stronger recuperation on overrun. Raises the system torque cap by 100 Nm (780 Nm on B58/N57).",
+        "description": "Uprated inverter and software. E-machine 320 Nm / 110 kW. 13.5 kWh battery: discharge limit 125 kW (~9 C), regen limit 65 kW (~5 C). Noticeably stronger launch, stronger recuperation on overrun. Raises the system torque cap by 100 Nm (780 Nm on I4/B58/N57, 920 Nm on B58S, 1050 Nm on N57S).",
         "value": 2200
     },
     "slotType": "etk854hybrid_boost_stage",
@@ -72,7 +48,7 @@
     "information": {
         "authors": "Deuflhard",
         "name": "E-Boost Stage 2 (400 Nm / 150 kW)",
-        "description": "Larger inverter, uprated cooling. E-machine 400 Nm / 150 kW. 13.5 kWh battery: discharge limit 170 kW (~13 C), regen limit 80 kW (~6 C). Raises the system torque cap by 220 Nm (900 Nm on B58/N57).",
+        "description": "Larger inverter, uprated cooling. E-machine 400 Nm / 150 kW. 13.5 kWh battery: discharge limit 170 kW (~13 C), regen limit 80 kW (~6 C). Raises the system torque cap by 220 Nm (900 Nm on I4/B58/N57, 1040 Nm on B58S, 1170 Nm on N57S).",
         "value": 5400
     },
     "slotType": "etk854hybrid_boost_stage",
@@ -87,7 +63,7 @@
     "information": {
         "authors": "Deuflhard",
         "name": "E-Boost Stage 3 (500 Nm / 200 kW)",
-        "description": "Full-spec build with high-current cell chemistry. E-machine 500 Nm / 200 kW - the full torque plateau of the motor map. 13.5 kWh battery: discharge limit 225 kW (~17 C), regen limit 95 kW (~7 C). Electric range and cell life suffer accordingly. Raises the system torque cap by 370 Nm (1050 Nm on B58/N57, 1320 Nm on N57S).",
+        "description": "Full-spec build with high-current cell chemistry. E-machine 500 Nm / 200 kW - the full torque plateau of the motor map. 13.5 kWh battery: discharge limit 225 kW (~17 C), regen limit 95 kW (~7 C). Electric range and cell life suffer accordingly. Raises the system torque cap by 370 Nm (1050 Nm on I4/B58/N57, 1190 Nm on B58S, 1320 Nm on N57S).",
         "value": 9800
     },
     "slotType": "etk854hybrid_boost_stage",
@@ -107,7 +83,7 @@
     },
     "slotType": "etk854hybrid_boost_stage",
 
-    // stage < 0 == "no part override", the VCU falls back to $ebooststage.
+    // stage < 0: the VCU uses $ebooststage
     "etk854hybridBoostStage": {
         "stage": -1,
         "label": "Tuning Slider"

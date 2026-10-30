@@ -1,50 +1,26 @@
 {
 // =============================================================================
-//  ETK 854 ActiveHybrid - Fahrwerk ("Sportfahrwerk mit adaptiven Daempfern")
+//  ETK 854 ActiveHybrid - sport suspension with adaptive dampers
 // =============================================================================
-//  Ziel: Premium-Diesel-Kombi-Charakter. Flach, satt, praezise um die Mittellage, stabil
-//  beim Rausbeschleunigen. KEIN Rennwagen.
+//  Front struts, self-leveling rear springs, adaptive rear shocks, anti-roll
+//  bars and steering, derived from the stock etk800_suspension_F / _R parts.
+//  Rates are raised for the extra mass (R6 + HV battery) so the natural
+//  frequencies and the front/rear balance stay at stock level.
 //
-//  Grundlage / Belege (Basegame-Extract):
-//    C_CODE/BeamNG_Extract/etk800/vehicles/etk800/etk800_suspension_F.jbeam
-//    C_CODE/BeamNG_Extract/etk800/vehicles/etk800/etk800_suspension_R.jbeam
-//
-//  Adaptiv-Mechanismus: STOCK-Controller
-//    lua/vehicle/controller/drivingDynamics/actuators/adaptiveDampers.lua
-//  Er skaliert beamDamp / beamDampRebound / beamDampFast / beamDampReboundFast /
-//  beamDampVelocitySplit der per "name" adressierten BOUNDED-Daempferbeams mit
-//  den Koeffizienten einer benannten Mode-Zeile und schreibt sie via
-//  obj:setBoundedBeamDamp(). Die Basiswerte in v.data.beams bleiben unveraendert,
-//  jeder Moduswechsel rechnet absolut neu -> driftfrei.
-//
-//  Statt der 3 Stock-Stufen (soft/regular/hard) hinterlegen wir eine LEITER
-//  p080..p150 in 5-%-Schritten. Der Bruecken-Controller
-//  etk854hybrid_adaptiveSusp faehrt diese Leiter stufenweise ab
-//  (-> weiche Rampe statt Sprung) und koppelt sie an
-//  electrics.values.etk854hybrid_deMode (COMFORT / ECO_PRO / SPORT).
-//
-//  Bewusst NICHT "adaptiveFrontDamper"/"adaptiveRearDamper" benannt: unter
-//  diesen Namen greift etk800_dse_drivemodes.jbeam per driveModes.lua zu und
-//  wuerde bei jedem DSE-Knopfdruck unsere Stufe ueberschreiben. Mit eigenem
-//  Namen laeuft getController() dort ins Leere (driveModes.lua:109 prueft auf
-//  nil) -> genau ein Schreiber pro Daempferbeam.
+//  Adaptive damping uses the stock actuator adaptiveDampers.lua: it scales the
+//  five damp fields of the named BOUNDED beams by a mode row, absolute to the
+//  base values (drift-free). The mode rows form a ladder p080..p150 in 5 %
+//  steps; etk854hybrid_adaptiveSusp ramps through it following
+//  etk854hybrid_deMode. Own actuator names (not adaptiveFrontDamper /
+//  adaptiveRearDamper): the stock DSE drive modes address those and would
+//  overwrite the step -> one writer per damper beam.
 // =============================================================================
 
 // -----------------------------------------------------------------------------
-//  VORDERACHSE: Federbein (Feder + adaptiver Daempfer)
-//  Basis: etk800_strut_F (Serie) / etk800_strut_F_tt (ttSport)
-//  alt (Serie)  -> neu
-//    beamSpring          26000  -> 30000  N/m  (+15 %, ttSport-Rate)
-//    beamDamp             4000  ->  5300  N/m/s (+33 %)
-//    beamDampRebound      6900  ->  8000  N/m/s (+16 %)
-//    beamDampVelocitySplit 0.20 ->  0.22
-//  Begruendung: Vorderachse traegt R6-Diesel/Benziner + ~44 kg Batterieanteil.
-//  Federrate haelt die Eigenfrequenz bei ~1.34 Hz (Serie 1.35 Hz), die
-//  hoehere Daempfung nimmt das Nachwippen und schaerft das Einlenken.
-//  Anschlagpuffer: weicher Vor-Anschlag wie ttSport (shortBoundRange 0.06 statt
-//  Serie 0.045), harter Anschlag auf Serienmass belassen (0.08/0.08). Zusammen
-//  mit der Tieferlegung von nur 10 mm bleibt der nutzbare Einfederweg damit
-//  rechnerisch ueber dem Serienstand - trotz Mehrgewicht.
+//  FRONT: strut (spring + adaptive damper), based on etk800_strut_F / _tt
+//  Spring 30000 N/m (stock 26000) keeps ~1.34 Hz with the R6 + battery share;
+//  bump 5300 / rebound 8000 N/m/s (stock 4000 / 6900).
+//  Bump stops: soft pre-stop as ttSport (0.06), hard stop stock (0.08).
 // -----------------------------------------------------------------------------
 "etk854hybrid_strut_F": {
     "information":{
@@ -65,22 +41,18 @@
         ["$etk854_height_F", "range", "+m", "Suspension", -0.010, -0.030, 0.015, "Front Ride Height (vs. Stock)", "Front body height relative to the stock suspension. -0.010 = 10 mm lower (sport suspension level; about -0.030 matches ttSport).", {"stepDis":0.005, "subCategory":"Front"}],
         ["$etk854_damp_F", "range", "N/m/s", "Suspension", 5300, 3500, 9000, "Front Bump Damping (Base)", "Damper rate in compression at the COMFORT baseline (= 100 %). Stock: 4000, ttSport: 7000. The adaptive damper control scales this value per driving mode.", {"stepDis":100, "subCategory":"Front"}],
         ["$etk854_damprebound_F", "range", "N/m/s", "Suspension", 8000, 5000, 12000, "Front Rebound Damping (Base)", "Damper rate in extension at the COMFORT baseline (= 100 %). Stock: 6900, ttSport: 9000.", {"stepDis":100, "subCategory":"Front"}],
-        // Fahrmodus-Kopplung. Die Werte werden auf die 5-%-Leiter p080..p150
-        // gerundet, die weiter unten in "etk854hybrid_damperF"/"...R" liegt.
+        // Per drive mode, rounded to the 5 % ladder p080..p150.
         ["$etk854_susp_comfort", "range", "%", "Suspension", 90, 80, 150, "Damping COMFORT", "Damper firmness in COMFORT mode, as a percentage of the base setup. 100 % = base, lower = softer.", {"stepDis":5, "subCategory":"Adaptive Suspension"}],
         ["$etk854_susp_eco", "range", "%", "Suspension", 100, 80, 150, "Damping ECO PRO", "Damper firmness in ECO PRO mode, as a percentage of the base setup. Factory setting: same as the COMFORT base.", {"stepDis":5, "subCategory":"Adaptive Suspension"}],
         ["$etk854_susp_sport", "range", "%", "Suspension", 140, 80, 150, "Damping SPORT", "Damper firmness in SPORT mode, as a percentage of the base setup. 140 % = noticeably firm, but not harsh.", {"stepDis":5, "subCategory":"Adaptive Suspension"}],
-        // Untergrenze im Anhaengermodus (etk854hybrid_trailerMode == 1): der
-        // Bruecken-Controller nimmt max(Fahrmodus-Stufe, diese Stufe).
+        // Trailer mode: max(drive-mode step, this step).
         ["$etk854_susp_trailer", "range", "%", "Suspension", 115, 80, 150, "Damping Trailer Mode", "Minimum damper firmness with a trailer hitched / in trailer mode (lower limit; SPORT stays firmer).", {"stepDis":5, "subCategory":"Adaptive Suspension"}]
     ],
 
     "controller": [
         ["fileName"],
-        // Stock-Actuator. Eigener Name -> kein Zugriff durch etk_DSE_drivemodes.
         ["drivingDynamics/actuators/adaptiveDampers", {"name":"etk854hybrid_damperF", "dampBeamNames":["shock_FR", "shock_FL"]}],
-        // Bruecke deMode -> Daempferstufe. Sitzt bewusst nur EINMAL im Fahrzeug
-        // (hier vorn) und bedient beide Achsregler ueber getControllerSafe().
+        // Declared once per vehicle (here); drives both axle actuators.
         ["etk854hybrid_adaptiveSusp", {
             "name": "etk854hybrid_adaptiveSusp",
             "frontDamperController": "etk854hybrid_damperF",
@@ -93,10 +65,7 @@
         }]
     ],
 
-    // Leiter 80..150 % in 5-%-Schritten.
-    // Spalten: Druckstufe / Druckstufe schnell / Zugstufe / Zugstufe schnell / Velocity-Split
-    // Zugstufe skaliert vorn mit Faktor 0.85 der Druckstufenaenderung
-    // (Stock-"hard": 1.35 Druck / 1.26 Zug -> gleiche Tendenz).
+    // Ladder 80..150 %; rebound follows 0.85 of the bump change.
     "etk854hybrid_damperF": {
         "modes": [
             ["name", "beamDampCoef", "beamDampFastCoef", "beamDampReboundCoef", "beamDampReboundFastCoef", "beamDampVelocitySplitCoef"],
@@ -120,30 +89,28 @@
 
     "beams": [
           ["id1:", "id2:"],
-          //--FEDER VORN--
+          //--front spring--
           {"beamPrecompression":1, "beamType":"|NORMAL"},
           {"beamDeform":15000,"beamStrength":150000},
           {"beamSpring":"$etk854_spring_F","beamDamp":0},
-          // Vorspannung so gefuehrt, dass die Aufbauhoehe unabhaengig von der
-          // gewaehlten Federrate bleibt:
-          //   2860 = 0.11 m * 26000 N/m  (Serien-Federkraft am Nennpunkt)
-          //    610 = Mehrgewicht pro Vorderrad durch R6 + Batterieanteil [N]
+          // Preload keeps the ride height independent of the spring rate:
+          // 2860 N = stock spring force (0.11 m * 26000), 610 N = R6 + battery per wheel
           ["fh4r","fs1r", {"name":"spring_FR", "precompressionRange":"$=(2860 + 610) / $etk854_spring_F + $etk854_height_F","soundFile":"event:>Vehicle>Suspension>car_modn_med_01>spring_compress_01","colorFactor":0.4,"attackFactor":35,"volumeFactor":2.0,"decayFactor":20,"noiseFactor":0.01,"pitchFactor":0.3,"maxStress":5600}],
           ["fh4l","fs1l", {"name":"spring_FL", "precompressionRange":"$=(2860 + 610) / $etk854_spring_F + $etk854_height_F","soundFile":"event:>Vehicle>Suspension>car_modn_med_01>spring_compress_01","colorFactor":0.4,"attackFactor":35,"volumeFactor":2.0,"decayFactor":20,"noiseFactor":0.01,"pitchFactor":0.3,"maxStress":5600}],
-          //--DAEMPFER VORN (adaptiv)--
-          // ALLE fuenf Damp-Felder muessen gesetzt sein - adaptiveDampers.lua:33-37
-          // multipliziert sie roh; ein fehlendes Feld knallt erst beim Moduswechsel.
+          //--front damper (adaptive)--
+          // All five damp fields must be set: adaptiveDampers.lua multiplies them
+          // raw, a missing one fails only at the first mode change.
           {"beamPrecompression":1.0, "beamType":"|BOUNDED", "beamLongBound":1, "beamShortBound":1},
           {"beamSpring":0,"beamDamp":"$etk854_damp_F"},
           {"beamLimitSpring":0,"beamLimitDamp":0},
           ["fh1r","fs1r", {"name":"shock_FR", "beamDampFast":"$=$etk854_damp_F * 0.32","beamDampRebound":"$etk854_damprebound_F","beamDampReboundFast":"$=$etk854_damprebound_F * 0.33","beamDampVelocitySplit":0.22,"dampCutoffHz":500}],
           ["fh1l","fs1l", {"name":"shock_FL", "beamDampFast":"$=$etk854_damp_F * 0.32","beamDampRebound":"$etk854_damprebound_F","beamDampReboundFast":"$=$etk854_damprebound_F * 0.33","beamDampVelocitySplit":0.22,"dampCutoffHz":500}],
-          //--weicher Vor-Anschlag--
+          //--soft pre-stop--
           {"beamSpring":0,"beamDamp":0},
           {"beamLimitSpring":51000,"beamLimitDamp":1000},
           ["fh4r","fs1r", {"longBoundRange":1,"shortBoundRange":0.06,"boundZone":0.1,"beamLimitDampRebound":0,"dampCutoffHz":500}],
           ["fh4l","fs1l", {"longBoundRange":1,"shortBoundRange":0.06,"boundZone":0.1,"beamLimitDampRebound":0,"dampCutoffHz":500}],
-          //--harter Anschlag--
+          //--hard stop--
           {"beamSpring":0,"beamDamp":0},
           {"beamLimitSpring":251000,"beamLimitDamp":10000},
           ["fh4r","fs1r", {"longBoundRange":0.08,"shortBoundRange":0.08,"boundZone":0.05,"beamLimitDampRebound":0,"dampCutoffHz":500}],
@@ -153,45 +120,21 @@
 },
 
 // -----------------------------------------------------------------------------
-//  HINTERACHSE: Feder
-//  Basis: etk800_spring_R
-//  alt -> neu:  beamSpring 33000 -> 37000 N/m (+12 %)
-//  Begruendung: 150 kg Batterie sitzen bei y=0.5..0.7, also ~106 kg auf der
-//  Hinterachse (53 kg/Rad). +12 % Rate haelt die Hinterachs-Eigenfrequenz bei
-//  ~1.47 Hz (Serie 1.48 Hz) - die Balance Vorn/Hinten bleibt damit exakt wie
-//  im Serienauto. Bewusst NICHT hoeher: ein relativ zur Vorderachse zu
-//  straffes Heck ist eine der Hauptursachen fuer giftiges Lastwechselverhalten.
-//  Der Hoehenverlust durch die Batterie wird statisch ueber die Vorspannung
-//  ausgeglichen.
+//  REAR: spring with self-leveling, based on etk800_spring_R
+//  37000 N/m (stock 33000, +12 %) for the ~106 kg battery share on the rear
+//  axle: keeps ~1.47 Hz and the stock front/rear balance (a relatively stiff
+//  rear makes lift-off snappy). The preload compensates the battery's height loss.
 //
-//  NIVEAUREGULIERUNG (P6, Analogie zur Luftfeder hinten eines Premium-Kombis):
-//  Controller etk854hybrid_selfLeveling (lua/controller/) misst die Laenge
-//  der beiden Federbeams spring_RR/spring_RL (Uebersetzung ~1, Beam sitzt am
-//  Radtraeger rh1*) und verlaengert unter Zuladung langsam deren Ruhelaenge
-//  per obj:setPrecompressionRatio(cid, (refLen + offset)/refLen) - absolut,
-//  also driftfrei. ACHTUNG: die Ratio bezieht sich auf die Ref-Laenge des
-//  Beams (= Ruhelaenge inkl. precompressionRange, hier 0.4297 m), NICHT auf
-//  die Spawnlaenge (2026-09-30 gemessen; die erste Version schrieb 1.3518 und
-//  hob das Heck bei jedem R um ~90 mm auf die Zuganschlaege).
-//  Das entspricht einer Luftfeder, die nachgepumpt wird: die
-//  Vorspannung steigt, die Federrate (und damit die Balance vorn/hinten, s.o.)
-//  bleibt unveraendert. Keine neuen Nodes/Beams/Meshes.
-//  Warum noetig: der weiche Vor-Anschlag hinten greift 35 mm unter der
-//  Spawnlaenge (etk854hybrid_shock_R). 100 kg Kofferraum (~16 mm) + 75 kg
-//  Stuetzlast (~14 mm) + Grundniveau -10 mm = 40 mm -> ohne Regelung faehrt
-//  das Heck mit Anhaenger auf dem Anschlagpuffer.
-//  Lastschaetzung: 2 * k * offset / 9.81 = ~7.5 kg pro mm bei 37000 N/m
-//  (ueberschaetzt bei tiefem Einfedern, weil der Vor-Anschlag mittraegt).
-//  Gemessen (N57S AWD): Ruhelaenge unbeladen 309-310 mm (Konstruktion
-//  307.9 mm), 250 kg Kofferraum = 39 mm Einfederung, Ausgleich braucht ~51 mm
-//  Hub. maxRaise 0.055 m = 2035 N/Seite; statische Federkraft 4508 + 2035 =
-//  6543 N bleibt weit unter beamDeform 15000 N.
-//  Ausfederweg: geregelt wird nur zurueck auf L0 + $etk854_height_R
-//  (+ Anhaengermodus-Hub), der harte Zuganschlag (longBoundRange 0.08 ab
-//  Spawnlaenge) wird also nie staerker beansprucht als unbeladen.
-//  Die Federbeams bekommen bewusst KEIN beamPrecompressionTime: sonst
-//  ueberschreibt beamstate.update (beamstate.lua:742-765) die Ratio waehrend
-//  der Rampe.
+//  Self-leveling (etk854hybrid_selfLeveling, like a rear air spring) extends the
+//  rest length of spring_RR / spring_RL under load via
+//  obj:setPrecompressionRatio(cid, (refLen + offset) / refLen); refLen is the
+//  reference length incl. precompressionRange, not the spawn length. Needed
+//  because trunk load + tongue load + the -10 mm base level reach the rear
+//  pre-stop (35 mm). ~7.5 kg per mm at 37000 N/m; maxRaise 0.055 m (~250 kg)
+//  stays well below beamDeform. Leveling never lifts above the base level
+//  (+ trailer lift), so the rebound stop sees no more load than unladen.
+//  No beamPrecompressionTime on these beams: beamstate.update would overwrite
+//  the ratio during its ramp.
 // -----------------------------------------------------------------------------
 "etk854hybrid_spring_R": {
     "information":{
@@ -218,9 +161,8 @@
 
     "controller": [
         ["fileName"],
-        // Nur in DIESEM Teil deklariert: mit der Serienfeder hinten gibt es
-        // keine Niveauregulierung, etk854hybrid_adaptiveSusp uebernimmt dann
-        // den Kanal etk854hybrid_trailerMode (manueller Schalter).
+        // Declared only here; with the stock rear spring etk854hybrid_adaptiveSusp
+        // owns etk854hybrid_trailerMode (manual switch).
         ["etk854hybrid_selfLeveling", {
             "name": "etk854hybrid_selfLeveling",
             "springBeamNames": ["spring_RR", "spring_RL"],
@@ -229,7 +171,7 @@
             "springRate": "$etk854_spring_R",
             "maxRaise": "$etk854_level_maxRaise",
             "trailerLift": "$etk854_level_trailerLift",
-            // mm/s, Division durch 1000 im Lua (kein "$=" im Controllerblock).
+            // mm/s (rateDriving: m/s)
             "rateStandstillMmps": "$etk854_level_rate",
             "rateDriving": 0.001,
             "trailerCouplerTags": ["tow_hitch", "pintle", "gooseneck_hitch"],
@@ -242,8 +184,7 @@
           {"beamPrecompression":1, "beamType":"|NORMAL"},
           {"beamDeform":15000,"beamStrength":150000},
           {"beamSpring":"$etk854_spring_R","beamDamp":0},
-          // 3993 = 0.121 m * 33000 N/m (Serien-Federkraft am Nennpunkt)
-          //  515 = Mehrgewicht pro Hinterrad durch die HV-Batterie [N]
+          // 3993 N = stock spring force (0.121 m * 33000), 515 N = battery per wheel
           ["rh1r","r1rr", {"name":"spring_RR", "precompressionRange":"$=(3993 + 515) / $etk854_spring_R + $etk854_height_R","soundFile":"event:>Vehicle>Suspension>car_modn_med_01>spring_compress_01","colorFactor":0.4,"attackFactor":35,"volumeFactor":1.9,"decayFactor":20,"noiseFactor":0.01,"pitchFactor":0.3,"maxStress":"$=5600 + $etk854_spring_R * $etk854_level_maxRaise"}],
           ["rh1l","r1ll", {"name":"spring_RL", "precompressionRange":"$=(3993 + 515) / $etk854_spring_R + $etk854_height_R","soundFile":"event:>Vehicle>Suspension>car_modn_med_01>spring_compress_01","colorFactor":0.4,"attackFactor":35,"volumeFactor":1.9,"decayFactor":20,"noiseFactor":0.01,"pitchFactor":0.3,"maxStress":"$=5600 + $etk854_spring_R * $etk854_level_maxRaise"}],
           {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0}
@@ -251,18 +192,11 @@
 },
 
 // -----------------------------------------------------------------------------
-//  HINTERACHSE: Daempfer (adaptiv)
-//  Basis: etk800_shock_R (Serie) / etk800_shock_R_tt
-//  alt (Serie)  -> neu
-//    beamDamp             4000  ->  5000  N/m/s (+25 %)
-//    beamDampRebound      6800  ->  7700  N/m/s (+13 %)
-//  Bewusst KLEINERE relative Steigerung als vorn (+33 %/+16 %). Ein Heck, das
-//  haerter gedaempft ist als die Front, kippt beim Lastwechsel schneller weg -
-//  genau das "snappy"-Gefuehl. Zusaetzlich skaliert die Zugstufe hinten in der
-//  Adaptiv-Leiter nur mit Faktor 0.70 (vorn 0.85), damit SPORT das Heck nicht
-//  ueber die Zugstufe "runterzieht".
-//  Ausfederweg (longBoundRange 0.08) bewusst auf Serienmass belassen (ttSport:
-//  0.06) - mehr Ausfederweg haelt das kurveninnere Hinterrad laenger am Boden.
+//  REAR: adaptive shocks, based on etk800_shock_R / _tt
+//  Bump 5000 / rebound 7700 N/m/s (stock 4000 / 6800): a smaller increase than
+//  the front, and the ladder rebound follows only 0.70 of the bump change (front
+//  0.85) - a rear damped harder than the front lets go on lift-off.
+//  Rebound travel stays stock: more droop keeps the inside rear wheel down.
 // -----------------------------------------------------------------------------
 "etk854hybrid_shock_R": {
     "information":{
@@ -311,19 +245,19 @@
 
     "beams": [
           ["id1:", "id2:"],
-          //--DAEMPFER HINTEN (adaptiv)--
+          //--rear damper (adaptive)--
           {"beamPrecompression":1.0, "beamType":"|BOUNDED", "beamLongBound":1.0, "beamShortBound":1.0},
           {"beamDeform":15000,"beamStrength":150000},
           {"beamLimitSpring":0,"beamLimitDamp":0},
           {"beamSpring":0,"beamDamp":"$etk854_damp_R"},
           ["rh1r","r1rr", {"name":"shock_RR", "beamDampFast":"$=$etk854_damp_R * 0.33","beamDampRebound":"$etk854_damprebound_R","beamDampReboundFast":"$=$etk854_damprebound_R * 0.335","beamDampVelocitySplit":0.22,"dampCutoffHz":500}],
           ["rh1l","r1ll", {"name":"shock_RL", "beamDampFast":"$=$etk854_damp_R * 0.33","beamDampRebound":"$etk854_damprebound_R","beamDampReboundFast":"$=$etk854_damprebound_R * 0.335","beamDampVelocitySplit":0.22,"dampCutoffHz":500}],
-          //--weicher Vor-Anschlag--
+          //--soft pre-stop--
           {"beamSpring":0,"beamDamp":0},
           {"beamLimitSpring":61000,"beamLimitDamp":1000},
           ["rh1r","r1rr", {"longBoundRange":1,"shortBoundRange":0.035,"boundZone":0.1,"beamLimitDampRebound":0,"dampCutoffHz":500}],
           ["rh1l","r1ll", {"longBoundRange":1,"shortBoundRange":0.035,"boundZone":0.1,"beamLimitDampRebound":0,"dampCutoffHz":500}],
-          //--harter Anschlag--
+          //--hard stop--
           {"beamSpring":0,"beamDamp":0},
           {"beamLimitSpring":251000,"beamLimitDamp":10000},
           ["rh1r","r1rr", {"longBoundRange":0.08,"shortBoundRange":0.08,"boundZone":0.05,"beamLimitDampRebound":0,"dampCutoffHz":500}],
@@ -333,15 +267,9 @@
 },
 
 // -----------------------------------------------------------------------------
-//  STABILISATOR VORN
-//  Basis: etk800_swaybar_F (torsionbar spring 4073 = 27 mm)
-//  alt 4073 (27 mm) -> neu 5420 (29 mm), +33 %
-//  Massstab aus dem Basegame-Kommentar in etk800_suspension_F.jbeam:
-//    24 mm 2543 | 25 mm 2994 | 26 mm 3502 | 27 mm 4073 | 28 mm 4710 | 29 mm 5420
-//  (ttSport = 4710/28 mm). 29 mm ist ein realistischer OE-Sportfahrwerk-Querschnitt,
-//  kein Renn-Bauteil.
-//  Wanken ist die Hauptbeschwerde: Waelzsteifigkeit steigt hier am direktesten,
-//  ohne den Federungskomfort auf Bodenwellen anzutasten.
+//  FRONT ANTI-ROLL BAR, based on etk800_swaybar_F
+//  29 mm equivalent (stock 27 mm, ttSport 28 mm): a realistic OE sport size;
+//  raises roll stiffness without touching ride comfort over bumps.
 // -----------------------------------------------------------------------------
 "etk854hybrid_swaybar_F": {
     "information":{
@@ -371,9 +299,8 @@
 
     "variables": [
         ["name", "type", "unit", "category", "default", "min", "max", "title", "description"],
-        // Gleiche Groesse/Einheit wie das Basegame-Rennteil etk800_swaybar_F_race:
-        // Steifigkeit an den Koppelstangen, Hebelarm 0.321 m.
-        // 39530 = Serie 27 mm | 45720 = 28 mm | 52600 = 29 mm (Vorgabe)
+        // Stiffness at the end links, lever arm 0.321 m (as etk800_swaybar_F_race):
+        // 39530 = 27 mm (stock) | 45720 = 28 mm | 52600 = 29 mm
         ["$etk854_arb_F", "range", "N/m", "Suspension", 52600, 36000, 68000, "Front Anti-Roll Spring Rate", "Stiffness of the front anti-roll bar, measured at the end links. Stock ETK 854 equals 39500 N/m (27 mm), ttSport 45700 N/m (28 mm), default here 52600 N/m (29 mm).", {"stepDis":500, "subCategory":"Front"}]
     ],
 
@@ -399,17 +326,10 @@
 },
 
 // -----------------------------------------------------------------------------
-//  STABILISATOR HINTEN
-//  Basis: etk800_swaybar_R (torsionbar spring 506 = 14 mm - sehr weich)
-//  alt 506 (14 mm) -> neu 864 (16 mm)
-//  Massstab aus etk800_suspension_R.jbeam: 14 mm 506 | 15 mm 667 | 16 mm 864 |
-//  17 mm 1101 (= ttSport).
-//  Absolut deutlich straffer, aber bewusst UNTER ttSport. Das Verhaeltnis
-//  vorn:hinten faellt von 8.05 (4073/506) auf 6.27 (5420/864) - also relativ
-//  mehr Hinterachse, was das Einlenken schaerft, ohne den 17-mm-Sprung des
-//  ttSport zu machen, der die Hinterachse beim Lastwechsel loesen wuerde.
-//  ERSTE STELLSCHRAUBE, falls das Heck weiterhin giftig wirkt: hier auf
-//  667 N/m-Aequivalent (= 15 mm, $etk854_arb_R = 15700) zurueckgehen.
+//  REAR ANTI-ROLL BAR, based on etk800_swaybar_R
+//  16 mm equivalent (stock 14 mm, ttSport 17 mm): front:rear roll ratio 8.05 ->
+//  6.27 sharpens turn-in without unsettling the rear on lift-off. First knob if
+//  the rear feels snappy: 15 mm ($etk854_arb_R = 15720).
 // -----------------------------------------------------------------------------
 "etk854hybrid_swaybar_R": {
     "information":{
@@ -439,8 +359,8 @@
 
     "variables": [
         ["name", "type", "unit", "category", "default", "min", "max", "title", "description"],
-        // Hebelarm 0.206 m (wie etk800_swaybar_R_race).
-        // 11920 = Serie 14 mm | 15720 = 15 mm | 20360 = 16 mm | 25950 = 17 mm (ttSport)
+        // Lever arm 0.206 m (as etk800_swaybar_R_race):
+        // 11920 = 14 mm (stock) | 15720 = 15 mm | 20360 = 16 mm | 25950 = 17 mm
         ["$etk854_arb_R", "range", "N/m", "Suspension", 20360, 10000, 28000, "Rear Anti-Roll Spring Rate", "Stiffness of the rear anti-roll bar, measured at the end links. Stock ETK 854 equals 11900 N/m (14 mm), default here 20400 N/m (16 mm), ttSport 26000 N/m (17 mm). Less = more forgiving rear when accelerating out of a corner, more = sharper turn-in.", {"stepDis":500, "subCategory":"Rear"}]
     ],
 
@@ -466,14 +386,9 @@
 },
 
 // -----------------------------------------------------------------------------
-//  LENKUNG
-//  Basis: etk800_steering (1:1 uebernommen bis auf steeringWheelLock)
-//  alt steeringWheelLock 510 -> neu 450 (per $etk854_steerlock)
-//  510 Grad je Richtung = 2.83 Lenkradumdrehungen von Anschlag zu Anschlag.
-//  450 Grad = 2.50 Umdrehungen - naeher am Referenzfahrzeug (ca. 2.7) und leicht darunter,
-//  also direkter um die Mittellage bei UNVERAENDERTEM maximalem Radeinschlag
-//  (hydro factor bleibt 0.14). Das ist kein Renn-Lenkgetriebe: die
-//  Basegame-Rennlenkung liegt bei 275, Drift bei 450 mit groesserem factor.
+//  STEERING, based on etk800_steering (1:1 except steeringWheelLock)
+//  450 deg per side = 2.50 turns lock to lock (stock 510 deg = 2.83): more
+//  direct with the same maximum wheel angle (hydro factor stays 0.14).
 // -----------------------------------------------------------------------------
 "etk854hybrid_steering": {
     "information":{

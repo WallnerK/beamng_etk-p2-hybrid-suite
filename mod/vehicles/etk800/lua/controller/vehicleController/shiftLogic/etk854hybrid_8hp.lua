@@ -4,34 +4,22 @@
 
 -- ============================================================================
 -- ETK 854 ActiveHybrid - etk854hybrid_8hp shift logic
--- Derived from BeamNG.drive 0.39.4
---   lua/vehicle/controller/vehicleController/shiftLogic/automaticGearbox.lua
--- Everything vehicleController calls (vehicleController.lua :205, :478-633,
--- :635-719, :916-926, :1124-1135) is kept with the base semantics; the
--- changes are confined to these hook points, all delegating to
+-- Derived from BeamNG.drive 0.39.4 vehicleController/shiftLogic/automaticGearbox.lua.
+-- Base semantics kept; changes only at the hook points Hn, decisions in
 -- etk854hybrid_8hpCore.lua:
---   H1 init: fresh mode lookups (the base never clears existingModeLookup /
---      hShifterModeLookup), core.init, optional temporary-manual paddles
---   H2 determineTargetGearIndex -> core.decide (D / S, arcade and realistic)
---   H3 no throttle cut while shifting (unless legacyPedalCut): the shift
---      logic's throttle IS the hybrid VCU's pedal input
---      (vehicleController.lua:544 -> etk854hybridControl.lua pedalRaw), the
---      torque intervention runs through etk854hybrid_shiftTorqueCoef instead;
---      M<n> manual mode gets core.manualOverride (kickdown / EV lug)
---   H4 updateTorqueConverter -> core.lockup
---   H5 updateWhileShiftingShared: gear change time and ignition cut from the
---      core, NO downshift throttle blip (it would be a full-pedal request to
---      the VCU for one frame)
---   H6 shiftingAggression = adaptation index of the 8HP program
---   H7 getGearName reports M<n> while temporary manual is active
---   H8 core.publish every GFX frame
---   H9 M.setProgram / M.getProgram / M.getDebug
---   H10 lever D <-> S while rolling keeps the gear (no drop to the lowest gear)
--- Loader note: vehicleController.lua:1119 checks FS:fileExists only in the
--- global lua/vehicle tree, so this vehicle-local file is reached through the
--- legacy path controller/shiftLogic-etk854hybrid_8hp.lua (one-line shim next
--- to lua/controller/), which requires this file (main.lua:212 puts the
--- vehicle's lua folder first in package.path).
+--   H1 init: rebuild mode lookups, core.init, optional temporary-manual paddles
+--   H2 determineTargetGearIndex -> core.decide
+--   H3 no throttle cut while shifting (the throttle IS the VCU pedal input; torque
+--      intervention via etk854hybrid_shiftTorqueCoef, legacyPedalCut restores the
+--      base cut for a VCU without it); M<n> -> core.manualOverride
+--   H4 lock-up -> core.lockup        H5 shift time / ignition cut from the core
+--   H6 shiftingAggression = 8HP adaptation index
+--   H7 gear name M<n> in temporary manual          H8 core.publish every frame
+--   H9 setProgram / getProgram / getDebug          H10 D <-> S keeps the gear
+--   H11 temporary-manual paddle taps   H12 isEngineRunning = hybrid READY
+--   H13 arcade: two-pedal standstill engages the forward mode
+-- vehicleController only looks in the global lua/vehicle tree, so this file is
+-- loaded through the one-line shim controller/shiftLogic-etk854hybrid_8hp.lua.
 -- ============================================================================
 
 local M = {}
@@ -111,10 +99,8 @@ local automaticHandling = {
   legacyPedalCut = false
 }
 
--- H4: the lock-up policy lives in the core; only the presence flag stays here
-local torqueConverterHandling = {
-  hasTorqueConverter = false
-}
+-- H4: lock-up policy lives in the core; only the presence flag stays here
+local hasTorqueConverter = false
 
 --shift LEDs are in use if we are in manual control over the gear selection
 local function areShiftLEDsInUse()
@@ -122,7 +108,7 @@ local function areShiftLEDsInUse()
 end
 
 local function getGearName()
-  -- H7: the series car shows M<gear> while the paddles hold a temporary manual gear
+  -- H7
   if core.isTempManual() then
     return "M" .. tostring(gearbox.gearIndex)
   end
@@ -142,7 +128,7 @@ end
 local function applyGearboxModeRestrictions()
   local manualModeIndex
   if string.sub(automaticHandling.mode, 1, 1) == "M" then
-    manualModeIndex = string.sub(automaticHandling.mode, 2)
+    manualModeIndex = tonumber(string.sub(automaticHandling.mode, 2))
   end
   local maxGearIndex = gearbox.maxGearIndex
   local minGearIndex = gearbox.minGearIndex
@@ -222,10 +208,8 @@ local function setDefaultForwardMode(mode)
   end
 end
 
--- H10: lever D <-> S while rolling forward keeps the engaged gear and lets the
--- program decide (series car: S drops one or two gears via the SPORT map). The base
--- resets to the LOWEST gear below 0.9 * maxAV here, i.e. an instant multi-gear
--- drop at speed (8th -> 3rd at 80 km/h).
+-- H10: D <-> S while rolling keeps the gear and lets the program decide; the base
+-- drops straight to the lowest gear below 0.9 * maxAV.
 local function keepsForwardGear(previousMode, newMode)
   return (previousMode == "D" or previousMode == "S") and (newMode == "D" or newMode == "S") and gearbox.gearIndex >= 1
 end
@@ -317,10 +301,8 @@ local function shiftDown()
   applyGearboxModeRestrictions()
 end
 
--- H1/H11: temporary-manual paddle taps (only installed when the jbeam flag
--- etk854hybrid8hp.paddleTempManual is true). Taps the core does not consume
--- fall through to the normal lever logic, so D -> N -> R at standstill and
--- all non-D modes behave exactly like the base.
+-- H11 (only with etk854hybrid8hp.paddleTempManual): taps the core does not
+-- consume fall through to the base lever logic.
 local function shiftUpOnDownTempManual()
   if not core.tempManual(1, M) then
     M.shiftUp()
@@ -376,16 +358,10 @@ local function updateExposedData()
   M.flywheelTorque = engine and engine.outputTorque1 or 0
   M.gearboxTorque = gearbox and gearbox.outputTorque1 or 0
   local running = (engine and engine.starterMaxAV and engine.starterEngagedCoef) and ((engine.outputAV1 > engine.starterMaxAV * 0.8 and engine.starterEngagedCoef <= 0) and 1 or 0) or 1
-  -- H12: hybrid READY. The P2 sequencer (etk854hybrid_iceSequencer) switches
-  -- the ICE off ON PURPOSE in EV operation and owns every start (the starter
-  -- is locked through engine.starterDisabled). vehicleController's
-  -- handleStalling (realistic branch, vehicleController.lua:323-346) shows
-  -- "engine is off - use the starter" every frame while ignitionLevel >= 2 and
-  -- isEngineRunning == 0. The drive system IS running: report 1 while the VCU
-  -- is alive (it publishes etk854hybrid_iceEngageState every frame), the key
-  -- is on and the engine is healthy. A damaged (isDisabled) engine keeps the
-  -- stock semantics. Side effect by intent: electrics.engineRunning (VC:565,
-  -- dash battery light / outgauge) now means "READY", like the series car.
+  -- H12: hybrid READY. The ICE sequencer stops the ICE on purpose and owns every
+  -- start; with 0 here handleStalling would nag "use the starter" every frame.
+  -- Report 1 while the VCU is alive (publishes etk854hybrid_iceEngageState), the
+  -- key is on and the engine healthy. electrics.engineRunning then means READY.
   if running == 0 and engine and not engine.isDisabled and (electrics.values.ignitionLevel or 0) >= 2
      and type(electrics.values.etk854hybrid_iceEngageState) == "string" then
     running = 1
@@ -394,26 +370,25 @@ local function updateExposedData()
   M.isShifting = gearbox and gearbox.isShifting or false
   M.minGearIndex = gearbox.minGearIndex
   M.maxGearIndex = gearbox.maxGearIndex
-  -- H6: the 8HP adaptation index instead of vehicleController's aggression
+  -- H6
   M.shiftingAggression = core.adapt()
 end
 
--- H2: the whole gear decision (incl. its own timing) lives in the core; the
--- base gearChangeDelayTimer / throttle-stable gates are gone
+-- H2: decision and timing in the core (no base delay / throttle-stable gates)
 local function determineTargetGearIndex(dt)
   return core.decide(dt, M)
 end
 
 -- H4
 local function updateTorqueConverter(dt)
-  if not torqueConverterHandling.hasTorqueConverter then
+  if not hasTorqueConverter then
     return
   end
 
   electrics.values.lockupClutchRatio = core.lockup(dt, M)
 end
 
--- H5
+-- H5: no downshift blip (it would be a one-frame full-pedal request to the VCU)
 local function updateWhileShiftingShared(dt)
   local gearChangeTime, cutIgnition = core.onShiftStart(newDesiredGearIndex, M)
   if cutIgnition and engine and engine.cutIgnition then
@@ -473,12 +448,8 @@ local function updateInGearArcade(dt)
         applyGearboxMode()
         applyGearboxModeRestrictions()
       end
-      -- H9 (feedback round 2): two-pedal standstill (brake held + throttle
-      -- past half travel) engages / keeps the forward mode in arcade too. The
-      -- base rule above needs brakeInput <= 0, so a braked standstill stayed
-      -- in N (then R) and launch control / the brake-throttle guard
-      -- (etk854hybrid_launchControl) never saw a forward gear. Not when
-      -- rolling backwards (avgAV <= -1).
+      -- H13: brake + throttle > 0.5 at standstill engages the forward mode for
+      -- launch control; the base rule above leaves a braked standstill in N.
       if M.smoothedValues.throttleInput > 0.5 and M.inputValues.throttle > 0.5 and M.inputValues.brake > 0.1
          and abs(M.smoothedValues.avgAV) < M.gearboxHandling.arcadeAutoBrakeAVThreshold and gearIndex < 1 then
         gearIndex = 1
@@ -507,7 +478,7 @@ local function updateInGearArcade(dt)
   end
 
   M.throttle = automaticHandling.mode ~= "N" and M.throttle or 0
-  -- H3: no pedal cut unless the VCU cannot apply etk854hybrid_shiftTorqueCoef
+  -- H3
   if automaticHandling.legacyPedalCut then
     M.throttle = gearbox.isShiftingUp and min(M.throttle, automaticHandling.throttleCoefWhileShifting) or M.throttle
   end
@@ -560,7 +531,7 @@ local function updateInGear(dt)
 
   local isSportMode = automaticHandling.mode == "S"
 
-  -- H3: no pedal cut unless the VCU cannot apply etk854hybrid_shiftTorqueCoef
+  -- H3
   if automaticHandling.legacyPedalCut then
     M.throttle = (gearbox.isShiftingUp and not isSportMode) and min(M.throttle, automaticHandling.throttleCoefWhileShifting) or M.throttle
   end
@@ -630,8 +601,7 @@ local function init(jbeamData, sharedFunctionTable)
     automaticHandling.availableModeLookup[v] = true
   end
 
-  -- H1: rebuild every lookup on each init (init runs again on every reset,
-  -- vehicleController.lua:917, while the module stays cached by require)
+  -- H1: rebuild the lookups (init reruns on every reset, require caches the module)
   automaticHandling.modes = {}
   automaticHandling.modeIndexLookup = {}
   automaticHandling.existingModeLookup = {}
@@ -674,7 +644,7 @@ local function init(jbeamData, sharedFunctionTable)
     automaticHandling.hShifterModeLookup = {[-1] = "R", [0] = "N", "P", "D", "S", "2", "1", "M1"}
   end
 
-  torqueConverterHandling.hasTorqueConverter = torqueConverter ~= nil
+  hasTorqueConverter = torqueConverter ~= nil
 
   local defaultMode = jbeamData.defaultAutomaticMode or "N"
   local defaultForwardMode = jbeamData.defaultAutomaticForwardMode or forwardModes[1] or "D"
@@ -707,10 +677,10 @@ local function init(jbeamData, sharedFunctionTable)
 
   applyGearboxMode()
 
-  -- H1: decision core (re-creates ALL of its state on every init)
+  -- H1: the core re-creates all its state
   core.init(jbeamData, engine, gearbox, torqueConverter, sharedFunctions, automaticHandling)
   automaticHandling.legacyPedalCut = core.P.legacyPedalCut == true
-  -- paddle hooks are looked up at call time (vehicleController.lua:635-660)
+  -- vehicleController looks the paddle hooks up at call time
   if core.P.paddleTempManual then
     M.shiftUpOnDown = shiftUpOnDownTempManual
     M.shiftDownOnDown = shiftDownOnDownTempManual
@@ -737,13 +707,12 @@ local function setState(data)
   end
 end
 
--- H9: program override for other Lua (VCU, UI apps, QA). Reach this module
--- through package.loaded["controller/vehicleController/shiftLogic/etk854hybrid_8hp"]
--- (or the legacy key "controller/shiftLogic-etk854hybrid_8hp", same table).
--- p = nil / "AUTO" (follow the driving experience) | "ECO" | "COMFORT" | "SPORT"
---     -> automatic program, lever S / M<n> return to D (gear kept, H10)
--- p = "MANUAL" -> the M gate: hold the engaged gear as M<g>, the driver
---     shifts (realistic behaviour only; arcade has no sequential shifting)
+-- H9: program override (VCU, UI apps, cockpit panel, QA) via package.loaded of
+-- this module or of the shim key "controller/shiftLogic-etk854hybrid_8hp".
+-- p = nil / "" / "AUTO" (follow driving experience) | "ECO" | "COMFORT" | "SPORT":
+--     automatic program, lever S / M<n> back to D (gear kept)
+-- p = "MANUAL": hold the engaged gear as M<g> (realistic behaviour only)
+-- Returns false for an unknown program or MANUAL in arcade.
 local function setProgram(p)
   if p == "AUTO" or p == "" then p = nil end
   if p ~= nil and p ~= "ECO" and p ~= "COMFORT" and p ~= "SPORT" and p ~= "MANUAL" then

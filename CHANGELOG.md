@@ -1,5 +1,17 @@
 # Changelog
 
+**1.1.0: rear-axle steering, trailer stability, cockpit panel**
+
+- Optional active rear-axle steering: counter-phase below about 60 km/h (40 km/h in trailer mode), in-phase above, DSC yaw reference corrected, stability assist; Actions app row R-STEER OFF / ON + DSC / ON NO DSC, DSC OFF switches it off
+- New models 40e Perf. xAllrad Rear Steer and 35d Perf. xAllrad Rear Steer
+- Trailer stability function of the DSC with both tow hitches: sway stages 1-3, corner pre-braking, force-sensing hitch, trailer mass and tongue load estimate, TRAILER page on the centre screen, TSA chip in the HUD
+- Trailer-mode DSC retuned after my own drive with a 2.9 t cargo trailer (it held on too long and was a bit too sensitive): eleven corrections
+- New model 35d Perf. xAllrad Hauling: rear-axle steering, 3.5 t heavy-duty hitch with ball and pintle hook, trunk air compressor, trailer stability
+- Cockpit: centre-screen views ENERGY / MAP / TRAILER, cluster views AUTO / HYBRID / EFFICIENCY / SPORT / MINIMAL, MENU control panel with click zones and rotary-controller keys (Alt+H, Alt+, / Alt+., Alt+J, Alt+Backspace, Alt+V, Alt+C), DISPLAY row in the Actions app
+- Watchdog reloads a cockpit page that freezes after a vehicle swap
+- Vehicle selector: short model names, short factual descriptions, new thumbnails with badges
+- Codebase cleanup without behaviour change; tested on BeamNG.drive 0.40.3
+
 **1.0.0: first public release** (repository edition, includes feedback rounds 2 and 3)
 
 - English in-game texts, neutral naming (xAllrad, EV modes), developer button removed, paint fix, licence headers, fixed file name

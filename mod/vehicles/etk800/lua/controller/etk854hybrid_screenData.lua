@@ -1,47 +1,26 @@
--- ETK 854 ActiveHybrid - centre screen data feed (energy-flow page)
--- =========================================================================
--- Target: BeamNG.drive 0.39.4
+-- ETK 854 ActiveHybrid - centre screen data feed (energy flow + trailer page)
+-- Controller of the part etk854hybrid_navi_energyflow. The web view belongs to the
+-- stock beamNavigator "etk800_navi"; the part only re-targets its options to our
+-- page (top-level jbeam section merged over the controller row; the page stubs
+-- map.updateData / map.setData). This controller streams the state while a player
+-- is seated: queueWebViewStreamJS(tag, "etk854hybridFlow", "etk854hybridUpdate(<json>)").
+-- Range, consumption and on-board computer come from the cluster module's
+-- getEnergyInfo() so both screens agree; without the cluster part the module is
+-- required and driven from here (resolved on the first update, once every
+-- controller is initialised).
+-- jbeam options: screenTag (default "@etk800_screen"), rateHz (15, 1..60).
 --
--- Instantiated by the part etk854hybrid_navi_energyflow
--- (etk854hybrid_gauges.jbeam, slot "gps" of the stock ETK 800 dash).
---
--- The centre screen texture itself is created by the stock controller
--- "beamNavigator" named "etk800_navi" (declared by the dash,
--- etk800_interior.jbeam). The part only overrides that controller's options
--- through a top-level section named "etk800_navi" (controller.lua:499 merges
--- v.data[<controller name>] over the row), so the web view on
--- "@etk800_screen" loads our page at 512x256 instead of the map page. The
--- navigator keeps calling map.updateData() at 15 Hz and the game engine sends
--- map.setData() once; the page provides both as cheap stubs.
---
--- This controller only streams the hybrid state into that existing web view:
---   obj:queueWebViewStreamJS(tag, "etk854hybridFlow", "etk854hybridUpdate(<json>)")
--- (same call htmlTexture.streamJS uses, lua/vehicle/htmlTexture.lua:12-15).
--- It never creates a web view of its own.
---
--- Range / consumption come from the cluster module
--- gauges/customModules/etk854hybrid_gaugeData when that part is fitted, so
--- both screens show the same numbers. Without it the module file is required
--- as a plain library and driven from here (resolved lazily on the first
--- update, after every controller has been initialised).
---
--- jbeam options (controller row):
---   screenTag   web view tag / material emissive tag   default "@etk800_screen"
---   rateHz      push rate while a player is seated     default 15
---
--- Payload (keys kept short, the page tolerates every key missing):
---   soc tgt ph de ed ev ice evNm iceNm k0 ies on sail chg awd awdNm trl lvl
---   fan boost evAv evFr rl op dsc prog spd gear gi ign rng cons cap use
---   iceMax fuel amb wt uL uT uC uV
---   on-board computer (gaugeData header item 10, same numbers as the cluster):
---   fl (fuel l, -1 unknown) fcap (tank l) frng (fuel range km, -1)
---   fi (instantaneous l/100 km, -1 n/a) fh (l/h) fm ("l100" | "lh" | "ev")
---   fa (trip average l/100 km, -1 until tripMinKm) tk (trip km)
--- uL / uT / uC / uV are the game's uiUnitLength / uiUnitTemperature /
--- uiUnitConsumptionRate / uiUnitVolume settings (the same values
--- genericGauges hands the cluster in setup()), re-read every 2 s so a
--- change in the options menu reaches the page without a vehicle reload.
--- =========================================================================
+-- Payload (short keys, all optional on the page):
+--   hybrid   soc tgt ph de ed ev ice k0 ies on sail awd awdNm trl lvl
+--            boost evAv rl op dsc amb spd ign fuel
+--   energy   rng cons iceMax
+--   obc      fl fi fh fm ("l100" | "lh" | "ev") fa tk (-1 = unknown)
+--   trailer  tsa (nil without the hitch controller: page stays on the energy flow)
+--            tsSt tsK tsL tsSw tsFx (N, + = pull)
+--            tsTg (kg, signed) tsTs tsM (-1 = learning) tsMq tsLp tsVr tsRs trA
+--            rsSel rsMd rsSt lvlMm
+--   units    uL uT uC uV uW: game UI units, re-read every UNIT_REFRESH_S
+--            (tongue load / mass follow uW; distance, speed, force follow uL)
 
 local M = {}
 M.type = "auxiliary"
@@ -53,14 +32,15 @@ local st = {
   interval = 1 / 15,
   timer = 0,
   energy = nil, -- module providing getEnergyInfo()
-  ownEnergy = false, -- true when this controller drives the module itself
+  ownEnergy = false, -- driven from here
   resolved = false,
   payload = {},
   unitTimer = 0,
   unitLength = "metric",
   unitTemp = "c",
   unitCons = "metric",
-  unitVol = "l"
+  unitVol = "l",
+  unitWeight = "kg"
 }
 
 local UNIT_REFRESH_S = 2
@@ -71,6 +51,7 @@ local function readUnits()
     st.unitTemp = settings.getValue("uiUnitTemperature") or "c"
     st.unitCons = settings.getValue("uiUnitConsumptionRate") or "metric"
     st.unitVol = settings.getValue("uiUnitVolume") or "l"
+    st.unitWeight = settings.getValue("uiUnitWeight") or "kg"
   end
 end
 
@@ -90,12 +71,8 @@ local function resolveEnergySource()
   end
 end
 
-local function str(v)
-  if type(v) == "string" and v ~= "" then
-    return v
-  end
-  return nil
-end
+local U = require("controller/etk854hybrid/etk854hybrid_util")
+local str = U.str -- non-empty string, else nil
 
 local function buildPayload()
   local ev = electrics.values
@@ -107,46 +84,54 @@ local function buildPayload()
   p.ed = str(ev.etk854hybrid_edriveMode)
   p.ev = ev.etk854hybrid_evPower
   p.ice = ev.etk854hybrid_icePower
-  p.evNm = ev.etk854hybrid_evTorqueNm
-  p.iceNm = ev.etk854hybrid_iceTorqueNm
   p.k0 = ev.etk854hybrid_k0ClutchRatio
   p.ies = str(ev.etk854hybrid_iceEngageState)
   p.on = ev.etk854hybrid_iceState
   p.sail = ev.etk854hybrid_sailActive
-  p.chg = str(ev.etk854hybrid_chargeMode)
   p.awd = str(ev.etk854hybrid_awdMode)
   p.awdNm = ev.etk854hybrid_awdFrontTqNm
   p.trl = ev.etk854hybrid_trailerMode
   p.lvl = str(ev.etk854hybrid_levelState)
-  p.fan = ev.etk854hybrid_fanStage
   p.boost = ev.etk854hybrid_boostStage
   p.evAv = ev.etk854hybrid_evAvailable
-  p.evFr = ev.etk854hybrid_evPowerFraction
   p.rl = str(ev.etk854hybrid_regenLevel)
   p.op = ev.etk854hybrid_onePedalHold
   p.dsc = str(ev.etk854hybrid_dscMode)
-  p.prog = str(ev.etk854hybrid_shiftProgram)
   p.amb = ev.etk854hybrid_ambientC
   p.spd = (ev.wheelspeed or 0) * 3.6
-  p.gear = ev.gear
-  p.gi = ev.gearIndex
   p.ign = ev.ignitionLevel
   p.fuel = ev.fuel
-  p.wt = ev.watertemp
   p.uL = st.unitLength
   p.uT = st.unitTemp
   p.uC = st.unitCons
   p.uV = st.unitVol
+  p.uW = st.unitWeight
+  -- trailer page
+  p.tsa = str(ev.etk854hybrid_tsaState)
+  p.tsSt = ev.etk854hybrid_tsaStage
+  p.tsK = ev.etk854hybrid_tsaCorner
+  p.tsL = ev.etk854hybrid_tsaLamp
+  p.tsSw = ev.etk854hybrid_tsaSwayIdx
+  p.tsFx = ev.etk854hybrid_tsaDrawbarN
+  p.tsTg = ev.etk854hybrid_tsaTongueKg
+  p.tsTs = str(ev.etk854hybrid_tsaTongueState)
+  p.tsM = ev.etk854hybrid_tsaMassKg
+  p.tsMq = ev.etk854hybrid_tsaMassQ
+  p.tsLp = str(ev.etk854hybrid_tsaLoadPin)
+  p.tsVr = ev.etk854hybrid_tsaVRecKmh
+  p.tsRs = ev.etk854hybrid_tsaReduceSpeed
+  local ta, tf = ev.etk854hybrid_trailerAttached, ev.etk854hybrid_tsaFlags
+  p.trA = (ta == 1 or ta == true or (type(tf) == "number" and tf % 2 == 1)) and 1 or 0
+  p.rsSel = str(ev.etk854hybrid_rasSel)
+  p.rsMd = str(ev.etk854hybrid_rasMode)
+  p.rsSt = str(ev.etk854hybrid_rasState)
+  p.lvlMm = ev.etk854hybrid_levelOffsetMm
   local e = st.energy and st.energy.getEnergyInfo and st.energy.getEnergyInfo()
   if e then
     p.rng = e.rangeKm
     p.cons = e.consKwh
-    p.cap = e.capKwh
-    p.use = e.usableKwh
     p.iceMax = e.iceKw
     p.fl = e.fuelL
-    p.fcap = e.fuelCapL
-    p.frng = e.fuelRangeKm
     p.fi = e.instL100
     p.fh = e.instLh
     p.fm = e.instMode

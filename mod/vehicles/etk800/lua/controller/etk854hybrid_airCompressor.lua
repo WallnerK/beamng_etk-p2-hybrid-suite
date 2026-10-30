@@ -1,139 +1,53 @@
 -- ETK 854 ActiveHybrid - electric air compressor + trailer air supply
 --
--- Part: etk854hybrid_load_compressor (etk854hybrid_loads.jbeam), the trunk
--- compressor unit of the workshop load (piston compressor on a 40 l air
--- receiver, the part's flexbody is the receiver). The same part declares the
--- pressureTank "etk854hybrid_airTank" (lua/vehicle/energyStorage/
--- pressureTank.lua) with isPrimarySupply = true and our hitch coupler nodes
--- (hyb_twp pintle, hyb_twb ball, etk854hybrid_towing.jbeam) as
--- pneumaticPTOConsumerCouplerNodeNames. Node names that do not exist in the
--- spawned vehicle (no hitch / ball-only mount) are skipped by the tank
--- (pressureTank.lua:360-364, :368-372 check beamstate.nodeNameMap first), the
--- same way the stock md_series / us_semi / wl40 tanks list "pintle" and
--- "fwk2" regardless of which hitch is fitted.
+-- Part etk854hybrid_load_compressor: trunk piston compressor on a 40 l
+-- receiver, pressureTank "etk854hybrid_airTank" (isPrimarySupply) with the
+-- hitch nodes hyb_twp / hyb_twb as PTO consumer couplers (missing ones are
+-- skipped by the tank).
 --
--- How a coupled trailer gets its air (stock code only, nothing overridden):
---  * The trailer tank (e.g. dolly.zip vehicles/dolly/dolly.jbeam mainAirTank,
---    pneumaticPTOSupplyCouplerNodeNames ["pintle"]) asks us on coupling to
---    export electrics "pneumaticPTOPressure_<our objectId>"
---    (pressureTank.lua:116-130 -> beamstate.sendExportCouplerData,
---    beamstate.lua:390-393, :472-486, transmitted every frame :721-737).
---  * Our tank writes that channel every frame as min(current, supply) * coef;
---    isPrimarySupply makes supply = current (pressureTank.lua:39-50). WITHOUT
---    isPrimarySupply the exported pressure would stay 0.
---  * The trailer fills its tank with (supply - own) * 1e-6 m^3/(s*Pa) and
---    reports the energy flow back as "pneumaticPTOFlow_<our objectId>", which
---    our tank subtracts (:16-36 trailer side, :52-54 our side).
---  * Trailer airbrakes (lua/vehicle/controller/pneumatics/airbrakes.lua
---    :159-183) FORCE the spring brakes on while the trailer tank's
---    supplyPressure < 275790 Pa (40 psi) + ambient; above that they follow
---    the parking brake command (the 413685 Pa / 60 psi threshold only re-arms
---    the smart parking brake). The spring actuators fill from the trailer
---    tank up to 413685 Pa (:183), and the stock curve is 0 Pa -> full torque,
---    413685 Pa -> 0 (bogie_suspension.jbeam bogie_brakeValve), so a complete
---    release needs >= 60 psi (4.14 bar) in the trailer tank - that is our
---    lowWarnBar. Service and
---    parking brake commands are OUR electrics brake / parkingbrake: the
---    trailer's coupler node carries "importInputs": ["brake","parkingbrake"]
---    (dolly_single.jbeam:116), beamstate exports electrics.values[k] or
---    input[k] (:730-734) and the trailer replays them with input.event
---    (:503-506). Nothing to do on our side, but: our parking brake applied =
---    trailer spring brakes applied.
+-- Trailer air (stock code only): on coupling the trailer requests our export
+-- "pneumaticPTOPressure_<objId>", which the tank writes as min(current, supply)
+-- * consumerPressureCoef (stays 0 without isPrimarySupply); the trailer's
+-- returned flow is subtracted from our tank. Trailer spring brakes apply
+-- below 40 psi supply and release fully at 60 psi (413685 Pa) -> lowWarnBar
+-- 4.14. Its service / parking brake follow our electrics.
 --
--- Trailer supply protection valve (2026-10, live run 20261009-172556_air_supply):
--- the dolly's auto-apply compares its SUPPLY pressure (= the pressure we
--- export, our receiver) with 40 psi (airbrakes.lua:165). Fed with a supply
--- right at 40 psi it limit-cycles: above it the spring chambers fill from the
--- dolly tank through the brake valve orifice (~0.9 kW pV flow, :187-190,
--- more than the compressor's ~0.35 kW), the PTO sync drags our receiver back
--- below 40 psi within a frame, the chambers exhaust to atmosphere (:191-198)
--- and so on - the receiver stayed pinned at 2.758 bar gauge for 150 s with
--- the compressor at 100 % (reproduced offline with the stock Lua:
--- tools/analyze_air_recovery_sim.py --case legacy). Like the trailer circuit
--- of a truck's multi-circuit protection valve, the trailer supply is now only
--- opened once the receiver has reached trailerValveOpenBar and is closed below
--- trailerValveCloseBar (gauge, receiver pressure). Closed = the exported
--- PTO pressure is 0 via the tank's consumerPressureCoef (pressureTank.lua:48;
--- the field is written directly - the stock setter :185-188 only adds a UI
--- message - every frame BEFORE the tank's own updateGFX, main.lua order
--- controller -> energyStorage; tank reset :227 sets it back to 1, the next
--- frame overwrites it again). With supply 0 the dolly does not sync at all
--- (:25 "supplyPressure > 1"): no flow either way, its tank keeps its air
--- (check-valve behaviour), its spring brakes apply (fail-safe) and its
--- service brakes still work from its own tank. So the dolly is only fed well
--- above the 40 psi band; the receiver recovers alone and the dolly then gets
--- a pressure step above its release point (6.0 bar receiver + ~3.6 bar kept in
--- a 50 l dolly -> ~4.6 bar, offline sim). ONE closing pressure, trailerValveCloseBar 3.4
--- bar, whether the compressor is available or not: 0.6 bar above the band,
--- and low enough that charging a low/empty trailer tank (8.5 bar into an
--- empty 50 l dolly -> ~3.8 bar) does not chatter. The receiver feeds nothing
--- but the trailer (our brakes are hydraulic), so a higher closing pressure
--- while the compressor is off (was 4.5 bar for switch OFF / KEY / SOC / NO
--- HV / FAULT) protected nothing: it only applied the dolly spring brakes
--- earlier - also while driving, 0.5 s after the driver switched the
--- compressor off with the receiver below 4.5 bar (review 2026-10). Offline
--- (--case pumps): 32 instead of 23 full trailer brake applications with the
--- compressor off before the spring brakes apply. The receiver has to stay
--- below the closing pressure for
--- trailerValveCloseDelayS: coupling an empty tank, the stock PTO sync (P
--- controller with one frame dead time) overshoots for a few frames (receiver
--- 8.5 -> 2.9 bar at 60 fps, the dolly tank above the receiver) before it
--- settles at the mixed pressure.
+-- Trailer supply protection valve (receiver, bar gauge): fed right at 40 psi
+-- the trailer limit-cycles (its spring chambers draw more than we deliver and
+-- pin the receiver there), so the supply opens at >= trailerValveOpenBar and
+-- closes after trailerValveCloseDelayS below trailerValveCloseBar.
+--  * closed = tank.consumerPressureCoef 0, written every frame before the
+--    tank's updateGFX (tank reset restores 1; the stock setter only adds a
+--    UI message)
+--  * with supply 0 the trailer keeps its air and applies its spring brakes;
+--    its service brakes still work from its own tank
+--  * open 6.0: the mixed pressure lands above the trailer's release point;
+--    close 3.4: above the 40 psi band, no chatter while an empty trailer tank
+--    charges (mixes to ~3.8); the delay rides out the PTO sync overshoot
 --
--- This controller is the compressor: electrically driven (HV battery via the
--- DC/DC / inverter), so it works in EV mode and at standstill with the ICE
--- off. Model, isothermal like the stock mechanical compressor
--- (lua/vehicle/powertrain/compressor.lua:21-43: tank storedEnergy = p * V =
--- n R T, air drawn in at ambient adds p_env * V_free; pressureTank.lua
--- :58-60, :101-114 keep p = E / V):
+-- Compressor: HV-electric (EV mode, standstill), isothermal like the stock
+-- powertrain/compressor.lua (storedEnergy = p * V):
 --   pr      = p_tank,abs / p_env
 --   Q_pow   = P_rated * eta_iso / (p_env * ln pr)   free-air flow, power limit
 --   Q       = min(Q_max, Q_pow) * spin               Q_max = displacement limit
 --   P_el    = clamp(Q_max * p_env * ln pr / eta_iso, idle * P_rated, P_rated) * spin
---   dE_tank = p_env * Q * dt                         (compressor.lua:30-31, :43)
---   E_batt -= P_el / eta_conv * dt                   (same call as
---             etk854hybrid_cooling.lua drawBattery)
--- Defaults (1.5 kW, eta_iso 0.30, 270 l/min swept): ~120 l/min free air at
--- 8 bar, 7.2 -> 8.6 bar in the 40 l receiver in ~27 s, 0 -> 8.6 bar ~2 min.
--- Pressure switch: on at <= cutInBar, off at >= cutOutBar (gauge), then the
--- air dryer purges (stock purge event, compressor.lua:48-52). No restart for
--- restartDelayS after a stop. Relief valve at reliefBar. Not below minSoc
--- of the HV battery (VCU SOC_ICE_FORCE 0.08, etk854hybridControl.lua:251),
--- resumes at resumeSoc. Needs ignition (ignitionLevel >= 2).
+--   dE_tank = p_env * Q * dt
+--   E_batt -= P_el / eta_conv * dt
+-- Defaults: ~120 l/min free air at 8 bar, 7.2 -> 8.6 bar in ~27 s.
+-- Pressure switch cutIn / cutOut + dryer purge, restartDelayS, relief valve;
+-- inhibited below minSoc (until resumeSoc) and without ignition.
+-- The trailer's stock air-brake channels (CFG trailer*Electric) are requested
+-- the same way and republished.
 --
--- Trailer telemetry: when a trailer couples at one of the tank's coupler
--- nodes we additionally request its stock air-brake channels
--- (trailerTankElectric / trailerParkingElectric / trailerServiceElectric,
--- defaults = stock names: tank "mainAirTank" -> "<name>_pressureRelative"
--- pressureTank.lua:377, controller "airbrakes" -> "<name>_pressure_parking" /
--- "_pressure_service" airbrakes.lua:408-409, bogie_suspension.jbeam
--- bogie_brakeValve) with the same beamstate.sendExportCouplerData call the
--- tank uses, and republish them under our prefix. Missing channels stay -1.
---
--- Published electrics (every updateGFX):
---   etk854hybrid_airState         OFF | FILL | READY | LOW | NO TANK
---   etk854hybrid_airPressureBar   receiver pressure, bar gauge (0 without tank)
---   etk854hybrid_airCompressor    0/1 motor running
---   etk854hybrid_airEnabled       0/1 driver switch
---   etk854hybrid_airInhibit       NONE | SWITCH | KEY | SOC | NO HV | FAULT | NO TANK
---   etk854hybrid_airPowerW        electrical power drawn from the HV battery [W]
---   etk854hybrid_airFlowLpm       free-air delivery [l/min]
---   etk854hybrid_airBattWh        battery energy drawn since spawn/reset [Wh]
---   etk854hybrid_airSupplyBar     pressure exported to the trailer, bar gauge
---                                 (0 while the trailer supply valve is closed)
---   etk854hybrid_airTrlValve      0/1 trailer supply protection valve open
---   etk854hybrid_airRelief        0/1 relief valve blowing off
---   etk854hybrid_airLeak          0/1 receiver leaking (damage / torn hose)
---   etk854hybrid_airTrailer       0/1 trailer coupled at an air coupling node
---   etk854hybrid_trailerAirBar    trailer tank, bar gauge (-1 = unknown)
---   etk854hybrid_trailerSpringBar trailer spring-brake actuator, bar (-1)
---   etk854hybrid_trailerServiceBar trailer service actuator, bar (-1)
---   etk854hybrid_trailerSpringCoef trailer spring-brake torque share 0..1 from
---                                 the stock bogie_brakeValve curve (0 Pa -> 1,
---                                 413685 Pa -> 0), -1 = unknown
---
--- API (Actions app / console): setEnabled(on), toggle(), getState(),
--- debugSetPressure(bar), debugVent(barPerSecond) (dev hooks, not bound).
+-- Publishes (etk854hybrid_ prefix; bar = gauge):
+--   airState OFF | FILL | READY | LOW | NO TANK
+--   airInhibit NONE | SWITCH | KEY | SOC | NO HV | FAULT | NO TANK
+--   airPressureBar, airSupplyBar (export, 0 while the valve is closed)
+--   airPowerW (HV draw), airFlowLpm (free air), airBattWh (since reset)
+--   airCompressor, airEnabled, airTrlValve, airRelief, airLeak, airTrailer (0/1)
+--   trailerAirBar, trailerSpringBar, trailerServiceBar,
+--   trailerSpringCoef (spring-brake share 0..1, 413685 Pa -> 0); -1 = unknown
+-- API: setEnabled(on), toggle(), getState(), debugSetPressure(bar), debugVent(barPerS)
 
 local M = {}
 
@@ -145,27 +59,26 @@ local max = math.max
 local min = math.min
 local mlog = math.log
 
--- All tunables in ONE table (LuaJIT 60-upvalue limit); every key can be
--- overridden from the jbeam controller row (type-matched).
+-- Tunables (one table: LuaJIT 60-upvalue limit); jbeam keys override, type-matched.
 local CFG = {
   name = "etk854hybrid_airCompressor",
   tankName = "etk854hybrid_airTank",
   batteryName = "mainBattery",
   enabledOnSpawn = true,
-  ratedPowerW = 1500, -- electrical input at full load
-  isothermalEfficiency = 0.30, -- wire-to-air, isothermal reference
-  maxFreeAirLpm = 270, -- swept volume x volumetric efficiency, low back pressure
-  idlePowerFraction = 0.30, -- motor + friction floor while running
-  converterEfficiency = 0.95, -- HV -> compressor motor supply
+  ratedPowerW = 1500, -- electrical, full load
+  isothermalEfficiency = 0.30, -- wire-to-air
+  maxFreeAirLpm = 270, -- displacement limit
+  idlePowerFraction = 0.30, -- power floor while running
+  converterEfficiency = 0.95, -- HV -> motor
   cutInBar = 7.2,
   cutOutBar = 8.6,
   reliefBar = 8.9,
-  lowWarnBar = 4.14, -- trailer spring-brake release threshold (60 psi)
-  -- trailer supply protection valve, receiver bar GAUGE (header)
+  lowWarnBar = 4.14, -- trailer spring-brake release (60 psi)
+  -- trailer supply valve, receiver bar gauge
   trailerValveOpenBar = 6.0,
-  trailerValveCloseBar = 3.4, -- with or without the compressor (header)
-  trailerValveCloseDelayS = 0.5, -- below the closing pressure this long
-  minSoc = 0.08,
+  trailerValveCloseBar = 3.4,
+  trailerValveCloseDelayS = 0.5,
+  minSoc = 0.08, -- = VCU SOC_ICE_FORCE
   resumeSoc = 0.10,
   spinUpS = 0.4,
   spinDownS = 1.2,
@@ -176,7 +89,7 @@ local CFG = {
   purgeEvent = "event:>Vehicle>Pneumatics>Air_Dryer_Purge",
   compressorSoundVolume = 0.5,
   purgeSoundVolume = 0.5,
-  soundRpm = 1450, -- the stock event takes compressor rpm as pitch (compressor.lua:98-100)
+  soundRpm = 1450, -- stock event pitch = rpm
   trailerTankElectric = "mainAirTank_pressureRelative",
   trailerParkingElectric = "airbrakes_pressure_parking",
   trailerServiceElectric = "airbrakes_pressure_service",
@@ -186,12 +99,11 @@ local CFG = {
   msgCategory = "vehicle.etk854hybrid.air"
 }
 
--- Runtime state, one table.
 local S = {
   objId = 0,
   tank = nil,
   battery = nil,
-  couplers = {}, -- own coupler cid -> true (tank consumer nodes)
+  couplers = {}, -- own consumer coupler cid -> true
   couplerCount = 0,
   enabled = true,
   demand = false, -- pressure switch closed
@@ -213,9 +125,9 @@ local S = {
   sfx = nil,
   soundNodeId = 0,
   trl = nil, -- {id, node, own}
-  trlValve = false, -- trailer supply protection valve open
-  trlLowT = 0, -- time below the closing pressure while open
-  trlMsg = false, -- "supply closed" hint pending until the trailer's tank channel arrives
+  trlValve = false, -- supply valve open
+  trlLowT = 0, -- s below the closing pressure
+  trlMsg = false, -- "blocked" hint pending until the trailer tank channel arrives
   pollT = 0
 }
 
@@ -229,10 +141,8 @@ local function envPressure()
   return powertrain.currentEnvPressure or 101325
 end
 
--- "6,0" (German decimal comma like the other texts of the mod)
 local function barText(bar)
-  local s = string.format("%.1f", bar or 0)
-  return s
+  return string.format("%.1f", bar or 0)
 end
 
 -- ------------------------------------------------------------------ trailer
@@ -249,12 +159,11 @@ local function linkTrailer(own, obj2id, obj2nodeId)
   end
   S.trl = {id = obj2id, node = obj2nodeId, own = own}
   clearTrailerChannels()
-  -- same request the tank makes for its flow channel (pressureTank.lua:129/:138)
+  -- same request the tank makes for its flow channel
   if beamstate and beamstate.sendExportCouplerData then
     beamstate.sendExportCouplerData(obj2id, obj2nodeId, {electrics = {CFG.trailerTankElectric, CFG.trailerParkingElectric, CFG.trailerServiceElectric}})
   end
-  -- the hint waits for the trailer's tank channel (publishTrailer): a trailer
-  -- without air brakes on the ball gets no message
+  -- hint waits for the trailer tank channel: none for a trailer without air brakes
   S.trlMsg = S.tank ~= nil
 end
 
@@ -266,13 +175,13 @@ local function unlinkTrailer()
   end
 end
 
--- coupled trailer that reports an air tank (stock channel, -1/nil otherwise)
+-- coupled trailer that reports an air tank
 local function trailerHasAir()
   return S.trl ~= nil and type(electrics.values[CFG.trailerTankElectric]) == "number"
 end
 
--- Reconcile with beamstate.attachedCouplers (beamstate.lua:409, exposed :1591;
--- cleared without a detach event on reset, :1062).
+-- Reconcile with beamstate.attachedCouplers (a reset clears it without a
+-- detach event).
 local function pollCouplers()
   local ac = beamstate and beamstate.attachedCouplers
   if not ac or S.couplerCount == 0 then
@@ -350,8 +259,7 @@ local function updateSound()
     return
   end
   local spin = S.spin
-  -- same call and argument order as compressor.lua updateSounds (:94-101):
-  -- volume, pitch = compressor rpm, colour = 1 while pumping
+  -- as stock compressor.lua: volume, pitch = rpm, colour = 1 while pumping
   obj:setVolumePitchCT(S.sfx, CFG.compressorSoundVolume * spin, CFG.soundRpm * spin, S.running and 1 or 0, 0)
 end
 
@@ -379,8 +287,7 @@ end
 
 -- -------------------------------------------------------------- inhibits
 local function evalInhibit(tank)
-  -- broken receiver / torn hose (pressureTank.lua onBreak :194-197 sets the
-  -- leak rate to maxLeakRate, the capacity / 3 per second)
+  -- broken receiver / torn hose: onBreak sets the leak rate to maxLeakRate
   S.leak = (tank.currentLeakRate or 0) > 0
   if S.leak and (tank.maxLeakRate or 0) > 0 and tank.currentLeakRate >= tank.maxLeakRate * 0.99 then
     return "FAULT"
@@ -409,9 +316,6 @@ local function evalInhibit(tank)
 end
 
 -- ------------------------------------------- trailer supply protection valve
--- (header): open at >= trailerValveOpenBar, close below trailerValveCloseBar
--- for trailerValveCloseDelayS; closed = export 0 through the tank's
--- consumerPressureCoef.
 local function applyTrailerValve(tank)
   if tank then
     tank.consumerPressureCoef = S.trlValve and 1 or 0
@@ -474,8 +378,7 @@ local function updateGFX(dt)
 
   local env = envPressure()
   local V = tank.capacity
-  -- storedEnergy is the live value (tank.currentPressure lags one frame,
-  -- pressureTank.lua:60 runs after the controllers, main.lua:88/:93)
+  -- storedEnergy is live; tank.currentPressure lags one frame
   local pAbs = tank.storedEnergy * tank.invCapacity
 
   -- dev hook: constant vent (simulated consumption / leak)
@@ -507,7 +410,7 @@ local function updateGFX(dt)
     S.offTimer = 0
   else
     if wasRunning then
-      -- dryer purge when the unit stops after a real run (compressor.lua:48-52)
+      -- dryer purge when the unit stops after a real run
       if S.runTime >= CFG.purgeMinRunS then
         purge()
       end
@@ -518,9 +421,9 @@ local function updateGFX(dt)
 
   -- motor speed: soft start / run-down
   if run then
-    S.spin = min(1, S.spin + dt / max(CFG.spinUpS, 0.01))
+    S.spin = min(1, S.spin + dt / S.spinUpS)
   else
-    S.spin = max(0, S.spin - dt / max(CFG.spinDownS, 0.01))
+    S.spin = max(0, S.spin - dt / S.spinDownS)
   end
 
   local powerW = 0
@@ -528,8 +431,8 @@ local function updateGFX(dt)
   if run and S.spin > 0 then
     local pr = max(pAbs / env, 1.0001)
     local lnPr = mlog(pr)
-    local eta = max(CFG.isothermalEfficiency, 0.01)
-    local qMax = CFG.maxFreeAirLpm / 60000 -- m^3/s free air
+    local eta = S.eta
+    local qMax = S.qMax
     local pRated = CFG.ratedPowerW
     local qPow = pRated * eta / (env * lnPr)
     q = min(qMax, qPow) * S.spin
@@ -538,7 +441,7 @@ local function updateGFX(dt)
     local dE = env * q * dt
     tank.storedEnergy = tank.storedEnergy + dE
     S.airJ = S.airJ + dE
-    local battW = powerW / max(CFG.converterEfficiency, 0.01)
+    local battW = powerW / S.convEff
     local bat = S.battery
     bat:setStoredEnergy(max(bat.storedEnergy - battW * dt, 0))
     S.battWh = S.battWh + battW * dt / 3600
@@ -549,7 +452,7 @@ local function updateGFX(dt)
 
   -- relief valve
   pAbs = tank.storedEnergy * tank.invCapacity
-  local reliefAbs = CFG.reliefBar * 1e5 + env
+  local reliefAbs = S.reliefPa + env
   S.relief = pAbs > reliefAbs
   if S.relief then
     tank.storedEnergy = reliefAbs * V
@@ -558,8 +461,7 @@ local function updateGFX(dt)
   pBar = (pAbs - env) * 1e-5
   S.pBar = pBar
 
-  -- runs before the tank's own updateGFX of this frame (main.lua order), so
-  -- the coef applies to this frame's export
+  -- before the tank's updateGFX: the coef applies to this frame's export
   updateTrailerValve(tank, pBar, dt)
 
   if pBar < CFG.lowWarnBar then
@@ -583,8 +485,7 @@ local function onCouplerAttached(nodeId, obj2id, obj2nodeId, attachSpeed, attach
   end
 end
 
--- beamstate runs first (main.lua:394-395), so the entry is already gone:
--- re-scan instead of forcing an unlink (the HD combo mount has two couplers)
+-- beamstate already removed the entry: re-scan (HD combo mount has two couplers)
 local function onCouplerDetached(nodeId, obj2id, obj2nodeId, breakForce)
   if S.couplers[nodeId] and S.trl then
     pollCouplers()
@@ -641,9 +542,7 @@ local function getState()
   }
 end
 
--- Dev hooks (not bound): set the receiver to a gauge pressure / vent it at a
--- constant rate (bar/s of the receiver alone; 0 stops). The coupled trailer
--- tank follows through the stock PTO sync.
+-- Dev hooks: set the receiver gauge pressure / vent it at bar/s (0 stops).
 local function debugSetPressure(bar)
   bar = tonumber(bar)
   local tank = S.tank
@@ -713,6 +612,13 @@ local function init(jbeamData)
   CFG.trailerValveCloseDelayS = max(CFG.trailerValveCloseDelayS, 0)
   CFG.ratedPowerW = max(CFG.ratedPowerW, 0)
   CFG.resumeSoc = max(CFG.resumeSoc, CFG.minSoc)
+  -- derived calibration constants (from the final CFG; in S, out of the override loop)
+  S.eta = max(CFG.isothermalEfficiency, 0.01)
+  S.qMax = CFG.maxFreeAirLpm / 60000 -- m^3/s free air
+  S.spinUpS = max(CFG.spinUpS, 0.01)
+  S.spinDownS = max(CFG.spinDownS, 0.01)
+  S.convEff = max(CFG.converterEfficiency, 0.01)
+  S.reliefPa = CFG.reliefBar * 1e5
   S.objId = obj:getId()
   S.enabled = CFG.enabledOnSpawn
   S.sfx = nil
@@ -727,7 +633,7 @@ local function initSounds()
   if not S.tank then
     return
   end
-  -- same source setup as compressor.lua initSounds (:183-189)
+  -- same source setup as the stock compressor.lua initSounds
   S.sfx = obj:createSFXSource2(CFG.compressorLoopEvent, "AudioDefaultLoop3D", "etk854hybridAirCompressor", S.soundNodeId, 1)
   if S.sfx then
     obj:playSFX(S.sfx)
@@ -735,8 +641,7 @@ local function initSounds()
   end
 end
 
--- the driver switch survives R like a real switch; everything else restarts
--- (energyStorage.reset puts the receiver back to its starting pressure)
+-- The driver switch survives a reset; energyStorage.reset restores the receiver.
 local function reset()
   resolve()
   resetState()

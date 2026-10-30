@@ -1,103 +1,49 @@
--- sailing.lua - ETK 854 ActiveHybrid - coasting ("Segeln") state machine
+-- sailing.lua - ETK 854 ActiveHybrid - sailing (engine-off coasting) state machine
 --
--- Series behaviour it reproduces (reference hybrid / ECO PRO + COMFORT):
---   Pedal 0, brake 0, 25..160 km/h, not SPORT  ->  K0 OPENS, ICE ignition OFF,
---   gearbox stays engaged, E-motor delivers exactly 0 Nm (NO coast regen).
---   The car free-wheels. Touching the brake blends regen in on a ramp; touching
---   the throttle gives instant E-torque and only restarts the ICE when the
---   master policy asks for it (ctx.policyWantsIce: kick pedal, fast pedal,
---   speed ceiling, load integral) or the start is urgent (ctx.iceStartUrgent:
---   kickdown pedal). A moderate demand leaves the sail electrically and the
---   policy's load integral decides later, exactly as without the sail.
+-- Not SPORT, pedals released, 25..160 km/h: K0 opens, ICE off, gearbox stays
+-- engaged, E-machine at 0 Nm (no coast regen) - the car free-wheels. The brake
+-- blends regen in; the throttle gives instant E-torque and restarts the ICE
+-- only if the VCU policy wants it or the pedal is urgent (kickdown).
+-- Only REQUESTS the ICE off / on; the sequencer owns K0, starter and ignition.
+-- No entry after sporty driving: the ICE stays coupled for the next bend.
 --
--- P1 rework: this module no longer touches K0, the starter or the ignition.
--- It only REQUESTS the ICE off/on; etk854hybrid_iceSequencer releases it
--- (FAST: share out, K0 open, ignition off after K0) and restarts it with a
--- rev-matched K0 engage (K0 slip start or starter, sync with K0 open, engage,
--- torque blend). The old drag start (K0 closing at 2.6/s against a stopped
--- engine + a flat 70 Nm feed-forward) is gone. Sailing also does not arm
--- after sporty driving (ctx.sportIndex > SAIL_SPORT_MAX): the engine is kept
--- hot and coupled for the next bend instead.
---
--- Contract (master VCU sets these on ctx BEFORE calling updateGFX):
---   ctx.deMode            "COMFORT" | "ECO_PRO" | "SPORT"
---   ctx.edriveMode        "AUTO_EDRIVE" | "MAX_EDRIVE" | "BATTERY_CONTROL"
---   ctx.sailingEnabled    0/1  ($sailingenabled jbeam variable)
---   ctx.regenAllowsSail   bool (false unless the regen selector is OFF)
---   ctx.throttleRaw       0..1 raw driver pedal
---   ctx.brakeRaw          0..1 raw brake pedal
---   ctx.speedKmh          absolute road speed
---   ctx.gearSign          -1 / 0 / +1
---   ctx.torqueReqNm       driver torque request at the motor shaft [Nm]
---   ctx.motorCapNm        currently available motor torque [Nm] (stage+SOC capped)
---   ctx.soc               0..1
---   ctx.iceOn             sequencer says the ICE participates (state ~= OFF)
---   ctx.iceEngageState    sequencer state OFF|CRANK|SYNC|ENGAGE|BLEND|ON|RELEASE
---   ctx.iceFireMs         request -> fired of the last start (sequencer)
---   ctx.iceRpm            engine rpm
---   ctx.iceIdleRPM        engine idle rpm (from powerCurves - NOT hard coded)
---   ctx.policyWantsIce    what the EV mode/DE policy would do without sailing
---   ctx.iceStartUrgent    the policy calls the pedal urgent (kickdown pedal)
---   ctx.k0Current         current K0 clutch ratio (0 open .. 1 closed)
---   ctx.sportIndex        driver sportiness 0..1 (etk854hybrid_sportIndex)
---
--- Outputs (written to ctx, applied by the master):
---   ctx.sailState         "DRIVE" | "SAIL_ENTER" | "SAIL" | "SAIL_EXIT"
---   ctx.sailActive        bool  (true in SAIL_ENTER + SAIL)
---   ctx.sailSuppressRegen bool  (kill ALL regen - true free-wheeling)
---   ctx.sailSuppressDrive bool  (kill motor drive torque)
---   ctx.sailIceRequest    nil | "off" | "on"   (the sequencer's arbiter obeys)
---   ctx.sailRestartUrgent bool  (restart with the URGENT start profile)
---   ctx.sailK0Override    always nil   } kept for compatibility only; the
---   ctx.sailStarterPulse  always false } sequencer is the sole owner of K0,
---   ctx.sailDragAssistNm  always 0     } starter and ignition
---
--- Publishes channels: etk854hybrid_sailState / _sailActive / _sailTime
--- (etk854hybrid_iceRestartActive / _iceRestartMs moved to the sequencer)
+-- Phases: DRIVE -> SAIL_ENTER -> SAIL -> SAIL_EXIT -> DRIVE (ENTER may abort to EXIT)
+-- Inputs (ctx): deMode, edriveMode, batteryTargetSoc, evOnly, sailingEnabled,
+--   regenAllowsSail, throttleRaw, brakeRaw, speedKmh, gearSign (-1/0/1), soc,
+--   k0Current (0 open..1), iceEngageState, iceFireMs, policyWantsIce (VCU ICE
+--   decision without sailing), iceStartUrgent, sportIndex (0..1), tsaFreeze
+--   (blocks entry only); iceOn, iceRpm (debug log).
+-- Outputs (ctx): sailState, sailActive (ENTER + SAIL), sailSuppressRegen,
+--   sailSuppressDrive, sailIceRequest (nil | "off" | "on"), sailRestartUrgent.
+--   The exit reason is in M.getState().exitReason.
+-- Electrics: etk854hybrid_sailState / _sailActive / _sailTime
 
 local M = {}
 M.name = "sailing"
 
-local max, min, abs = math.max, math.min, math.abs
+local max = math.max
 
 -- ===========================================================
--- Entry / exit window (target spec section 3)
+-- Entry / exit window
 -- ===========================================================
 local SAIL_SPEED_MIN_KMH   = 25.0
 local SAIL_SPEED_MAX_KMH   = 160.0
--- Hysteresis band applied to the speed window on the way OUT, so a car sitting
--- exactly on 25.0 km/h does not chatter between SAIL and DRIVE.
-local SAIL_SPEED_HYST_KMH  = 3.0
-local SAIL_THROTTLE_MAX    = 0.02   -- "pedal released"
-local SAIL_BRAKE_MAX       = 0.005  -- "brake released"
--- SOC floor: the K0 drag start needs motor torque, so never sail the battery
--- down to a point where the ICE cannot be restarted electrically. 0.06 -> 0.10
--- (2026-10-10): it sat below the VCU's forced-ICE threshold (SOC_ICE_FORCE
--- 0.08) and a sail-off (hard FAST release) won over the forced start, so a
--- regen-OFF coast could drain the pack further instead of charging it
+local SAIL_SPEED_HYST_KMH  = 3.0    -- exit hysteresis of the speed window
+local SAIL_THROTTLE_MAX    = 0.02
+local SAIL_BRAKE_MAX       = 0.005
+-- SOC floor: a K0 restart needs motor torque. Keep above the VCU's
+-- SOC_ICE_FORCE: a sail-off request wins over the forced start, so a lower
+-- floor would let a regen-OFF coast drain the pack.
 local SAIL_SOC_MIN         = 0.10
 
--- Timing
+-- Timing [s]
 local SAIL_ARM_S           = 0.35   -- entry conditions must hold this long
--- watchdog: force SAIL even if the sequencer's release lags. 1.2 s covers a
--- NORMAL-profile release (torque ramp + K0 open 3/s); sail entry itself
--- asks for the FAST profile (0.25 s + 5/s).
-local SAIL_ENTER_MAX_S     = 1.20
-local SAIL_MIN_S           = 2.0    -- min dwell for SOFT exits (speed/policy)
-local SAIL_REARM_S         = 1.5    -- cooldown after any exit before re-arming
--- No sail after sporty driving: above this index the driver is between two
--- bends, and an engine that has to be restarted costs the next exit.
-local SAIL_SPORT_MAX       = 0.40
--- Restart from a sail: SAIL_EXIT waits for the sequencer to reach BLEND/ON
--- (K0 closed onto a matched shaft), at most this long.
-local RESTART_TIMEOUT_S    = 2.5
+local SAIL_ENTER_MAX_S     = 1.20   -- watchdog: SAIL anyway (covers a NORMAL release)
+local SAIL_MIN_S           = 2.0    -- min sail time before a speed-window exit
+local SAIL_REARM_S         = 1.5    -- cooldown after an exit
+local SAIL_SPORT_MAX       = 0.40   -- sportIndex above: no entry
+local RESTART_TIMEOUT_S    = 2.5    -- SAIL_EXIT waits for BLEND / ON at most
 
--- Throttle-tip exit: no load shortcut of its own any more. The former
--- EXIT_ICE_LOAD_FRAC (torqueReq > 0.92 x motor cap -> restart through the
--- arbiter bypass) skipped the policy's persistence (load integral) whenever
--- the driver pressed the pedal out of a sail.
-
--- Debug log throttle
 local DBG_INTERVAL_S       = 1.0
 
 -- ===========================================================
@@ -121,26 +67,11 @@ local state = {
 -- ===========================================================
 -- Helpers
 -- ===========================================================
-local function clamp01(v)
-  if v < 0 then return 0 end
-  if v > 1 then return 1 end
-  return v
-end
-
-local function rampTo(current, target, rate, dt)
-  if current < target then return min(target, current + rate * dt) end
-  return max(target, current - rate * dt)
-end
-
--- Sailing is a comfort/efficiency function: it is disabled in SPORT (driver
--- wants engine braking + instant ICE) and in BATTERY_CONTROL below target SOC
--- (the whole point of that mode is to run the ICE and charge).
+-- Off in SPORT (engine braking, instant ICE) and in BATTERY CONTROL below the
+-- target SOC (that mode runs the ICE to charge).
 local function modeAllowsSail(ctx)
   if (ctx.sailingEnabled or 1) == 0 then return false, "DISABLED" end
-  -- The recuperation selector owns the lift-off character. Free-wheeling IS
-  -- the OFF position of that selector, so any active regen level (LOW / MED /
-  -- HIGH) has to win over sailing - otherwise the driver dials in one-pedal
-  -- driving and the car keeps gliding with 0 Nm.
+  -- free-wheeling is the OFF position of the regen selector: any regen level wins
   if ctx.regenAllowsSail == false then return false, "REGEN" end
   if ctx.deMode == "SPORT" then return false, "SPORT" end
   if ctx.edriveMode == "BATTERY_CONTROL" and (ctx.soc or 1) < (ctx.batteryTargetSoc or 0.8) then
@@ -150,9 +81,10 @@ local function modeAllowsSail(ctx)
 end
 
 local function entryConditionsMet(ctx)
+  if ctx.tsaFreeze then return false, "TSA" end
   local ok, why = modeAllowsSail(ctx)
   if not ok then return false, why end
-  -- entry gate only: a sail in progress is not aborted by a corner
+  -- entry only: a corner does not abort a running sail
   if (ctx.sportIndex or 0) > SAIL_SPORT_MAX then return false, "SPORTY" end
   if (ctx.gearSign or 1) <= 0 then return false, "GEAR" end
   if (ctx.throttleRaw or 0) > SAIL_THROTTLE_MAX then return false, "THROTTLE" end
@@ -163,8 +95,8 @@ local function entryConditionsMet(ctx)
   return true, ""
 end
 
--- Returns exitReason string or nil. Driver inputs exit immediately; the
--- "soft" reasons (speed window, mode/policy) respect SAIL_MIN_S.
+-- Returns the exit reason or nil. Pedals, SOC, gear and mode exit at once;
+-- the speed window (with hysteresis) only after the dwell SAIL_MIN_S.
 local function checkExit(ctx, dwell)
   if (ctx.throttleRaw or 0) > SAIL_THROTTLE_MAX then return "THROTTLE" end
   if (ctx.brakeRaw or 0) > SAIL_BRAKE_MAX then return "BRAKE" end
@@ -182,20 +114,19 @@ local function checkExit(ctx, dwell)
   return nil
 end
 
--- After a sail phase, does the ICE have to come back?
+-- Does the ICE have to come back after the sail?
 local function needsIceAfterSail(ctx, reason)
-  -- pure-EV (MAX EV with evOnly): never restart the ICE from a sail exit;
-  -- the demand/FAST shortcuts below would otherwise bypass the master policy
+  -- pure EV: never; the shortcuts below would bypass the VCU policy
   if ctx.evOnly then return false end
   if ctx.policyWantsIce then return true end
   if reason == "SOC" or reason == "CHARGING" or reason == "SPORT" or reason == "FAST" then
     return true
   end
   if reason == "THROTTLE" then
-    -- policyWantsIce is checked above; this frame's policy ran before us
+    -- the policy keeps its persistence; only an urgent pedal restarts here
     return ctx.iceStartUrgent == true
   end
-  -- BRAKE / SLOW / GEAR: stay electric, the master's normal policy decides later.
+  -- BRAKE / SLOW / GEAR: stay electric, the policy decides later
   return false
 end
 
@@ -212,15 +143,9 @@ local function setCtxOutputs(ctx, suppressRegen, suppressDrive, iceRequest)
   ctx.sailSuppressDrive = suppressDrive
   ctx.sailIceRequest    = iceRequest
   ctx.sailRestartUrgent = (iceRequest == "on") and state.restartUrgent or false
-  -- compatibility fields, the sequencer owns K0 / starter / drag torque
-  ctx.sailK0Override    = nil
-  ctx.sailStarterPulse  = false
-  ctx.sailDragAssistNm  = 0
-  ctx.sailExitReason    = state.exitReason
 end
 
--- Restart urgency out of a sail: the policy calls the pedal urgent
--- (kickdown pedal), or the battery / speed window forces the engine.
+-- urgent restart: kickdown pedal, or forced by SOC / speed window
 local function restartIsUrgent(ctx, reason)
   if reason == "SOC" or reason == "FAST" then return true end
   if reason == "THROTTLE" then return ctx.iceStartUrgent == true end
@@ -230,6 +155,14 @@ end
 local function transition(newPhase)
   state.phase = newPhase
   state.phaseTimer = 0
+end
+
+-- latch the exit reason and whether (and how urgently) the ICE must restart
+local function beginExit(ctx, reason)
+  state.exitReason = reason
+  state.restarting = needsIceAfterSail(ctx, reason)
+  state.restartUrgent = state.restarting and restartIsUrgent(ctx, reason)
+  state.restartTimer = 0
 end
 
 -- ===========================================================
@@ -262,21 +195,20 @@ end
 function M.initStage2(ctx) end
 
 function M.updateGFX(ctx, dt)
-  if not ctx or ctx.resetting then return end
+  if not ctx then return end
   dt = dt or 0
   state.phaseTimer = state.phaseTimer + dt
   if state.rearmTimer > 0 then state.rearmTimer = max(0, state.rearmTimer - dt) end
+  -- diagnostic only (debug log / getState)
+  state.k0Cmd = ctx.k0Current or ((state.phase == "DRIVE") and 1.0 or 0)
 
   local suppressRegen, suppressDrive = false, false
   local iceRequest = nil
 
-  -- ---------------------------------------------------------
   -- DRIVE: watch for the entry window
-  -- ---------------------------------------------------------
   if state.phase == "DRIVE" then
     state.sailTime = 0
     state.restarting = false
-    state.k0Cmd = ctx.k0Current or 1.0
 
     local ok = entryConditionsMet(ctx)
     if ok and state.rearmTimer <= 0 then
@@ -284,7 +216,6 @@ function M.updateGFX(ctx, dt)
       if state.armTimer >= SAIL_ARM_S then
         state.armTimer = 0
         state.exitReason = ""
-        state.k0Cmd = ctx.k0Current or 1.0
         transition("SAIL_ENTER")
         if ctx.dbg then ctx.dbg(2, "sailing", string.format(
           "SAIL_ENTER v=%.0fkm/h soc=%.2f", ctx.speedKmh or 0, ctx.soc or 0)) end
@@ -293,23 +224,15 @@ function M.updateGFX(ctx, dt)
       state.armTimer = 0
     end
 
-  -- ---------------------------------------------------------
-  -- SAIL_ENTER: ask the sequencer for a FAST release (share out, K0 open,
-  -- ignition off after K0), already free-wheeling
-  -- ---------------------------------------------------------
+  -- SAIL_ENTER: free-wheeling while the sequencer releases the ICE (FAST)
   elseif state.phase == "SAIL_ENTER" then
     suppressRegen, suppressDrive = true, true
     iceRequest = "off"
-    state.k0Cmd = ctx.k0Current or 0
 
-    local abort = checkExit(ctx, SAIL_MIN_S)  -- during entry, any trigger aborts
+    local abort = checkExit(ctx, SAIL_MIN_S)  -- any trigger aborts the entry
     if abort then
-      state.exitReason = abort
-      state.restarting = needsIceAfterSail(ctx, abort)
-      state.restartUrgent = state.restarting and restartIsUrgent(ctx, abort)
-      state.restartTimer = 0
-      -- Release the suppressions in the SAME frame the trigger is seen so the
-      -- pedal-to-torque latency stays inside the < 100 ms spec target.
+      beginExit(ctx, abort)
+      -- release in the same frame (see SAIL_EXIT)
       suppressRegen, suppressDrive = false, false
       if state.restarting then iceRequest = "on" else iceRequest = nil end
       transition("SAIL_EXIT")
@@ -318,23 +241,15 @@ function M.updateGFX(ctx, dt)
       transition("SAIL")
     end
 
-  -- ---------------------------------------------------------
-  -- SAIL: true free-wheel. Zero drive torque AND zero regen.
-  -- ---------------------------------------------------------
+  -- SAIL: free-wheel, zero drive torque and zero regen
   elseif state.phase == "SAIL" then
     suppressRegen, suppressDrive = true, true
     iceRequest = "off"
-    state.k0Cmd = ctx.k0Current or 0
     state.sailTime = state.sailTime + dt
 
     local reason = checkExit(ctx, state.sailTime)
     if reason then
-      state.exitReason = reason
-      state.restarting = needsIceAfterSail(ctx, reason)
-      state.restartUrgent = state.restarting and restartIsUrgent(ctx, reason)
-      state.restartTimer = 0
-      -- Same-frame release: the motor answers the pedal / the regen ramp starts
-      -- immediately instead of one frame later.
+      beginExit(ctx, reason)
       suppressRegen, suppressDrive = false, false
       if state.restarting then iceRequest = "on" end
       transition("SAIL_EXIT")
@@ -343,27 +258,19 @@ function M.updateGFX(ctx, dt)
         reason, state.sailTime, tostring(state.restarting))) end
     end
 
-  -- ---------------------------------------------------------
-  -- SAIL_EXIT: hand back to DRIVE. Two flavours:
-  --   * no ICE needed  -> release the suppressions, electric driving, done.
-  --   * ICE needed     -> keep requesting it until the sequencer has it
-  --                       coupled (BLEND/ON) - crank, rev-match with K0 open
-  --                       and the K0 engage all happen in the sequencer.
-  -- ---------------------------------------------------------
+  -- SAIL_EXIT: drive and regen released at once (the motor answers the pedal
+  -- this frame, a brake tip goes through the VCU's regen ramp). If the ICE is
+  -- needed, request it until the sequencer has it coupled (BLEND / ON).
   elseif state.phase == "SAIL_EXIT" then
-    -- Drive torque and regen are released immediately: the motor answers the
-    -- pedal in the same frame the driver touches it (< 100 ms spec target),
-    -- and a brake tip goes through the master's regen ramp, not a step.
     suppressRegen, suppressDrive = false, false
 
     if state.restarting then
       iceRequest = "on"
       state.restartTimer = state.restartTimer + dt
-      state.k0Cmd = ctx.k0Current or 0
       local es = ctx.iceEngageState or "OFF"
       local coupled = (es == "BLEND" or es == "ON")
       if coupled or state.restartTimer >= RESTART_TIMEOUT_S then
-        -- request -> fired, as the old drag start reported it (QA T11)
+        -- request -> fired, else the time waited
         state.restartLatency = (coupled and ctx.iceFireMs and ctx.iceFireMs > 0)
           and (ctx.iceFireMs / 1000) or state.restartTimer
         state.restarting = false
@@ -376,8 +283,7 @@ function M.updateGFX(ctx, dt)
           state.restartTimer * 1000, ctx.iceRpm or 0)) end
       end
     else
-      -- Electric exit: nothing to sequence, let the master resume control.
-      state.k0Cmd = ctx.k0Current or 0
+      -- electric exit
       state.rearmTimer = SAIL_REARM_S
       transition("DRIVE")
     end
@@ -386,7 +292,7 @@ function M.updateGFX(ctx, dt)
   setCtxOutputs(ctx, suppressRegen, suppressDrive, iceRequest)
   publish(ctx)
 
-  -- 1 Hz diagnostic, only above debugLogLevel 2
+  -- 1 Hz diagnostic at debugLevel >= 3
   state.dbgTimer = state.dbgTimer + dt
   if (ctx.debugLevel or 0) >= 3 and state.dbgTimer >= DBG_INTERVAL_S then
     state.dbgTimer = 0

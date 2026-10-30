@@ -1,32 +1,19 @@
--- powerCurves.lua - ETK 854 ActiveHybrid - engine/motor envelope provider
+-- powerCurves.lua - ETK 854 ActiveHybrid - engine/motor torque envelope provider
 --
--- Replaces the hard-coded "ETK i4 2.0T" torque approximation in the master VCU.
--- Reads the REAL curves off the powertrain devices at initStage2 so the same
--- controller works unchanged on:
---   * i4 2.0 petrol turbo (idle ~800, maxRPM 7000)
---   * I6 3.0 petrol turbo (idle ~800, maxRPM 7000)
---   * I6 3.0 diesel turbo (idle ~750, maxRPM 5500)
--- No petrol-specific constants (no fixed 850 rpm idle threshold, no fixed
--- 5000 rpm peak plateau) survive in the hot path.
---
--- Reads:
---   powertrain.getDevice("mainEngine").torqueData / .idleRPM / .maxRPM
---   powertrain.getDevice("integratedMotor").torqueCurve / .regenCurve / .maxRPM
---
--- Writes: nothing (pure provider). All accessors are safe before initStage2 —
--- they fall back to the analytic envelope below.
+-- Reads the real torque curves at initStage2 and on every reset, so the VCU needs
+-- no engine-specific constants. Pure provider, Nm / rpm; lookups use |rpm| and
+-- never return negative torque; before initStage2 the analytic fallback applies.
+-- Reads mainEngine: torqueData, idleRPM, maxRPM;
+--       integratedMotor: torqueCurve, regenCurve, maxRPM, maxTorque.
 
 local M = {}
 M.name = "powerCurves"
 
 local floor, abs, max, min = math.floor, math.abs, math.max, math.min
 
--- ===========================================================
--- Analytic fallback envelope
--- Only used when a device exposes no usable curve table (would otherwise mean
--- a nil lookup silently zeroing the ICE share of the torque split).
--- Expressed in FRACTIONS of the rev range so it degrades sanely on a diesel.
--- ===========================================================
+-- Analytic fallback envelope, used only without a usable device curve (a nil
+-- lookup would zero the ICE share of the split); rev-range relative so it also
+-- fits a diesel.
 local FB_ICE_PEAK_NM       = 350
 local FB_ICE_IDLE_RPM      = 800
 local FB_ICE_MAX_RPM       = 7000
@@ -40,9 +27,7 @@ local FB_MOTOR_CORNER_RPM  = 3800   -- constant-torque -> constant-power corner
 local FB_MOTOR_MAX_RPM     = 10000
 local FB_MOTOR_REGEN_NM    = 180    -- matches maxRegenTorque in the jbeam
 
--- ===========================================================
--- Cached state
--- ===========================================================
+-- Cached state --
 local state = {
   iceCurve      = nil,   -- [rpm] -> Nm (net, incl. turbo), dense, 0-based
   iceCurveMax   = 0,     -- highest rpm index present in iceCurve
@@ -64,14 +49,11 @@ local state = {
   resolved      = false,
 }
 
--- ===========================================================
--- Curve extraction
--- ===========================================================
+-- Curve extraction --
 
--- combustionEngine.getTorqueData() returns curves sorted by priority DESC, so
--- entry 1 is the fully boosted variant (turbo/SC) = the real max envelope.
--- Its .torque array is 1-based over rpm (index k holds the value for rpm k-1)
--- and already has friction subtracted, so it can go negative near 0 rpm.
+-- getTorqueData() sorts curves by priority DESC: entry 1 is the fully boosted
+-- envelope. Its .torque is 1-based (index k = rpm k-1) and net of friction, so
+-- it can go negative near 0 rpm.
 local function extractIceCurve(engine)
   local td = engine and engine.torqueData
   if type(td) ~= "table" or type(td.curves) ~= "table" then return nil, 0 end
@@ -93,8 +75,7 @@ local function extractIceCurve(engine)
   return curve, maxIdx
 end
 
--- Both the motor torqueCurve and regenCurve are produced by createCurve() and
--- are dense 0-based arrays, so they can be used as-is.
+-- motor torqueCurve / regenCurve come from createCurve(): dense, 0-based, used as-is
 local function extractDenseCurve(tbl)
   if type(tbl) ~= "table" then return nil, 0 end
   local maxIdx, count = 0, 0
@@ -117,9 +98,7 @@ local function curveLookup(curve, maxIdx, rpm, fallbackFn)
   return v > 0 and v or 0
 end
 
--- ===========================================================
--- Analytic fallbacks (rev-range relative, engine-family agnostic)
--- ===========================================================
+-- Analytic fallbacks --
 local function fallbackIceTorque(rpm)
   local r = abs(rpm or 0)
   local idle, maxR = state.iceIdleRPM, state.iceMaxRPM
@@ -148,14 +127,12 @@ end
 
 local function fallbackRegenTorque(rpm)
   local r = abs(rpm or 0)
-  -- Mirrors the device's regenFadeRPM ramp so low-speed regen fades out.
+  -- mirrors the device's regenFadeRPM ramp
   local fade = min(1, r / 600)
   return state.regenPeakNm * fade
 end
 
--- ===========================================================
--- Public accessors
--- ===========================================================
+-- Public accessors --
 function M.iceMaxTorqueAtRpm(rpm)
   return curveLookup(state.iceCurve, state.iceCurveMax, rpm, fallbackIceTorque)
 end
@@ -175,11 +152,9 @@ function M.motorPeakNm() return state.motorPeakNm end
 function M.motorMaxRPM() return state.motorMaxRPM end
 function M.isResolved()  return state.resolved end
 
--- ===========================================================
--- Lifecycle
--- ===========================================================
+-- Lifecycle --
 function M.init(ctx)
-  -- Devices do not exist yet at init; keep the fallback envelope until stage 2.
+  -- devices do not exist yet: fallback until stage 2
   state.resolved = false
 end
 
@@ -200,14 +175,8 @@ function M.initStage2(ctx)
         state.icePeakNm  = td.maxTorque
         state.icePeakRpm = td.maxTorqueRPM or 0
       end
-      -- torqueData.maxPower is in MECHANICAL hp (1/7120.8 in combustionEngine
-      -- = kW x 1.34102), NOT metric PS - convert with 0.7457, else the log
-      -- under-reports (N57 read "227 kW" instead of the true 230.4 kW/313 PS).
+      -- torqueData.maxPower is mechanical hp, not PS
       if type(td.maxPower) == "number" then state.iceMaxPowerKw = td.maxPower * 0.7457 end
-    end
-    if type(engine.maxTorqueRating) == "number" and engine.maxTorqueRating > 0
-       and state.icePeakNm <= 0 then
-      state.icePeakNm = engine.maxTorqueRating
     end
   end
 
@@ -232,9 +201,7 @@ function M.initStage2(ctx)
 
   state.resolved = (state.iceCurve ~= nil) and (state.motorCurve ~= nil)
 
-  -- one-time init summary; unconditional so every run documents which curve
-  -- source is active (FALLBACK here means every ICE decision runs on the
-  -- analytic approximation - that must be visible without debugLogLevel)
+  -- always logged: FALLBACK means the ICE logic runs on the approximation
   log("I", "etk854hybrid.powerCurves", string.format(
     "ICE %.0fNm@%.0f idle=%.0f max=%.0f (%.0fkW) curve=%s | MOTOR %.0fNm max=%.0f curve=%s regenPeak=%.0fNm",
     state.icePeakNm, state.icePeakRpm, state.iceIdleRPM, state.iceMaxRPM,
@@ -243,11 +210,8 @@ function M.initStage2(ctx)
     state.motorCurve and "real" or "FALLBACK", state.regenPeakNm))
 end
 
-function M.updateGFX(ctx, dt) end
-function M.updateFixedStep(ctx, dt) end
-
 function M.reset(ctx)
-  -- Devices are rebuilt on reset; re-resolve the curves.
+  -- devices are rebuilt on reset
   M.initStage2(ctx)
 end
 

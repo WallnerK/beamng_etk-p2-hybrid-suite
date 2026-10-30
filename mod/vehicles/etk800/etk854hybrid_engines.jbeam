@@ -1,78 +1,41 @@
 {
 // ============================================================================
-// ETK 854 ActiveHybrid - Engine Management (ECU) parts for the R6 ICE variants
+// ETK 854 ActiveHybrid - ECU parts for the R6 ICE variants
 // ----------------------------------------------------------------------------
-// WS-A / Task #4.  These parts DO NOT copy or override any base game file:
-// they only occupy the base game ECU slots of the stock 3.0L R6 engines and
-// re-tune the turbocharger (wastegateStart / maxExhaustPower / engineDef) plus
-// the rev limiter.  The naturally aspirated torque table of the base engine is
-// left untouched on purpose - in BeamNG the delivered torque of a boosted
-// engine is  T_na(rpm) * boostFactor(rpm),  so power/torque of a turbo variant
-// is set through the turbo model, never through the NA table.
+// Occupy the base game ECU slots of the stock 3.0 L R6 engines and re-tune the
+// turbocharger and the rev limiter. The NA torque table stays untouched: a
+// boosted engine delivers T_na(rpm) * boostFactor(rpm), so power is set through
+// the turbo model only.
 //
-// Base game reference points (verified against the shipped configs):
-//   petrol  etk_engine_i6_3.0_petrol_ecu_300 : 304 hp / 224 kW / 410 Nm
-//                                              wg 6.0 psi,  maxExhaustPower 13000
-//   petrol  etk_engine_i6_3.0_petrol_ecu_340 : 346 hp / 258 kW / 465 Nm
-//                                              wg 10.0 psi, maxExhaustPower 14000
-//   diesel  etk_engine_i6_3.0_diesel_ecu_260 : 265 hp / 195 kW / 570 Nm
-//                                              wg 15.0 psi, maxExhaustPower 4000
-//   diesel  etk_engine_i6_3.0_diesel_ecu_310 : 327 hp / 244 kW / 645 Nm
-//                                              wg 16.0 psi, maxExhaustPower 5000
+// Base game references (i6 3.0):
+//   petrol ecu_300: 224 kW / 410 Nm, wg  6 psi, maxExhaustPower 13000
+//   petrol ecu_340: 258 kW / 465 Nm, wg 10 psi, maxExhaustPower 14000
+//   diesel ecu_260: 195 kW / 570 Nm, wg 15 psi, maxExhaustPower  4000
+//   diesel ecu_310: 244 kW / 645 Nm, wg 16 psi, maxExhaustPower  5000
 //
-// ----------------------------------------------------------------------------
-// HOW THE STATIC POWER CURVE IS PRODUCED (see plans/PLAN_N57_BITURBO.md §1.3)
-// ----------------------------------------------------------------------------
-//   T(rpm) = T_NA(rpm) * (1 + 0.0000087 * boostPa * efficiency(rpm))
-//            - friction - dynamicFriction * rpm * rpmToAV
-//   boost  = min(pressurePSI[turbineRPM],  wastegateStart + wastegateRange*0.5)
-//   Rule of thumb: 1 psi  ==  +6 % torque  x  efficiency.
-//
-//   IMPORTANT (turbocharger.lua:246, :512): the wastegate SETPOINT is
-//       wastegateStart + (wastegateLimit - wastegateStart) * 0.5
-//   and NOT wastegateStart.  With no explicit wastegateLimit the game inserts
-//   start + 0.01 psi, i.e. the setpoint equals wastegateStart.  Introducing a
-//   1 psi control range therefore RAISES boost by 0.5 psi unless wastegateStart
-//   is lowered by the same amount - both ECUs below do exactly that.
-//
-//   engineDef column 2 = efficiency (acts on boost, full effect on the curve)
-//   engineDef column 3 = exhaustFactor (turbine drive only, no effect once the
-//                        wastegate saturates - which it does over the whole
-//                        usable range on both calibrations here)
-//   inertia / pressureRatePSI are PURELY DYNAMIC: they change spool time only
-//   and can be iterated without touching the measured torque/power figures.
-//
-// Author: ETK 854 Hybrid Project   Version: 2.0 (2026-08-14)
+// Static curve (turbocharger.lua):
+//   T(rpm)   = T_NA(rpm) * (1 + 0.0000087 * boostPa * efficiency(rpm))
+//              - friction - dynamicFriction * rpm * rpmToAV
+//   boost    = min(pressurePSI[turbineRPM], setpoint); 1 psi ~ +6 % torque x efficiency
+//   setpoint = wastegateStart + (wastegateLimit - wastegateStart) * 0.5
+//   Without wastegateLimit the range is 0.01 psi; all ECUs here use a 1 psi
+//   range and lower wastegateStart by 0.5 psi to compensate.
+//   engineDef: col 2 efficiency (scales boost), col 3 exhaustFactor (turbine
+//   drive only, no effect once the wastegate saturates). inertia and
+//   pressureRatePSI change spool time only, not the static curve.
+// Fitted with an offline turbocharger.lua model (base ECUs reproduced < 1 %).
 // ============================================================================
 
 // ----------------------------------------------------------------------------
-// B58-Style petrol ECU - reference hybrid ICE calibration: 210 kW / 450 Nm
+// B58-style petrol ECU - series hybrid calibration: 210 kW / 450 Nm
 // ----------------------------------------------------------------------------
-// Derivation (base = etk_engine_i6_3.0_petrol_ecu_340, 258 kW / 465 Nm):
-//
-//   Torque:  the 300 -> 340 ECU pair gives a linear sensitivity of roughly
-//            +13.7 Nm and +8.5 kW per psi of wastegate SETPOINT on this
-//            hardware (410 Nm/224 kW @ 6 psi -> 465 Nm/258 kW @ 10 psi).
-//            465 Nm -> 450 Nm  =>  -15 Nm  =>  -1.1 psi  =>  setpoint 8.8 psi.
-//
-//   Power:   8.8 psi alone would still give ~249 kW because the ecu_340
-//            engineDef keeps the turbine spinning up to 6500 rpm (its power
-//            peak sits at 5400-6450 rpm).  The reference hybrid's B58 instead makes its
-//            210 kW at 5000-6000 rpm and then falls away.  Two levers:
-//              a) maxExhaustPower 14000 -> 10400 : caps the exhaust energy fed
-//                 to the turbine.  Low/mid rpm stays below that cap, so the
-//                 450 Nm plateau is unaffected, while high rpm stops gaining
-//                 boost -> constant-power region instead of rising torque.
-//              b) engineDef efficiency above 4500 rpm cut hard (0.75 -> 0.42 at
-//                 5000, 0.55 -> 0.24 at 6000).  The turbine drops back toward
-//                 the 60-90k rpm region of the stock pressurePSI table, i.e.
-//                 3-5 psi instead of ~9.
-//              c) revLimiterRPM 7000 -> 6300 (reference hybrid redline character, and it
-//                 keeps the engine out of the region where even the bare NA
-//                 table would exceed the 210 kW target).
-//
-//   Expected shape:  ~450 Nm plateau 1500-4400 rpm, ~210 kW at 5000-6000 rpm.
-//   In-game measurement of the 1.0 calibration: 217 kW / 447 Nm.
+// Base ecu_340. The 300/340 pair gives ~+13.7 Nm / +8.5 kW per psi of setpoint:
+// 450 Nm => setpoint 8.8 psi. That alone still gives ~249 kW, so the top end is
+// pulled down by
+//   a) maxExhaustPower 14000 -> 10400 (high rpm stops gaining boost, plateau kept)
+//   b) engineDef efficiency cut hard above 4500 rpm (turbine back to 3-5 psi)
+//   c) revLimiterRPM 7000 -> 6300
+// Result: ~450 Nm plateau 1500-4400 rpm, ~217 kW at the top end.
 // ----------------------------------------------------------------------------
 "etk854hybrid_ecu_b58_745e": {
     "information": {
@@ -83,25 +46,17 @@
     "slotType": "etk_engine_i6_3.0_petrol_ecu",
     "slots": [
         ["type", "default", "description"],
-        // No factory speed limiter.  The slot stays coreSlot:true exactly like
-        // every base game ETK ECU (etk_engine_i6_3.0_petrol_ecu.jbeam); the
-        // "unlimited" case is expressed by the dedicated base game part
-        // etk_engine_ecu_speedlimit_off (topSpeedLimit -1, "Speed Limiter
-        // Delete"), NOT by an empty slot - no shipped ETK config leaves this
-        // slot empty, and an empty coreSlot would leave topSpeedLimit unset.
+        // No speed limiter: base part etk_engine_ecu_speedlimit_off (an empty
+        // coreSlot would leave topSpeedLimit unset)
         ["etk_engine_ecu_speedlimit", "etk_engine_ecu_speedlimit_off", "Speed Limiter", {"coreSlot": true}]
     ],
     "mainEngine": {
-        // modern direct-injection warm restart: starter path fires ~0.2 s sooner (default 0.5, combustionEngine.lua:1724)
+        // direct-injection warm restart: starter fires ~0.2 s sooner (base 0.5)
         "starterThrottleKillTime": 0.30,
-        // The reference hybrid's B58 is limited well below the standalone B58 (7000 rpm)
-        "revLimiterRPM": 6300,
+        "revLimiterRPM": 6300,          // standalone engine: 7000
         "revLimiterType": "soft",
-        // Realism backlog A4: the base game petrol table peaks at 0.51 brake
-        // thermal efficiency, which no production spark-ignition engine
-        // reaches.  Scaled by 0.38/0.51 so the SHAPE stays base game and only
-        // the level becomes plausible for a modern Miller-cycle turbo six.
-        // Directly visible in fuel consumption and therefore in the PHEV range.
+        // Base table (peak 0.51, unrealistic for spark ignition) scaled by
+        // 0.38/0.51, shape kept. Drives fuel use and the PHEV range.
         "burnEfficiency": [
             [0,    0.10],
             [0.05, 0.25],
@@ -111,47 +66,26 @@
         ]
     },
     "vehicleController": {
-        // 8HP / ActiveHybrid shift program (lua/controller/vehicleController/
-        // shiftLogic/etk854hybrid_8hp.lua, reached through the legacy loader shim
-        // lua/controller/shiftLogic-etk854hybrid_8hp.lua). The powertrain part
-        // (etk_transmission slot, loaded AFTER this ECU) sets the same key; it
-        // is repeated here so every R6 build gets the program even if that part
-        // is swapped.
+        // 8HP shift program (vehicleController/shiftLogic/etk854hybrid_8hp.lua).
+        // Also set by the powertrain part; repeated so every R6 build gets it.
         "shiftLogicName": "etk854hybrid_8hp",
-        // highShiftUpRPM = the 8HP full-load upshift point nUpFull (turbine rpm).
-        // 6100 not 6200: under e-boost the shaft gains rpm faster than the
-        // shift executes; 200 rpm headroom to the 6300 limiter keeps the
-        // upshift ahead of the motor redline guard (which starts at 5900).
-        // Base petrol I6 ships 6800 / [0,0,0,2800,3800,4300,4700,4700].
+        // full-load upshift point nUpFull (turbine rpm): 200 rpm headroom to the
+        // limiter keeps the upshift ahead of the motor redline guard (5900)
         "highShiftUpRPM": 6100,
-        // highShiftDownRPM is NOT used by the 8HP program and is dead for the
-        // base fallback too: calculateOptimalLoadShiftPoints (powertrain part)
-        // overwrites both high tables from the ICE curve
-        // (vehicleController.lua:842-844). Kept for reference only.
-        "highShiftDownRPM": [0, 0, 0, 2600, 3400, 3900, 4200, 4200],
         // Engine-specific 8HP calibration (etk854hybrid_8hpCore.lua FAMILY):
-        //   lugMinRPM      forced downshift below this with the ICE coupled
-        //                  (>= 1.30 x idle is enforced on top); upshifts never
-        //                  land below lugMin + 150
-        //   coastDnRPM     lift-off downshift with the ICE coupled, no regen
-        //   evLugBonusRPM  part-load points drop by up to this much while the
-        //                  E-machine alone could carry the demand
-        //   turboRampRPM / lagMin  boost build-up for the torque-reserve checks
-        //   resvMaxRPM     torque-reserve vetoes only below this (lug region)
-        //   brakeTargetRPM per program [calm, dynamic]: brake-downshift target;
-        //                  the ECO/COMFORT calm value is also the regen floor
-        //                  under the brake while the ICE is coupled
-        //   coastTargetRPM coupled-ICE overrun: liftUp target / regen floor (lift)
-        //   startCapRPM    ECO/COMFORT ICE-start rev cap (<= etk854hybrid8hp.iceStartCapRPM)
-        //   iceEngageMinRPM ECO/COMFORT lowest predicted engagement rpm of a start
-        //   sportRelaxRPM  SPORT relaxed upshift floor (B58 2000 -> 1850, round 2:
-        //                  4th at 50 / 7th at 100 km/h ~1930 rpm relaxed); also the minimum
-        //                  post-shift rpm into the relaxed 7th (relaxed SPORT
-        //                  may use 7th, never 8th; etk854hybrid_8hpCore.lua
-        //                  K.relaxTopExtra / nUpPost)
-        //   iceEngageMinRPM applies to demand starts only (engageFloorWanted)
-        // Torque-first ECO/COMFORT (feedback 2026-10 round 2): brake targets
-        // ECO [2000,2600] -> [1400,1700], COMFORT [2200,3000] -> [1600,2000].
+        //   lugMinRPM       forced downshift below (ICE coupled; >= 1.3 x idle);
+        //                   upshifts land >= lugMin + 150
+        //   coastDnRPM      lift-off downshift, ICE coupled, no regen
+        //   evLugBonusRPM   part-load points drop by up to this while EV can carry the demand
+        //   turboRampRPM, lagMin  boost build-up for the torque-reserve checks
+        //   resvMaxRPM      torque-reserve vetoes only below this
+        //   brakeTargetRPM  [calm, dynamic] brake-downshift target (ECO/COMFORT low,
+        //                   torque-first); calm ECO/COMFORT = regen floor under the
+        //                   brake with the ICE coupled
+        //   coastTargetRPM  coupled overrun: liftUp target / regen floor
+        //   startCapRPM     ECO/COMFORT ICE-start rev cap (clamped to iceStartCapRPM)
+        //   iceEngageMinRPM ECO/COMFORT lowest predicted engagement rpm of a demand start
+        //   sportRelaxRPM   SPORT relaxed upshift floor, min post-shift rpm into relaxed 7th
         "etk854hybrid8hpEngine": {
             "family": "petrol",
             "lugMinRPM": 950,
@@ -168,29 +102,21 @@
         }
     },
     "turbocharger": {
-        // Boost SETPOINT stays at the calibrated 8.8 psi:
-        //   8.3 + (9.3 - 8.3) * 0.5 = 8.8   (was 8.8 + 0.01*0.5 = 8.805)
-        // Realism backlog A3 - a 1 psi wastegate control range instead of the
-        // degenerate 0.01 psi default (base game pattern: *_ecu_stage3).
+        // setpoint 8.8 psi (1 psi range)
         "wastegateStart": 8.3,
         "wastegateLimit": 9.3,
-        // 14000 -> 10400 : clamps high-rpm spool -> constant-power top end
-        // (11000 measured 217 kW in-game; 10400 + eff trim targets 210)
+        // 14000 -> 10400: clamps high-rpm spool -> constant-power top end
         "maxExhaustPower": 10400,
 
-        // ---- Realism backlog A1/A2: spool (purely dynamic, curve unchanged) --
-        // The base game petrol intake ships pressureRatePSI 20, i.e. the boost
-        // smoother alone needs 0.44 s just to reach 8.8 psi - that dominates
-        // everything the turbine does.  45 psi/s makes the ramp rate a
-        // non-issue and lets the turbine inertia set the response again.
+        // ---- Spool (dynamic only) ------------------------------------------
+        // base 20 psi/s needs 0.44 s to 8.8 psi; 45 lets the turbine inertia
+        // set the response
         "pressureRatePSI": 45,
-        // 0.90 -> 0.55 : twin-scroll mono-turbo on a 3.0 six, not the large
-        // single-scroll unit the base game value implies.
-        "inertia": 0.55,
+        "inertia": 0.55,                // base 0.90; twin-scroll mono-turbo
 
         "engineDef": [
             // engineRPM, efficiency, exhaustFactor
-            // rows up to 4000 rpm are the ecu_340 values (torque plateau kept)
+            // up to 4000 rpm = ecu_340 (torque plateau kept)
             [0,    0.00, 0.25],
             [650,  0.60, 0.35],
             [1000, 0.65, 0.55],
@@ -200,9 +126,8 @@
             [2500, 0.69, 1.00],
             [3000, 0.67, 1.00],
             [4000, 0.68, 1.00],
-            // from here this calibration deliberately runs out of breath
-            // (ecu_340 for comparison: 4500 n/a, 5000 0.75, 5500 0.70,
-            //  6000 0.55, 6500 0.38, 7000 0.30)
+            // deliberately runs out of breath from here
+            // (ecu_340: 5000 0.75, 6000 0.55, 7000 0.30)
             [4500, 0.62, 1.00],
             [5000, 0.42, 1.00],
             [5500, 0.31, 1.00],
@@ -215,29 +140,16 @@
 },
 
 // ----------------------------------------------------------------------------
-// N57D30TOP BiTurbo ECU - reference diesel calibration: 230 kW / 630 Nm
+// N57D30TOP twin-turbo ECU - series diesel calibration: 230 kW / 630 Nm
 // ----------------------------------------------------------------------------
-// Replaces the previous etk854hybrid_ecu_b57_730d (195 kW / 620 Nm).
-// Real engine: R6 2993 cm3, two-stage register charging (small variable-geometry
-// HP turbo + large LP turbo with bypass flaps), 630 Nm @ 1500-2500 rpm,
-// 230 kW (313 PS) @ 4400 rpm, ~5400 rpm limiter, 8HP70, 2.81 rear axle.
-//
-// BeamNG models exactly ONE turbocharger instance per engine
-// (combustionEngine.lua:2105-2118 reads a single section NAME, not a list) -
-// every base game "Twin Turbo" part is likewise one turbo definition with two
-// meshes.  The register characteristic is therefore reproduced by SHAPING the
-// single turbo instead of stacking two:
-//   * pressurePSI reaches positive boost at ~13k turbine rpm instead of the
-//     base game's 60k  -> no dead zone at low engine speed (HP stage)
-//   * low inertia (0.45 vs. 1.30) + high pressureRatePSI (70 vs. 30)
-//     -> 0.33 s to 90 % boost at 1500 rpm instead of 0.83 s
-//   * a U-shaped efficiency curve: 0.92 @1500 (HP stage) -> 0.54 @3500
-//     (hand-over) -> 0.74 @5400 (LP stage in its sweet spot)
-//
-// Predicted static curve (offline model reproducing turbocharger.lua, validated
-// against four base game configs to <1 %):
-//     630 Nm  1500-2500 rpm      230.3 kW / 313 PS @ 4540 rpm
-//     spline overshoot puts the reported maximum at ~637 Nm @ 1585 rpm
+// Real engine: two-stage register charging, 630 Nm @ 1500-2500 rpm, 230 kW
+// @ 4400 rpm, ~5400 rpm limiter. BeamNG models one turbocharger per engine, so
+// the register characteristic is shaped into the single turbo:
+//   - pressurePSI positive from ~13k turbine rpm (base 60k): no low-rpm hole
+//   - inertia 0.45 / pressureRatePSI 70 (base 1.30 / 30): 0.33 s to 90 % boost
+//     at 1500 rpm (base 0.83 s)
+//   - U-shaped efficiency: 0.92 @ 1500 (HP) -> 0.54 @ 3500 -> 0.74 @ 5400 (LP)
+// Predicted: 630 Nm 1500-2500 rpm, 230 kW @ ~4540 rpm (spline peak ~637 Nm).
 // ----------------------------------------------------------------------------
 "etk854hybrid_ecu_n57_535d": {
     "information": {
@@ -248,20 +160,18 @@
     "slotType": "etk_engine_i6_3.0_diesel_ecu",
     "slots": [
         ["type", "default", "description"],
-        // see the B58 ECU above: unlimited == etk_engine_ecu_speedlimit_off
+        // no speed limiter, see the B58 ECU
         ["etk_engine_ecu_speedlimit", "etk_engine_ecu_speedlimit_off", "Speed Limiter", {"coreSlot": true}]
     ],
     "mainEngine": {
-        // modern direct-injection warm restart: starter path fires ~0.2 s sooner (default 0.5, combustionEngine.lua:1724)
-        "starterThrottleKillTime": 0.30,
-        "idleRPM": 700,                 // N57: 700 instead of the base game 750
+        "starterThrottleKillTime": 0.30,    // as the B58 ECU
+        "idleRPM": 700,                 // base 750
         "idleRPMRoughness": 65,         // R6 diesel idle shake (default 50)
         "revLimiterRPM": 5400,
         "revLimiterType": "soft",
         "redlineTorqueDropOffRange": 350,   // softer run-out into the limiter
-        "engineBrakeTorque": 32,        // base 30; a modern diesel brakes weakly
-        // Realism backlog A4: base game diesel peaks at 0.49, the real N57 is
-        // ~0.43 at its best point.  Shape kept, level corrected.
+        "engineBrakeTorque": 32,        // base 30
+        // base peak 0.49, real engine ~0.43: shape kept, level corrected
         "burnEfficiency": [
             [0,    0.16],
             [0.05, 0.34],
@@ -271,22 +181,11 @@
         ]
     },
     "vehicleController": {
-        // 8HP / ActiveHybrid shift program, see the series B58 ECU above.
         "shiftLogicName": "etk854hybrid_8hp",
-        // Reference diesel/8HP full-load upshift point nUpFull (500 rpm below the 5400
-        // limiter: the N57 is past its power peak at 4400 anyway).
-        // Base diesel I6 ships 5200 / [0,0,0,2400,2900,3200,3600,3600].
+        // nUpFull 500 rpm below the limiter (past the 4400 rpm power peak)
         "highShiftUpRPM": 4900,
-        // dead (calculateOptimalLoadShiftPoints overwrites it, and the 8HP
-        // program does not read it) - kept for reference only
-        "highShiftDownRPM": [0, 0, 0, 2300, 2700, 3000, 3300, 3300],
-        // Diesel calibration: the N57 pulls cleanly from ~1000 rpm, so lug and
-        // coast floors sit lower than on the B58; turbo lag and the torque-
-        // reserve region are shorter (630 Nm from 1500 rpm).
-        // Torque-first ECO/COMFORT (feedback 2026-10 round 2): brake targets
-        // ECO [1700,2200] -> [1250,1450], COMFORT [1900,2500] -> [1350,1650]
-        // (the coupled diesel was dragged at 1700-1800 rpm down to 1st,
-        // n57_revband 2026-09-30); keys see the series B58 ECU above.
+        // keys: see the B58 ECU. Pulls from ~1000 rpm: lower lug/coast floors,
+        // shorter turbo lag and reserve region than the B58.
         "etk854hybrid8hpEngine": {
             "family": "diesel",
             "lugMinRPM": 900,
@@ -303,10 +202,7 @@
         }
     },
     "turbocharger": {
-        // ---- Boost ceiling: 24.0 psi setpoint (= 2.65 bar absolute) --------
-        // 23.5 + (24.5 - 23.5) * 0.5 = 24.0.  The 1 psi range is the base game
-        // *_ecu_stage3 pattern (backlog A3) and is already priced into the
-        // efficiency calibration below.
+        // ---- Boost: 24.0 psi setpoint (2.65 bar abs) -----------------------
         "wastegateStart": 23.5,
         "wastegateLimit": 24.5,
         "wastegatePCoef": 0.00018,      // default 0.0001 -> tames the overshoot
@@ -314,26 +210,24 @@
         "wastegateDCoef": 0.00002,      // default 0 -> extra damping
 
         // ---- Turbine energy balance ---------------------------------------
-        "maxExhaustPower": 5200,        // base game diesel 4000 / stage3 11000
-        "backPressureCoef": 0.000012,   // base game diesel 0.000005
-        "frictionCoef": 14.0,           // base game diesel 25.5 - small HP turbine
-        "inertia": 0.45,                // base game diesel 1.30 - HP stage
-        "pressureRatePSI": 70,          // base game diesel 30  <-- main lag lever
-        "damageThresholdTemperature": 700,   // base 640: two-stage HP runs hotter
-        "bovEnabled": false,            // diesel: turbocharger.lua:462 forces this anyway
+        "maxExhaustPower": 5200,        // base diesel 4000, stage 3 11000
+        "backPressureCoef": 0.000012,   // base 0.000005
+        "frictionCoef": 14.0,           // base 25.5; small HP turbine
+        "inertia": 0.45,                // base 1.30
+        "pressureRatePSI": 70,          // base 30; main lag lever
+        "damageThresholdTemperature": 700,   // base 640; HP stage runs hotter
+        "bovEnabled": false,
 
-        // ---- Sound (register character: more whistle, little hiss) ---------
-        // Both events verified present in the shipped content zips.
+        // ---- Sound (more whistle, little hiss) -----------------------------
         "hissLoopEvent":  "event:>Vehicle>Forced_Induction>Turbo_semi_01>turbo_hiss",
         "whineLoopEvent": "event:>Vehicle>Forced_Induction>Turbo>Spin>turbo_spin_powerwhistle_01",
         "turboSizeCoef": 0.0,
         "bovSoundVolumeCoef": 0.0,
         "hissVolumePerPSI": 0.018,
-        "whineVolumePer10kRPM": 0.030,  // base game 0.011 - the HP stage whistles
-        "whinePitchPer10kRPM": 0.055,   // base game 0.040
+        "whineVolumePer10kRPM": 0.030,  // base 0.011
+        "whinePitchPer10kRPM": 0.055,   // base 0.040
 
-        // ---- Pressure map: HP-stage shape, positive boost from ~13k turbine rpm
-        // (base game diesel only crosses zero at 60k -> the felt 260d turbo hole)
+        // ---- Pressure map: positive boost from ~13k turbine rpm (base 60k) --
         "pressurePSI": [
             //turbineRPM, pressure(PSI)
             [0,        -3.0],
@@ -347,10 +241,8 @@
             [250000,   45.0]
         ],
 
-        // ---- efficiency = HP stage low, hand-over ~3500, LP stage on top ----
-        // Iteratively fitted against the Catmull-Rom interpolation BeamNG uses
-        // (ve_utils.lua:249-288), otherwise the spline bulges up to +8 Nm
-        // between the support points.
+        // ---- efficiency: HP stage low, hand-over ~3500, LP stage on top ----
+        // fitted against BeamNG's Catmull-Rom spline (else +8 Nm bulges)
         "engineDef": [
             //engineRPM, efficiency, exhaustFactor
             [0,     0.000, 0.30],
@@ -381,59 +273,23 @@
 // ----------------------------------------------------------------------------
 // N57D30TOP with upgrade turbos - 500 PS road-tune ECU
 // ----------------------------------------------------------------------------
-// REAL-WORLD REFERENCE (this is a reproduction of an actual tuning level, not a
-// fantasy number):  the strongest STABLE street builds of the N57D30TOP run
-// upgraded / hybrid register chargers and land at ~460-500 PS.  On those builds
-// the torque is usually held ELECTRONICALLY at ~850-900 Nm - the engine could
-// make more.  The mod reproduces that plateau for a realistic power delivery
-// (a drive-feel limit, not gearbox protection: the modelled clutches take more).
-// Spool comes in slightly later than series because the compressor wheels are
-// bigger; rated speed stays where the series engine has it (~4400) and the
-// limiter stays at 5400 - a diesel gains nothing from revving further.
+// Modeled on strong street builds (~460-500 PS, torque held at ~850-900 Nm);
+// spool slightly later than series, rated speed and limiter unchanged.
+// Same slot as the series ECU, so nothing is inherited from it: the parent is
+// the base intake (Performance configs: diesel Stage 3 turbo). The ECU merges
+// after the intake, so every key below wins; only the intake's
+// damageThresholdTemperature 850 survives, its "$+particulates" is cancelled in
+// mainEngine. Neither intake map carries this calibration, so the pressure map
+// is defined in full.
 //
-// This part occupies the SAME slot as etk854hybrid_ecu_n57_535d, so it appears
-// next to the series ECU in the configurator.  Only one of the two is ever
-// fitted, which has one important consequence: this part CANNOT inherit the
-// series ECU's turbo tables.  Its parent is the base game intake part - on the
-// Performance configs (since 2026-10) the "Stage 3 Variable Boost
-// Turbocharger" etk_intake_i6_3.0_diesel_turbo_stage3, fitted as standard as
-// the "better turbo" of the Performance package.  The ECU merges AFTER the
-// intake (post-order part merge in slotSystem.lua, intake slot before ECU
-// slot), so every turbo key set below wins.  Only two things survive from
-// the Stage 3 part:
-//   - its overheat limit, damageThresholdTemperature 850 (no longer pinned
-//     here, see the turbocharger section), and
-//   - its "$+particulates": 0.6 - cancelled by the plain "particulates" in
-//     mainEngine below (a plain key in a later part overrides an earlier $+).
-// Its 65 psi map and inertia 25 never apply.  The stock intake
-// (etk_intake_i6_3.0_diesel_turbo, pressurePSI reaching only 35 psi at 200k
-// turbine rpm, limit 640) would not carry this calibration either, so the
-// pressure map has to be defined here in full - answering the "does the
-// series map suffice?" question with: it is not even in scope.
-//
-// CALIBRATION (offline model from PLAN_N57_BITURBO.md §1.3, the one validated
-// against four base game configs to <1 %):
-//     T(rpm) = T_NA(rpm) * (1 + 0.05998 * psi * efficiency(rpm))
-//              - 18 - 0.0239 * rpm * rpmToAV
-//   Target:    880 Nm plateau 1800-3000, 368 kW (500 PS) at 4300-4500
-//   Predicted: 887 Nm @ 1868 (+0.8 %), 369.2 kW / 502 PS @ 4446 (+0.3 %)
-//   Support points 900..5400 all land within 0.1 % of the target curve.
-//
-// WHY 35 psi AND NOT THE "2.9-3.1 bar absolute" FIRST ASSUMED:
-//   Rearranging the formula for the 4400 rpm point gives a REQUIRED product
-//   psi * efficiency = 32.8.  At 30 psi (3.1 bar abs) that demands an
-//   efficiency of 1.09 - above 1.0, i.e. outside anything the base game or our
-//   own calibrations use (highest base game value ~0.96).  35 psi setpoint
-//   (2.41 bar gauge = 3.43 bar absolute) keeps the whole efficiency curve
-//   inside 0.41 ... 0.93 and is exactly what serious big-turbo diesel builds
-//   run.  Boost, not a magic efficiency number, buys the extra 187 PS.
-//
-// NOTE ON INTERNALS: do NOT combine this ECU with the base game "Heavy Duty
-// Long Block" (etk_engine_i6_3.0_diesel_internals) - that part carries a
-// torqueModMult of 1.05 across the range and would push the curve 5 % over
-// this calibration.  The strengthened-internals aspect is instead priced into
-// maxTorqueRating / maxOverTorqueDamage below, at the very values the base game
-// itself assigns to its forged package (700 * 1.4 = 980, 700 * 1.61 = 1127).
+// Calibration (offline model, see file header):
+//   T(rpm) = T_NA(rpm) * (1 + 0.05998 * psi * efficiency(rpm)) - 18 - 0.0239 * rpm * rpmToAV
+//   target 880 Nm 1800-3000 rpm, 368 kW (500 PS) at 4300-4500;
+//   predicted 887 Nm @ 1868, 369 kW @ 4446 (all support points within 0.1 %).
+// 35 psi: 4400 rpm needs psi * efficiency = 32.8; at 30 psi that is an
+// efficiency of 1.09 (base max ~0.96), at 35 psi the curve stays in 0.41..0.93.
+// Do not combine with the base "Heavy Duty Long Block" (torqueModMult 1.05 =
+// +5 %); the stronger internals are in maxTorqueRating / maxOverTorqueDamage.
 // ----------------------------------------------------------------------------
 "etk854hybrid_ecu_n57_tuned": {
     "information": {
@@ -444,54 +300,37 @@
     "slotType": "etk_engine_i6_3.0_diesel_ecu",
     "slots": [
         ["type", "default", "description"],
-        // see the B58 ECU above: unlimited == etk_engine_ecu_speedlimit_off
+        // no speed limiter, see the B58 ECU
         ["etk_engine_ecu_speedlimit", "etk_engine_ecu_speedlimit_off", "Speed Limiter", {"coreSlot": true}]
     ],
 
-    // ---- Driveline torque budget for THIS engine --------------------------
-    // Custom dict section, merged into the flat vehicle table exactly like
-    // etk854hybridBoostStage (slotSystem.lua unifyParts).  Read by
-    // etk854hybridControl.lua M.init, where it overrides the powertrain jbeam's
-    // systemTorqueCapNm as the BASE of the stage staffel:
-    //     stage 0..3  ->  950 / 1050 / 1170 / 1320 Nm
-    // 950 Nm follows the electronic torque plateau of the real 500 PS builds
-    // (they quote 850-900 Nm at the crank) plus a small E-machine share - a
-    // drive-feel limit for a realistic power delivery, not gearbox protection:
-    // at full load the engine alone already asks for 887 Nm, so stage 0 adds
-    // only ~60 Nm of electric torque up top - while the full E-boost stays
-    // available everywhere the diesel is not already at its plateau.
+    // ---- System torque cap base for this engine ---------------------------
+    // Read by the VCU and the 8HP program instead of the powertrain's
+    // systemTorqueCapNm: stage 0..3 -> 950 / 1050 / 1170 / 1320 Nm.
+    // 950 = the electronic plateau of real builds + a small E-machine share
+    // (drive-feel limit, not gearbox protection); off the diesel's 887 Nm
+    // plateau the full E-boost stays available.
     "etk854hybridSystemCap": {
         "baseNm": 950
     },
 
     "mainEngine": {
-        // modern direct-injection warm restart: starter path fires ~0.2 s sooner (default 0.5, combustionEngine.lua:1724)
-        "starterThrottleKillTime": 0.30,
+        "starterThrottleKillTime": 0.30,    // as the B58 ECU
         "idleRPM": 700,
-        "idleRPMRoughness": 70,         // bigger injectors, rougher idle
-        "revLimiterRPM": 5400,          // unchanged - a diesel gains nothing above
+        "idleRPMRoughness": 70,         // bigger injectors
+        "revLimiterRPM": 5400,
         "revLimiterType": "soft",
         "redlineTorqueDropOffRange": 350,
         "engineBrakeTorque": 32,
-        // Strengthened internals are part of this build (rods, pistons, bolts).
-        // Base engine 700/700; these are the base game's own forged-package
-        // multipliers applied to it, rounded: 1.4x -> 1000, 1.61x -> 1100.
-        // Without this the 887 Nm peak would sit 27 % over the rating and the
-        // engine damage tracker would fire on the first full-throttle run.
+        // Strengthened internals: base 700 / 700 x the base forged-package
+        // multipliers (1.4x / 1.61x). Otherwise the 887 Nm peak would trip the
+        // damage tracker on the first full-throttle run.
         "maxTorqueRating": 1000,
         "maxOverTorqueDamage": 1100,
-        // Burn efficiency is the HEAT lever of this build, not a power lever:
-        // in BeamNG it only feeds fuel use (combustionEngine.lua:774) and the
-        // thermals, where every joule not turned into work goes half to the
-        // cylinder walls / coolant and half to the exhaust
-        // (combustionEngineThermals.lua:758-762, heat coefficient 1/eta - 1).
-        // Part load: more boost, more fuel per stroke - the plateau drops from
-        // the series N57's 0.43-0.44 to ~0.41.  Full load: with the larger
-        // Stage 3 turbine and its lower exhaust back pressure the full-load
-        // point is back at the series N57's own 0.30 (2026-10).  The former
-        // 0.26 put ~550 kW into the walls at rated power and boiled the
-        // coolant after 15-35 s of sustained full throttle (thermal replica,
-        // scratch_build/tuned_turbo) - no turbo or radiator alone fixes that.
+        // Heat lever, not a power lever: only feeds fuel use and the thermals
+        // (waste heat 1/eta - 1, half to the coolant, half to the exhaust).
+        // Part load ~0.41 (more boost and fuel than series), full load 0.30 as
+        // series; lower full-load values boil the coolant at sustained full throttle.
         "burnEfficiency": [
             [0,    0.15],
             [0.05, 0.32],
@@ -499,22 +338,15 @@
             [0.7,  0.41],
             [1,    0.30]
         ],
-        // The Stage 3 intake adds "$+particulates": 0.6 (41x the smoke). This
-        // ECU merges after the intake, so this plain value wins and the smoke
-        // stays at the base diesel engine's own 0.015.
+        // plain key overrides the Stage 3 intake's "$+particulates": 0.6
+        // (merged earlier) -> base diesel smoke level
         "particulates": 0.015
     },
     "vehicleController": {
-        // 8HP / ActiveHybrid shift program, see the series B58 ECU above.
         "shiftLogicName": "etk854hybrid_8hp",
-        // Deliberately identical to the series N57 ECU: the power peak moves by
-        // less than 100 rpm (4541 -> 4446), so the full-load point does not.
-        "highShiftUpRPM": 4900,
-        // dead (calculateOptimalLoadShiftPoints / not read by the 8HP program)
-        "highShiftDownRPM": [0, 0, 0, 2300, 2700, 3000, 3300, 3300],
-        // Bigger chargers: boost arrives later (plateau from 1800 instead of
-        // 1500), so the lug floors and the torque-reserve region move up.
-        // Torque-first ECO/COMFORT targets as on the series N57 ECU.
+        "highShiftUpRPM": 4900,         // as series (power peak moves < 100 rpm)
+        // bigger chargers: plateau from 1800 instead of 1500 rpm -> lug floors
+        // and torque-reserve region move up
         "etk854hybrid8hpEngine": {
             "family": "diesel",
             "lugMinRPM": 950,
@@ -531,8 +363,7 @@
         }
     },
     "turbocharger": {
-        // ---- Boost ceiling: 35.0 psi setpoint (= 3.43 bar absolute) --------
-        // 34.5 + (35.5 - 34.5) * 0.5 = 35.0, keeping the 1 psi control range.
+        // ---- Boost: 35.0 psi setpoint (3.43 bar abs) -----------------------
         "wastegateStart": 34.5,
         "wastegateLimit": 35.5,
         "wastegatePCoef": 0.00018,
@@ -540,44 +371,29 @@
         "wastegateDCoef": 0.00002,
 
         // ---- Turbine energy balance ---------------------------------------
-        // maxExhaustPower 5200 -> 8500: a 500 PS calibration burns far more fuel
-        // and therefore puts far more enthalpy through the turbine.  Still well
-        // inside the base game range (its own diesel stage 3 uses 11000).
-        // This is also what makes the plateau START at 1800 instead of 1500:
-        // below that the pressure map - not the wastegate - is the limit, which
-        // is precisely the signature of larger compressors.
+        // series 5200, base diesel stage 3 11000. Below 1800 rpm the pressure
+        // map, not the wastegate, limits boost -> plateau starts at 1800.
         "maxExhaustPower": 8500,
         "backPressureCoef": 0.000012,
-        "frictionCoef": 20.0,           // bigger wheels than the series HP turbine
-        // ---- Spool: bigger chargers, still nowhere near base game ----------
-        // inertia 0.45 -> 0.60 and pressureRatePSI 70 -> 60 (larger rotating
-        // assembly, larger volume to fill).  Simulated at 1500 rpm from zero
-        // boost: leaves vacuum after 0.07 s (series 0.05 s, base game 0.30 s)
-        // and reaches the SERIES boost level of 21.6 psi after 0.43 s versus
-        // 0.36 s - "a touch lazier", not a turbo hole.  Full 31.5 psi takes
-        // 0.59 s from 2000 rpm upwards.
+        "frictionCoef": 20.0,           // bigger wheels than series
+        // ---- Spool: series 0.45 / 70; reaches series boost ~0.07 s later at 1500 rpm
         "inertia": 0.60,
         "pressureRatePSI": 60,
-        // No damageThresholdTemperature here any more (was 720, series ECU
-        // 700): the turbo hardware defines the overheat limit - Stage 3 intake
-        // 850 on the Performance configs, stock intake 640 if swapped back.
-        "bovEnabled": false,            // diesel: turbocharger.lua:462 forces this anyway
+        // no damageThresholdTemperature: the intake part sets the overheat limit
+        "bovEnabled": false,
 
         // ---- Sound: same register voice, a size larger ---------------------
         "hissLoopEvent":  "event:>Vehicle>Forced_Induction>Turbo_semi_01>turbo_hiss",
         "whineLoopEvent": "event:>Vehicle>Forced_Induction>Turbo>Spin>turbo_spin_powerwhistle_01",
         "turboSizeCoef": 0.0,
         "bovSoundVolumeCoef": 0.0,
-        "hissVolumePerPSI": 0.016,      // more psi at the same perceived hiss
-        "whineVolumePer10kRPM": 0.036,  // series ECU 0.030, base game 0.011
-        "whinePitchPer10kRPM": 0.050,   // slightly lower pitch = bigger wheel
+        "hissVolumePerPSI": 0.016,
+        "whineVolumePer10kRPM": 0.036,  // series 0.030
+        "whinePitchPer10kRPM": 0.050,   // lower pitch = bigger wheel
 
-        // ---- Pressure map: upgrade chargers --------------------------------
-        // Shifted right against the series HP-stage map (positive boost at 25k
-        // instead of 13k turbine rpm) and raised at the top (48 instead of 45
-        // psi) - a larger compressor needs more speed for the same pressure but
-        // can ultimately deliver more.  Reaches the 35 psi setpoint at ~145k
-        // turbine rpm, which the engine hits at ~1950 rpm.
+        // ---- Pressure map: larger compressor -------------------------------
+        // positive boost from 25k (series 13k), 48 psi top (series 45);
+        // 35 psi at ~145k turbine rpm (~1950 engine rpm)
         "pressurePSI": [
             //turbineRPM, pressure(PSI)
             [0,        -3.5],
@@ -592,13 +408,8 @@
         ],
 
         // ---- efficiency: fitted to the 880 Nm / 368 kW target --------------
-        // Same U-shape as the series ECU (hand-over dip in the middle), but
-        // widened: the plateau now has to hold to 3000 rpm and the top end has
-        // to carry 500 PS, so the curve rises much higher above 4000 rpm.
-        // Support points are dense on purpose - with the Catmull-Rom
-        // interpolation BeamNG uses (ve_utils.lua:249-288) a coarse grid bulges
-        // by several Nm between nodes; on this grid the largest deviation from
-        // the target curve is 0.1 %.
+        // series U-shape, widened (plateau to 3000, 500 PS on top); dense grid
+        // against Catmull-Rom bulging
         "engineDef": [
             //engineRPM, efficiency, exhaustFactor
             [0,     0.000, 0.30],
@@ -634,48 +445,22 @@
 // ----------------------------------------------------------------------------
 // B58 with an upgraded single turbo - 550 PS road-tune ECU
 // ----------------------------------------------------------------------------
-// The petrol counterpart to etk854hybrid_ecu_n57_tuned: same idea (series
-// hardware, bigger charger, road-usable calibration), opposite character - the
-// diesel makes its 880 Nm below 3000 rpm, this one keeps 700 Nm all the way to
-// 5000 and pulls to the 7000 rpm limiter the series calibration gives away.
+// Petrol counterpart to the tuned N57: 700 Nm held to 5000 rpm, pulls to the
+// 7000 rpm limiter. Modeled on street builds (bigger compressor, ~1.45 bar
+// gauge, torque held at ~700 Nm).
+// Same slot as the series B58 ECU; the parent is the base intake (Performance
+// configs: ttSport turbo). Keys not set here come from ttSport (frictionCoef 10,
+// damageThresholdTemperature 800, backPressureCoef, sounds, afterfire,
+// intakeMuffling). Neither intake map fits, so the pressure map is redefined.
 //
-// REAL-WORLD REFERENCE: a B58 with an upgraded single turbo (bigger compressor,
-// uprated intercooler, ~1.45 bar gauge) is the standard 500-560 PS street build.
-// Torque is held at ~700 Nm electronically, a plateau like the 850-900 Nm of the
-// 500 PS diesel builds; the mod reproduces it for a realistic power delivery.
-//
-// This part occupies the SAME slot as etk854hybrid_ecu_b58_745e, so only one of
-// the two is ever fitted. Consequence (identical to the tuned diesel ECU): it
-// cannot inherit the series turbo tables from the other ECU. Its parent is the
-// base game intake - on the Performance configs (since 2026-10) the "ttSport
-// Turbocharger" etk_intake_i6_3.0_petrol_turbo_ttSport, fitted as standard as
-// the "better turbo" of the Performance package. The ECU merges after the
-// intake, so the keys below win; everything this ECU does NOT set comes from
-// ttSport: frictionCoef 10 (stock 20), the overheat limit
-// damageThresholdTemperature 800 (stock 665), backPressureCoef 7e-6 (same as
-// stock), the Turbo_03/04 sound events and their hiss/whine/BOV levels, the
-// afterfire multipliers and intakeMuffling (-0.35 instead of -0.25).
-// Neither compressor map fits this calibration (stock tops out at 17 psi,
-// ttSport at 27 psi @ 250k turbine rpm), so the pressure map is redefined
-// here in full.
-//
-// CALIBRATION (offline model from PLAN_N57_BITURBO.md 1.3, the one validated
-// against the base game to <1 %):
-//     T(rpm) = T_NA(rpm) * (1 + 0.05998 * psi * efficiency(rpm))
-//              - 15 - 0.0239 * rpm * rpmToAV
-//   with T_NA = petrol I6 base table + stock i6 exhaust torqueModExhaust.
-//   Model check against the shipped ECUs before using it here:
-//     ecu_340 (10.0 psi) -> 463 Nm / 258 kW   vs. game 465 Nm / 258 kW
-//     our B58 (8.8 psi)  -> 446 Nm / 218 kW   vs. measured in-game 447 / 217
-//   Target:    700 Nm plateau 2500-5000, 405 kW (550 PS) at ~6500
-//   Predicted: 700 Nm @ 2500-5000, 408.5 kW (555 PS) @ 6500, 540 Nm at 7000
-//   Required efficiencies stay <= 0.935, i.e. inside the range the base game
-//   itself uses (its own petrol curve peaks at 0.95-1.00).
-//
-// WHY 21 psi: solving the formula for 700 Nm at 4000 rpm needs psi*eff = 18.5.
-// At the series 8.8 psi that would demand an efficiency above 2.0 - physically
-// meaningless. 21 psi (1.45 bar gauge / 2.4 bar absolute) is exactly what the
-// upgraded-turbo street builds run and keeps every efficiency below 0.94.
+// Calibration (offline model, see file header):
+//   T(rpm) = T_NA(rpm) * (1 + 0.05998 * psi * efficiency(rpm)) - 15 - 0.0239 * rpm * rpmToAV
+//   (T_NA = base petrol I6 table + stock exhaust torqueModExhaust)
+//   target 700 Nm 2500-5000 rpm, ~405 kW at the top end; efficiencies <= 0.935
+//   (base petrol curve peaks at 0.95-1.00). In game with ttSport: ~415 kW
+//   (565 PS) at ~6800 rpm.
+// 21 psi: 700 Nm at 4000 rpm needs psi * efficiency = 18.5 (series 8.8 psi
+// would need an efficiency above 2.0).
 // ----------------------------------------------------------------------------
 "etk854hybrid_ecu_b58_tuned": {
     "information": {
@@ -686,56 +471,32 @@
     "slotType": "etk_engine_i6_3.0_petrol_ecu",
     "slots": [
         ["type", "default", "description"],
-        // see the series B58 ECU above: unlimited == etk_engine_ecu_speedlimit_off
+        // no speed limiter, see the series B58 ECU
         ["etk_engine_ecu_speedlimit", "etk_engine_ecu_speedlimit_off", "Speed Limiter", {"coreSlot": true}]
     ],
 
-    // ---- Driveline torque budget for THIS engine --------------------------
-    // Custom dict section, merged into the flat vehicle table exactly like
-    // etk854hybridBoostStage (slotSystem.lua unifyParts). Read by
-    // etk854hybridControl.lua M.init as the BASE of the stage staffel:
-    //     stage 0..3  ->  820 / 920 / 1040 / 1190 Nm
-    // 820 Nm = the 700 Nm the engine is calibrated to plus a ~120 Nm electric
-    // share at the torque peak. Everywhere the engine is NOT on its plateau the
-    // full E-boost stays available, which is the whole point of the cap being a
-    // SYSTEM limit instead of an engine limit.
+    // ---- System torque cap base, as on the tuned diesel ECU ---------------
+    // stage 0..3 -> 820 / 920 / 1040 / 1190 Nm. 820 = the 700 Nm engine
+    // plateau + ~120 Nm electric; off the plateau the full E-boost stays
+    // available (a system limit, not an engine limit).
     "etk854hybridSystemCap": {
         "baseNm": 820
     },
 
     "mainEngine": {
-        // modern direct-injection warm restart: starter path fires ~0.2 s sooner (default 0.5, combustionEngine.lua:1724)
-        "starterThrottleKillTime": 0.30,
-        // The series calibration gives the B58 away at 6300; this build uses the
-        // engine's own limit again - peak power sits at 6500.
-        "revLimiterRPM": 7000,
+        "starterThrottleKillTime": 0.30,    // as the series B58 ECU
+        "revLimiterRPM": 7000,          // the engine's own limit (series calibration 6300)
         "revLimiterType": "soft",
-        // Strengthened internals are part of this build. Base petrol engine
-        // ships 600 / 300; these are the base game's own forged-package
-        // multipliers (1.5x rating, 2.5x over-torque) applied to it and
-        // rounded down, so the 700 Nm peak sits inside the rating instead of
-        // 17 % over it (which would trip the engine damage tracker on the
-        // first full-throttle run).
+        // Strengthened internals: base 600 / 300 x the base forged-package
+        // multipliers (1.5x / 2.5x), rounded down; keeps the 700 Nm peak
+        // inside the rating (damage tracker).
         "maxTorqueRating": 780,
         "maxOverTorqueDamage": 900,
-        // Part load: more boost, more fuel, more heat rejection - brake
-        // thermal efficiency stays below the series calibration (same scaling
-        // argument as there, base game peaks at an impossible 0.51).
-        // Full load (2026-10): a DELIBERATE thermal / gameplay lever, not a
-        // realism value. In BeamNG burnEfficiency only feeds fuel use
-        // (combustionEngine.lua:774) and the thermals: every joule not turned
-        // into work goes half to the cylinder walls / coolant and half to the
-        // exhaust (combustionEngineThermals.lua:758-762, coefficient
-        // 1/eta - 1). The former 0.21 put ~810 kW into the walls at 408 kW and
-        // overheated the turbo after 2-3 s and the coolant after 6-9 s of full
-        // throttle - neither the ttSport turbo nor a bigger radiator alone
-        // fixes that. 0.30 = lambda-1-class full-load efficiency for the
-        // upgraded turbine, together with the Performance cooling package
-        // (etk854hybrid_radiator_performance). Honest context: a rich-running
-        // 550 PS street tune would sit at about 0.25-0.26, and 0.30 is above
-        // the series B58's 0.24 (whose table is itself known to be ~20 % too
-        // thirsty, FAHRMODI.md). Power is unchanged; full-load fuel flow
-        // drops by ~30 % against the old table.
+        // Part load below the series table (more boost, fuel and heat). Full
+        // load 0.30 is a deliberate thermal lever, not a realism value (a rich
+        // 550 PS tune: ~0.25): lower values overheat turbo and coolant within
+        // seconds of full throttle. Sized with etk854hybrid_radiator_performance;
+        // power is unaffected.
         "burnEfficiency": [
             [0,    0.10],
             [0.05, 0.24],
@@ -745,24 +506,13 @@
         ]
     },
     "vehicleController": {
-        // 8HP / ActiveHybrid shift program, see the series B58 ECU above.
         "shiftLogicName": "etk854hybrid_8hp",
-        // nUpFull 6700 (was 6800): 300 rpm headroom to the 7000 limiter. With
-        // 6800 the shaft overshot to 6820-6870 rpm during full-load upshifts
-        // (sweep 2026-09-30: launch_sport / sport_index, B58S and B58S AWD),
-        // i.e. into the last 150 rpm before the limiter; the power peak is at
-        // 6500 and the motor redline guard fades the boost from 6600 anyway
-        // (etk854hybridControl.lua), so the extra 100 rpm bought nothing.
-        // The 8HP maps above the 3000 rpm knee are stretched by
-        // (6700-3000)/(6100-3000) = 1.194 at init.
+        // nUpFull: 300 rpm headroom keeps the upshift overshoot clear of the
+        // limiter (the motor redline guard fades boost from 6600 anyway). 8HP
+        // maps above 3000 rpm are stretched by (6700-3000)/(6100-3000) at init.
         "highShiftUpRPM": 6700,
-        // dead (calculateOptimalLoadShiftPoints / not read by the 8HP program)
-        "highShiftDownRPM": [0, 0, 0, 3000, 4000, 4500, 4900, 4900],
-        // Bigger single turbo: plateau only from ~2500 rpm, so lug/coast
-        // floors, turbo ramp and the torque-reserve region sit higher.
-        // Torque-first ECO/COMFORT (feedback 2026-10 round 2): brake targets
-        // ECO [2100,2700] -> [1450,1750], COMFORT [2300,3200] -> [1650,2100];
-        // coast / engagement floors ~50 rpm above the B58 (later boost).
+        // bigger turbo, plateau from ~2500 rpm: floors, turbo ramp and reserve
+        // region sit higher than on the series B58
         "etk854hybrid8hpEngine": {
             "family": "petrol",
             "lugMinRPM": 1000,
@@ -779,17 +529,11 @@
         }
     },
     "turbocharger": {
-        // Setpoint = start + (limit - start) * 0.5 = 21.0 psi (turbocharger.lua
-        // :246/:512). 1 psi control range instead of the degenerate 0.01 psi
-        // default, same as both other ECUs here.
+        // setpoint 21.0 psi (1 psi range)
         "wastegateStart": 20.5,
         "wastegateLimit": 21.5,
-        // 14000 (base 340 ECU) -> 20000: the turbine has to reach ~185k rpm for
-        // 21 psi on the map below, and a 550 PS calibration burns the fuel that
-        // pays for it.
+        // ecu_340 14000; the turbine needs ~185k rpm for 21 psi on the map below
         "maxExhaustPower": 20000,
-        // Bigger compressor: the base map only reaches 17 psi at 250k rpm, so
-        // the whole map is redefined (see the note above about the ECU slot).
         "pressurePSI": [
             //turbineRPM, pressure(PSI)
             [0,        -3.5],
@@ -801,16 +545,12 @@
             [200000,   23.0],
             [250000,   27.0]
         ],
-        // Spool: bigger wheels than the series twin-scroll unit (0.55), still
-        // far from the base game's 0.90 single-scroll value. pressureRatePSI
-        // stays at the 45 psi/s of the series B58 ECU so the boost smoother does not
-        // dominate the response (realism backlog A1/A2).
+        // spool: series 0.55, base 0.90; rate as the series B58
         "inertia": 0.75,
         "pressureRatePSI": 45,
         "turboSizeCoef": 0.85,
-        // engineDef column 2 = efficiency, solved for the target curve above.
-        // The low-rpm values are deliberately low: that is how a bigger charger
-        // is expressed in this model - it cannot make its setpoint down there.
+        // efficiency solved for the target curve; deliberately low at low rpm
+        // (a bigger charger cannot make its setpoint there)
         "engineDef": [
             // engineRPM, efficiency, exhaustFactor
             [0,     0.000, 0.25],

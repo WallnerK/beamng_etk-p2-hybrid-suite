@@ -1,25 +1,28 @@
 // ETK 854 ActiveHybrid - centre screen energy-flow page logic
-// =========================================================================
 // Target: BeamNG.drive 0.39.4, web view "@etk800_screen" (512 x 256)
 //
-// Input: etk854hybridUpdate(d) at ~15 Hz, d built by
-// lua/controller/etk854hybrid_screenData.lua (short keys, any may be missing):
+// Input: etk854hybridUpdate(d) at ~15 Hz from etk854hybrid_screenData.lua (short keys, all optional):
 //   soc tgt ph de ed ev ice evNm iceNm k0 ies on sail chg awd awdNm trl lvl
 //   fan boost evAv evFr rl op dsc prog spd gear gi ign rng cons cap use
-//   iceMax fuel amb wt uL uT uC uV fl fcap frng fi fh fm fa tk
-// uL / uT = game unit settings (uiUnitLength / uiUnitTemperature); imperial
-// shows range in mi, consumption in kWh/100 mi, and the temperature follows uT.
-// On-board computer (etk854hybrid_gaugeData item 10, the same numbers as the
-// cluster): fl litres in the tank pictogram, fi / fh / fm instantaneous
-// consumption in the ENGINE row, fa trip average + tk trip distance under the
-// electric average. uC (uiUnitConsumptionRate) "metric" -> L/100 km, else
-// US mpg; uV (uiUnitVolume) "gal" -> US gallons.
-// map.updateData(g) from the stock beamNavigator supplies ignitionLevel too.
+//   iceMax fuel amb wt uL uT uC uV uW fl fcap frng fi fh fm fa tk
+// Units follow the game settings: uL length (imperial -> mi, kWh/100 mi, mph, lbf), uT
+//   temperature, uW weight "kg"|"lb" (tongue load, mass), uC consumption ("metric" -> L/100 km,
+//   else US mpg), uV volume ("gal" -> US gallons).
+// On-board computer (gaugeData, same numbers as the cluster): fl tank litres, fi / fh / fm
+//   instantaneous consumption (ENGINE row), fa trip average, tk trip distance.
+// map.updateData(g) from beamNavigator supplies ignitionLevel (chained to the MAP view of
+//   etk854hybrid_cockpit_panel.js); window.etk854hybridCdView = "TRAILER" pins the trailer page.
 //
-// History: electric / engine / recovered energy integrated from the power
-// values between two updates, 30 buckets x 30 s = the last 15 minutes of
-// driving (time only runs while updates arrive, i.e. while seated).
-// =========================================================================
+// Trailer page (trailer stability of the tow hitch; replaces the left schematic while trl or
+//   trA, only when tsa is present): tsa state, tsSt sway stage 0..3, tsK corner 0..2, tsL lamp,
+//   tsSw sway index (1.0 = stage-2 threshold), tsFx drawbar N (+ pull), tsTg tongue kg (signed),
+//   tsTs NONE|OK|LOW|TAIL_HEAVY, tsM mass kg (-1 learning), tsMq, tsLp load pin state, tsVr
+//   recommended km/h, tsRs reduce speed, trA trailer coupled, rsSel rsMd rsSt rear steer, lvlMm.
+//   Blinking parts (REDUCE SPEED banner, sway meter) are inner groups that stay blinkEls members;
+//   visibility is set on their wrapper groups only (animate() rewrites every member's opacity).
+//
+// History: electric / engine / recovered energy integrated from power, 30 buckets x 30 s =
+// the last 15 min of driving (time only runs while updates arrive).
 (function () {
   "use strict";
 
@@ -54,6 +57,26 @@
     CHARGE: ["CHARGING", C.green]
   };
   var ICE_STARTING = { CRANK: 1, SYNC: 1, ENGAGE: 1 };
+  // trailer page: stability state -> [text, colour]
+  var TSA_STATE = {
+    READY: ["READY", C.green],
+    STANDBY: ["STANDBY", C.muted],
+    ACTIVE: ["ACTIVE", C.amber],
+    DSC_OFF: ["DSC OFF", C.amber],
+    SUSPENDED: ["SUSPENDED", C.amber],
+    UNAVAILABLE: ["UNAVAILABLE", C.muted],
+    FAULT: ["FAULT", C.red],
+    OFF: ["OFF", C.muted],
+    DISABLED: ["OFF", C.muted]
+  };
+  var RS_SEL = { OFF: "OFF", DSC: "ON + DSC", NODSC: "ON NO DSC" };
+  var ARR_PULL = "96,132.5 115,132.5 115,129 124,134 115,139 115,135.5 96,135.5";
+  var ARR_PUSH = "124,132.5 105,132.5 105,129 96,134 105,139 105,135.5 124,135.5";
+  var N_TO_LBF = 0.224809;
+  var KG_TO_LB = 2.20462;
+  // drawbar row live from ~5 km/h (hysteresis): at standstill the load pin
+  // only reads the coupling preload (about 1 kN PUSH)
+  var FX_ON_KMH = 6, FX_OFF_KMH = 4;
 
   var BUCKETS = 30;
   var BUCKET_S = 30;
@@ -68,6 +91,7 @@
   var histDirty = true;
   var chipSig = "";
   var demo = null;
+  var fxLive = false;
 
   function now() {
     return (window.performance && performance.now) ? performance.now() : Date.now();
@@ -110,14 +134,11 @@
     if (mode !== "idle") { attr(el, "stroke", color); }
   }
 
-  // Script-driven animation instead of CSS keyframes: in BeamNG 0.39.4 a
-  // vehicle HTML texture stopped showing DOM updates once an infinite CSS
-  // animation ran (the energy-flow dashes start as soon as the car drives),
-  // so the screen froze and a blinking chip went on blinking by itself
-  // (reproduced on the cluster page 2026-10). Called once per data frame.
+  // Script-driven animation, called once per data frame: in 0.39.4 an infinite CSS animation
+  // stops a vehicle HTML texture from showing DOM updates.
   var flowEls = [];
   var blinkEls = [];
-  var FLOW_PERIOD_MS = 600;   // one dash period (11 px) per 0.6 s, as the old CSS
+  var FLOW_PERIOD_MS = 600;   // one dash period (11 px) per 0.6 s
   var BLINK_PERIOD_MS = 500;
   function animate() {
     var t = now();
@@ -252,6 +273,105 @@
     }
   }
 
+  // ----------------------------------------------------------- trailer page
+  // row value text + colour; with lbl, squeezed into the space right of that label
+  function rowVal(el, v, col, lbl) {
+    if (!el) { return; }
+    if (el.__t !== v) {
+      txt(el, v);
+      if (lbl) {
+        var lw = 0;
+        try { lw = lbl.getComputedTextLength(); } catch (e) { lw = 0; }
+        fitText(el, Math.max(40, 338 - 196 - lw - 8));
+      }
+    }
+    attr(el, "fill", col);
+  }
+
+  function applyTrailer(d, trlOn, trA, imperial, stg, k, lamp) {
+    // stability state; a coupled trailer with trailer mode off does not arm it
+    var tsa = str(d.tsa) || "OFF";
+    var S = TSA_STATE[tsa] || [tsa.replace(/_/g, " "), C.muted];
+    var stTxt = S[0], stCol = S[1];
+    if (tsa === "ACTIVE" && lamp) { stCol = C.red; }
+    if (tsa === "OFF" && trA && !trlOn) { stTxt = "OFF (TRAILER MODE)"; stCol = C.amber; }
+    rowVal($.tvSt, stTxt, stCol, $.tlSt);
+
+    // sway meter 0..1.5 (1.0 = stage-2 threshold)
+    var sw = num(d.tsSw) || 0;
+    attr($.tvSwBar, "width", (92 * clamp01(sw / 1.5)).toFixed(1));
+    attr($.tvSwBar, "fill", sw < 0.5 ? C.blue : (sw < 1 ? C.amber : C.red));
+
+    // drawbar force: coupled trailer, usable pin, moving (no spd key -> live)
+    var lp = str(d.tsLp), fx = num(d.tsFx), v = num(d.spd);
+    if (v === null || Math.abs(v) >= FX_ON_KMH) { fxLive = true; }
+    else if (Math.abs(v) < FX_OFF_KMH) { fxLive = false; }
+    var fxTxt = "--", fxCol = C.muted, dir = 0;
+    if (trA && fxLive && fx !== null && (lp === "OK" || lp === "UNTARED")) {
+      var fa = Math.abs(fx);
+      var mag = imperial ? Math.round(fa * N_TO_LBF) + " lbf" : (fa / 1000).toFixed(1) + " kN";
+      if (fa < 50) { fxTxt = imperial ? "0 lbf" : "0.0 kN"; fxCol = C.text; }
+      else if (fx > 0) { fxTxt = "PULL " + mag; fxCol = C.text; dir = 1; }
+      else { fxTxt = "PUSH " + mag; fxCol = C.amber; dir = -1; }
+    }
+    rowVal($.tvFx, fxTxt, fxCol);
+    attr($.tArr, "opacity", dir !== 0 ? "1" : "0");
+    if (dir !== 0) {
+      attr($.tArr, "points", dir > 0 ? ARR_PULL : ARR_PUSH);
+      attr($.tArr, "fill", dir > 0 ? C.blueLt : C.amber);
+    }
+
+    // tongue load (signed estimate + state); masses by the weight unit uW
+    var lb = d.uW === "lb";
+    var ts = trA ? str(d.tsTs) : null, tg = num(d.tsTg);
+    var tgVal = tg === null ? "--" : (lb ? Math.round(tg * KG_TO_LB) + " lb" : Math.round(tg) + " kg");
+    var tgTxt = "--", tgCol = C.muted;
+    if (ts === "OK") { tgTxt = tgVal; tgCol = C.text; }
+    else if (ts === "LOW") { tgTxt = "LOW " + tgVal; tgCol = C.red; }
+    else if (ts === "TAIL_HEAVY") { tgTxt = "TAIL-HEAVY"; tgCol = C.red; }
+    rowVal($.tvTg, tgTxt, tgCol);
+
+    // mass estimate (-1 = learning); "EST." because the condensed "~" reads as a minus in game
+    var m = num(d.tsM), mTxt = "--", mCol = C.muted;
+    if (trA && m !== null) {
+      if (m >= 0) {
+        mTxt = "EST. " + (lb ? 10 * Math.round(m * KG_TO_LB / 10) + " lb" : 10 * Math.round(m / 10) + " kg");
+        mCol = C.text;
+      } else { mTxt = "LEARNING"; }
+    }
+    rowVal($.tvM, mTxt, mCol, $.tlM);
+
+    // rear-axle steering selector (row "NOT FITTED" without the part)
+    var sel = str(d.rsSel), rsTxt, rsCol = C.text;
+    if (sel === null) { rsTxt = "NOT FITTED"; rsCol = C.muted; }
+    else if (str(d.rsSt) === "FAULT") { rsTxt = "FAULT"; rsCol = C.red; }
+    else {
+      rsTxt = RS_SEL[sel] || sel;
+      if (sel === "OFF") { rsCol = C.muted; }
+      else if (str(d.rsMd) === "TRAILER") { rsTxt += " \u00b7 TRAILER"; }
+    }
+    rowVal($.tvRs, rsTxt, rsCol, $.tlRs);
+
+    // leveling state + applied lift
+    var lvl = str(d.lvl), mm = num(d.lvlMm), lvTxt = "--", lvCol = C.muted;
+    if (lvl !== null) {
+      var r = mm === null ? null : Math.round(mm);
+      lvTxt = lvl + (r === null ? "" : " " + (r > 0 ? "+" : "") + r + " mm");
+      lvCol = lvl === "FAULT" ? C.red : (lvl === "MAX" ? C.amber : C.text);
+    }
+    rowVal($.tvLv, lvTxt, lvCol);
+
+    // recommended maximum speed (sign); banner visibility is set in apply()
+    var vr = num(d.tsVr);
+    txt($.tVr, (vr === null || vr <= 0) ? "--" : String(imperial ? 5 * Math.round(vr * KM_TO_MI / 5) : Math.round(vr)));
+    txt($.tVrU, imperial ? "mph" : "km/h");
+
+    // schematic: dashed trailer while nothing is coupled (pinned trailer mode)
+    attr($.tBox, "stroke-dasharray", trA ? "none" : "4 3");
+    attr($.tBox, "stroke", !trA ? C.dim : (lamp ? C.red : (stg >= 1 || k >= 1 ? C.amber : C.dim)));
+    attr($.tBar, "stroke", trA ? C.muted : C.dim);
+  }
+
   // ------------------------------------------------------------------ apply
   function apply(d) {
     if (!ready || !d) { return; }
@@ -279,6 +399,20 @@
     txt($.sbTitle, hasVcu ? "HYBRID SYSTEM" : "ENERGY FLOW");
     txt($.sbSub, hasVcu ? "STANDBY" : "NO HYBRID DATA");
     if (!on) { return; }
+
+    // trailer page: trailer mode on, trailer coupled or pinned by the cockpit panel; needs tsa
+    var trlOn = (num(d.trl) || 0) > 0.5;
+    var trA = (num(d.trA) || 0) > 0.5;
+    var trlPage = (trlOn || trA || window.etk854hybridCdView === "TRAILER") && str(d.tsa) !== null;
+    var tsSt = Math.round(num(d.tsSt) || 0), tsK = Math.round(num(d.tsK) || 0);
+    var tsL = (num(d.tsL) || 0) > 0.5;
+    attr($.flowPage, "opacity", trlPage ? "0" : "1");
+    attr($.trlPage, "opacity", trlPage ? "1" : "0");
+    txt($.hTitle, trlPage ? "TRAILER" : "ENERGY FLOW");
+    txt($.hSub, trlPage ? "STABILITY ASSIST" : "HYBRID SYSTEM");
+    attr($.hUnder, "width", trlPage ? "52" : "78");
+    attr($.hSub, "x", trlPage ? "80" : "106");
+    if (trlPage) { applyTrailer(d, trlOn, trA, imperial, tsSt, tsK, tsL); }
 
     var ev = num(d.ev) || 0;
     var ice = num(d.ice) || 0;
@@ -400,21 +534,36 @@
     // chips
     var list = [];
     if (starting) { list.push(["ENGINE START", C.blueLt, true]); }
+    // trailer stability intervening (stage or corner); blinks with the DSC lamp
+    if (tsSt >= 1 || tsK >= 1) { list.push(["TSA", tsL ? C.red : C.amber, tsL]); }
     var dsc = str(d.dsc);
     if (dsc === "DTC") { list.push(["DTC", C.amber, false]); }
     else if (dsc === "OFF") { list.push(["DSC OFF", C.amber, false]); }
     if (awd) { list.push([awd, awd === "AWD" ? C.blue : C.muted, false]); }
-    if ((num(d.trl) || 0) > 0.5) { list.push(["TRAILER", C.amber, false]); }
+    // the trailer page itself says TRAILER
+    if (trlOn && !trlPage) { list.push(["TRAILER", C.amber, false]); }
     var rl = str(d.rl);
     if ((num(d.op) || 0) > 0.5) { list.push(["ONE PEDAL", C.green, false]); }
-    // MED is the default recuperation level: not shown, same as the cluster
+    // MED is the default level: not shown (as the cluster)
     else if (rl && rl !== "MED") { list.push(["REGEN " + rl, rl === "OFF" ? C.muted : C.green, false]); }
     if (boost > 0) { list.push(["BOOST " + boost, C.orange, false]); }
     drawChips(list);
 
+    // trailer page blink members: after drawChips (it rebuilds blinkEls); visibility via tRs / tRec / tvSw
+    var tsRs = (num(d.tsRs) || 0) > 0.5;
+    attr($.tRs, "opacity", tsRs ? "1" : "0");
+    attr($.tRec, "opacity", tsRs ? "0" : "1");
+    if ($.tRsBlink) {
+      $.tRsBlink.__blink = tsRs && (tsSt === 3 || tsK === 2);
+      if (blinkEls.indexOf($.tRsBlink) < 0) { blinkEls.push($.tRsBlink); }
+    }
+    if ($.tvSwBlink) {
+      $.tvSwBlink.__blink = tsSt >= 2;
+      if (blinkEls.indexOf($.tvSwBlink) < 0) { blinkEls.push($.tvSwBlink); }
+    }
+
     // consumption + history
     var cons = num(d.cons);
-    // kWh per 100 mi = kWh per 100 km / 0.621371
     txt($.consVal, cons === null ? "--" : (imperial ? cons / KM_TO_MI : cons).toFixed(1));
 
     // on-board computer: tank litres, instantaneous in the ENGINE row, trip
@@ -447,11 +596,15 @@
   // ------------------------------------------------------------------- init
   function init() {
     var ids = ["hTemp", "hClock", "phBox", "phTxt", "modeTxt", "wF", "wR", "frontDrive", "fProp", "fA1", "fA2", "fDiff",
-      "fuelLn", "hvLn", "iceLn1", "iceLn2", "emLn", "rProp", "rA1", "rA2", "ice", "k0A", "k0B", "k0Lbl", "em", "emBolt",
-      "gb", "rDiff", "tank", "tankFill", "batt", "battBody", "battFill", "battTxt", "soc", "socVal", "rngLbl", "rng",
+      "fuelLn", "hvLn", "iceLn1", "iceLn2", "emLn", "rProp", "rA1", "rA2", "ice", "k0A", "k0B", "k0Lbl", "emBolt",
+      "rDiff", "tankFill", "battBody", "battFill", "battTxt", "soc", "socVal", "rngLbl",
       "rngVal", "rngUnit", "consUnit", "socBar", "socTgt", "iceKw", "iceBar", "evKw", "evBar", "sysKw", "chips", "hist", "consVal", "share",
       "tankTxt", "iceCons", "fuelAvgVal", "fuelAvgUnit", "tripVal", "tripUnit",
-      "standby", "sbTitle", "sbSub"];
+      "standby", "sbTitle", "sbSub",
+      // header + trailer page
+      "hTitle", "hUnder", "hSub", "flowPage", "trlPage", "tBar", "tBox", "tArr",
+      "tVr", "tVrU", "tRec", "tRs", "tRsBlink", "tlSt", "tlM", "tlRs", "tvSt",
+      "tvSwBlink", "tvSwBar", "tvFx", "tvTg", "tvM", "tvRs", "tvLv"];
     for (var i = 0; i < ids.length; i++) { $[ids[i]] = document.getElementById(ids[i]); }
     $.emCircle = document.querySelector("#em circle");
     $.gbBox = document.querySelector("#gb rect");
@@ -461,14 +614,15 @@
     var q = window.__etk854nq || {};
     ignNav = typeof q.ign === "number" ? q.ign : null;
     window.etk854hybridUpdate = function (d) { stopDemo(); apply(d); };
+    var mapUpd = window.map.updateData; // chain the cockpit panel's MAP view
     window.map.updateData = function (g) {
       if (g && typeof g.ignitionLevel === "number") { ignNav = g.ignitionLevel; }
+      if (mapUpd) { mapUpd(g); }
     };
     if (q.data) { apply(q.data); }
     window.__etk854nq = null;
 
-    // Demo only in a desktop browser: in game the page is served from
-    // local:// and the engine injects `beamng`. Real data stops it anyway.
+    // demo only in a desktop browser (in game: local:// and `beamng`); real data stops it
     var inGame = /^local:/i.test(String(window.location.href)) || typeof beamng !== "undefined";
     var hash = String(window.location.hash || "");
     if ((!inGame || hash.indexOf("demo") >= 0) && !q.data) { startDemo(hash); }
@@ -510,12 +664,36 @@
         D.awd = "AWD"; D.awdNm = 140; D.ph = "HYBRID"; D.on = 1; D.ies = "ON"; D.k0 = 1; D.ice = 120 + 20 * w;
         D.ev = 45; D.trl = 1; D.spd = 80; D.fm = "l100"; D.fi = 11.4 + 1.5 * w; break;
       case "imperial":
-        D.ev = 30 + 20 * w; D.uL = "imperial"; D.uT = "f"; D.uC = "imperial"; D.uV = "gal"; D.rl = "HIGH"; break;
+        D.ev = 30 + 20 * w; D.uL = "imperial"; D.uT = "f"; D.uC = "imperial"; D.uV = "gal"; D.uW = "lb";
+        D.rl = "HIGH"; break;
       case "off": D.ign = 1; break;
       case "nodata": D = { ign: 2, spd: 0 }; break;
+      case "trailer": case "trailersway": case "trailerpush": case "trailertail": case "trailerpark":
+        trailerDemo(D, s, w); break;
       default: break;
     }
     return D;
+  }
+
+  // trailer page states, only via the hash (#demo=trailer ...), not in "anim"
+  function trailerDemo(D, s, w) {
+    D.ph = "HYBRID"; D.on = 1; D.ies = "ON"; D.k0 = 1; D.ice = 95 + 15 * w; D.ev = 18; D.awd = "AWD"; D.awdNm = 160;
+    D.fm = "l100"; D.fi = 14.2 + 1.5 * w; D.trl = 1; D.trA = 1; D.lvl = "LEVEL"; D.lvlMm = 9; D.spd = 88;
+    D.tsa = "READY"; D.tsSt = 0; D.tsK = 0; D.tsL = 0; D.tsSw = 0.12 + 0.08 * w; D.tsFx = 1200; D.tsTg = 200;
+    D.tsTs = "OK"; D.tsM = 1450; D.tsMq = 1; D.tsLp = "OK"; D.tsVr = 100; D.tsRs = 0;
+    D.rsSel = "DSC"; D.rsMd = "TRAILER"; D.rsSt = "ACTIVE";
+    if (s === "trailersway" || s === "trailerpush") {
+      // wheel torque held at zero during the braking stages
+      D.ph = "ICE"; D.ice = 4; D.ev = 0; D.fi = 1.8; D.tsa = "ACTIVE"; D.tsL = 1;
+    }
+    if (s === "trailersway") { D.tsSt = 2; D.tsRs = 0; D.tsSw = 1.1; D.tsFx = -300; D.spd = 112; }
+    else if (s === "trailerpush") { D.tsSt = 3; D.tsRs = 1; D.tsVr = 95; D.tsSw = 1.3; D.tsFx = -650; D.spd = 104; }
+    else if (s === "trailertail") { D.tsTs = "TAIL_HEAVY"; D.tsTg = -170; D.tsVr = 80; D.tsRs = 1; D.spd = 92; }
+    else if (s === "trailerpark") {
+      // parked: the pin preload reads PUSH ~1 kN, the drawbar shows "--"
+      D.ph = "READY"; D.on = 0; D.ies = "OFF"; D.k0 = 0; D.ice = 0; D.ev = 0; D.fm = "ev"; D.fi = 0;
+      D.spd = 0; D.gear = "P"; D.gi = 0; D.tsa = "STANDBY"; D.tsSw = 0; D.tsFx = -1000; D.tsTg = 180; D.tsM = 1020;
+    }
   }
 
   function seedHistory() {

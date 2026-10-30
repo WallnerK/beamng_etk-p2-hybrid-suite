@@ -1,54 +1,26 @@
--- ETK 854 ActiveHybrid - Performance cooling package: auxiliary ram-air
--- coolers + thermal telemetry.
+-- ETK 854 ActiveHybrid - Performance cooling package: ram-air auxiliary
+-- coolers + thermal telemetry. Declared by etk854hybrid_radiator_performance;
+-- runs after etk854hybrid_cooling (order 91 > 90).
 --
--- Declared ONLY by the part etk854hybrid_radiator_performance
--- (etk854hybrid_cooling.jbeam), i.e. only on the Performance configs. The
--- standard cooling controller etk854hybrid_cooling.lua (PWM fan, wisps) is
--- not touched and runs unchanged before this one (defaultOrder 90 < 91).
---
--- Aux coolers (side radiators in the bumper air intakes): the base thermal
--- model (lua/vehicle/powertrain/combustionEngineThermals.lua) knows one
--- coolant radiator; its coefficients are module locals without setters. Like
--- the PWM fan emulation, this module removes its heat directly from the
--- public integrator state engine.thermals.coolantTemperature:
+-- Aux coolers: the base radiator coefficients are module locals, so the heat
+-- is taken directly from engine.thermals.coolantTemperature:
 --   Q_aux = (Tc - Tenv) * auxCoolerCoef * thermostat * coolantEfficiency
---           * ram / (airCoefHalf + ram),     ram = 0.8 * |frontAirflow|
--- Same form as the base radiator (:765-772) but WITHOUT the 0.1 no-fan floor
--- and without any fan: ram air only. At standstill Q_aux is 0, so the PWM fan
--- (105 / 101 C), the wisps and the N-charge cooling behave exactly as on the
--- standard package. thermostat / coolantEfficiency / coolantMass are read
--- from thermals.debugData.engineThermalData (one frame old, see
--- etk854hybrid_cooling.lua header), so a closed thermostat or a leaking
--- circuit cuts the aux coolers exactly like the main radiator.
--- auxCoolerCoef 4600 W/K + 5400 W/K main radiator = 10000 W/K at speed.
+--           * ram / (airCoefHalf + ram),   ram = ramAirFactor (0.8) * |frontAirflow|
+-- Ram air only (no fan, no 0.1 floor): zero at standstill, so fan, wisps and
+-- standstill charging match the standard package. engineThermalData is one
+-- frame old here.
 --
--- Telemetry probe: on a car WITHOUT the Performance radiator this module can
--- be loaded at runtime as a pure telemetry probe (aux coolers off, no effect
--- on the vehicle):
+-- Telemetry probe on a car without the part (no effect on the vehicle):
 --   controller.loadControllerExternal("etk854hybrid_perfCooling",
 --     "etk854hybrid_perfCooling", {auxCoolerCoef = 0})
--- Not on a car that already has the part (duplicate controller name ->
--- load error). An external load survives a vehicle reset, not a reload.
+-- Not on a car with the part (duplicate controller name -> load error); an
+-- external load survives a vehicle reset, not a reload.
 --
--- Published electrics (every frame while the engine thermals are active):
---   etk854hybrid_auxCoolerKW  kW    heat removed by the aux coolers
---   etk854hybrid_egtC         C     exhaust temperature (thermals.exhaustTemperature)
---   etk854hybrid_turboTempC   C     exhaust + coolant + oil, the value the base
---                                   turbocharger compares against its limit
---                                   (turbocharger.lua:200)
---   etk854hybrid_turboLimitC  C     turbocharger damageThresholdTemperature
---                                   (default 1000, turbocharger.lua:441)
---   etk854hybrid_burnEff      0..1  burn efficiency the thermals use this frame
---                                   (engineThermalData.engineEfficiency)
---   etk854hybrid_iceLoad      0..1  engine.engineLoad (the smoothed load the
---                                   thermals index the efficiency table with)
---   etk854hybrid_iceCombKW    kW    combustionTorque * outputAV1, low-pass
---                                   powerTau (net of friction,
---                                   combustionEngine.lua:802) - measured crank
---                                   power, unlike the VCU's commanded ICE torque
---   etk854hybrid_turboHot     0/1   damageTracker engine.turbochargerHot
---   etk854hybrid_coolantHot   0/1   damageTracker engine.coolantOverheating
--- No sound, no particles, no battery draw.
+-- Electrics (etk854hybrid_*): auxCoolerKW kW, egtC C, turboTempC C (exhaust +
+-- coolant + oil, as the base turbo checks it), turboLimitC C, burnEff 0..1,
+-- iceLoad 0..1 (engine.engineLoad), iceCombKW kW (actual crank power net of
+-- friction, not the VCU command: combustionTorque * outputAV1, low-pass
+-- powerTau), turboHot / coolantHot 0/1 (damageTracker).
 
 local M = {}
 
@@ -60,19 +32,19 @@ local max = math.max
 local min = math.min
 local abs = math.abs
 
--- All tunables in ONE table (LuaJIT 60-upvalue limit); every key can be
--- overridden from jbeam (same type only).
+-- Tunables in one table (LuaJIT 60-upvalue limit), overridable from jbeam.
 local CFG = {
   engineName = "mainEngine",
   auxCoolerCoef = 0, -- W/K; 0 = telemetry only (probe)
-  airCoefHalf = 15, -- combustionEngineThermals.lua:766
-  coolantSpecHeat = 4000, -- :152
-  minCoolantMass = 1.5, -- :154
+  -- base-model constants (combustionEngineThermals.lua)
+  ramAirFactor = 0.8, -- radiator ram air = ramAirFactor * |frontAirflow|
+  airCoefHalf = 15, -- m/s, airCoef = v / (15 + v)
+  coolantSpecHeat = 4000, -- J/(kg K)
+  minCoolantMass = 1.5, -- kg
   kelvinOffset = 273.15,
   powerTau = 0.1 -- s, low-pass of etk854hybrid_iceCombKW
 }
 
--- Runtime state, also one table.
 local S = {
   ok = false,
   engine = nil,
@@ -101,8 +73,7 @@ local function publish()
   ev.etk854hybrid_coolantHot = (dtr and dtr.getDamage("engine", "coolantOverheating")) and 1 or 0
 end
 
--- Resolves the engine, its thermals module and the turbo limit. Returns true
--- when the base thermal model is active (water cooled).
+-- true when the base (water-cooled) thermal model is active
 local function resolve()
   S.ok = false
   local engine = powertrain.getDevice(CFG.engineName)
@@ -137,7 +108,7 @@ local function updateGFX(dt)
   end
   local tEnv = obj:getEnvTemperature() - CFG.kelvinOffset
   local thermostat = td.thermostatStatus or 0
-  local ram = abs(obj:getFrontAirflowSpeed()) * 0.8
+  local ram = abs(obj:getFrontAirflowSpeed()) * CFG.ramAirFactor
 
   S.auxW = 0
   if CFG.auxCoolerCoef > 0 and thermostat > 0 and ram > 0 then
@@ -193,6 +164,7 @@ local function reset()
   resetState()
 end
 
+-- State snapshot for dev tools (allocates, not for per-frame use).
 local function getState()
   return {
     active = S.ok,

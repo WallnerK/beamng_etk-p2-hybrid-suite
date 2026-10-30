@@ -1,41 +1,25 @@
-// ETK 854 ActiveHybrid - Actions (clickable vehicle-specific actions)
+// ETK 854 ActiveHybrid - Actions (clickable vehicle actions, BeamNG.drive 0.39.4)
 // =========================================================================
-// Target: BeamNG.drive 0.39.4
+// Hosting as the HUD app: AngularJS directive, exactly one root element,
+// `replace: true` (the host mounts only el[0]); inline styles only (a <style>
+// is global in the CEF document). Needs app.json "interactive": "yes" plus
+// root pointer-events: auto, otherwise every button is dead.
 //
-// Same hosting pattern as the etk854HybridHUD app (see its header):
-//   * AngularJS directive, EXACTLY ONE root element, `replace: true` -
-//     app-service.js mountDirective appends only el[0] of the compiled
-//     domElement.
-//   * app.json "interactive": "yes" - AppHost.vue gives the host
-//     `pointer-events: none` unless the app is interactive, so the HUD's
-//     "no" would make every button dead. The root also sets
-//     `pointer-events: auto` explicitly.
-//   * Inline styles only, no <style> block (a <style> inside an app is
-//     global in the CEF document and would leak into other apps).
-//
-// Behaviour:
-//   * Every button is a fire-and-forget bngApi.activeObjectLua() into the
-//     PLAYER vehicle's Lua VM, always through controller.getControllerSafe()
-//     which returns a nilController for a missing controller
-//     (lua/vehicle/controller.lua getControllerSafe) - a config without the
-//     AWD or trailer controller can never throw.
-//   * NO local mode state: highlighting mirrors the electrics stream only.
-//     The VCU republishes its mode channels at 20 Hz (HUD_INTERVAL in
-//     etk854hybridControl.lua) and onReset silently returns to
-//     COMFORT / AUTO EV / MED, so an optimistic local copy would lie.
-//   * Optional features (AWD, trailer, shift program, trunk air compressor)
-//     appear only while their electrics channel exists, i.e. while the
-//     owning controller is part of the spawned config.
-//   * Clicks are ignored while the focused vehicle is not an ActiveHybrid:
-//     stock vehicles have a driveModes controller too, and a DSC click must
-//     not change a foreign car's drive mode.
+// * Buttons fire bngApi.activeObjectLua() through getControllerSafe(), a no-op
+//   when the controller is missing.
+// * No local mode state: highlighting mirrors the electrics stream (the VCU
+//   may reset its modes silently).
+// * Optional features show only while their channel exists; the R-STEER and
+//   DISPLAY rows are hidden as a whole while their channel is not a string.
+// * Clicks are ignored on a non-ActiveHybrid vehicle (a DSC click must not
+//   switch a stock car's driveModes).
 // =========================================================================
 
 angular.module('beamng.apps')
 .directive('etk854HybridActions', [function () {
 
   // ---------------------------------------------------------------- palette
-  // identical to etk854HybridHUD/app.js so both apps read as one cockpit
+  // same as the HUD app
   const C = {
     bgTop:  '#121824',
     bgBot:  '#070a10',
@@ -64,25 +48,26 @@ angular.module('beamng.apps')
   const DSE  = "controller.getControllerSafe('driveModes')"
   const AWD  = "controller.getControllerSafe('etk854hybrid_awdMode')"
   const SUSP = "controller.getControllerSafe('etk854hybrid_adaptiveSusp')"
-  // trunk compressor / trailer air supply (etk854hybrid_loads.jbeam
-  // etk854hybrid_load_compressor); cell visible only while its controller
-  // publishes etk854hybrid_airState
-  const AIR  = "controller.getControllerSafe('etk854hybrid_airCompressor')"
+  const AIR  = "controller.getControllerSafe('etk854hybrid_airCompressor')"   // trailer air supply
+  const RAS  = "controller.getControllerSafe('etk854hybrid_rearSteer')"      // rear-axle steering
+  const CP   = "controller.getControllerSafe('etk854hybrid_cockpitPanel')"   // centre-screen views + panel
 
-  // The custom 8HP shift logic is not a controller: vehicleController.lua
-  // (init, l.1117-1123) require()s "controller/vehicleController/shiftLogic/
-  // <name>" only if FS:fileExists("lua/vehicle/"..that..".lua"), otherwise the
-  // legacy key "controller/shiftLogic-<name>". A module shipped in the vehicle
-  // folder (vehicles/etk800/lua/...) is only on package.path, so it may end up
-  // under either key -> look up both. Call and probe tolerate its absence.
+  // The shift logic is not a controller. vehicleController loads it as
+  // "controller/vehicleController/shiftLogic/<name>" only when the file is in
+  // lua/vehicle/, else under the legacy key; a vehicle-folder module may land
+  // under either -> look up both. Call and probe tolerate its absence.
   const SHIFT_NAME = 'etk854hybrid_8hp'
   const SHIFT_GET = "(package.loaded['controller/vehicleController/shiftLogic/" + SHIFT_NAME +
     "'] or package.loaded['controller/shiftLogic-" + SHIFT_NAME + "'])"
   const shiftCall = prog =>
     'local m = ' + SHIFT_GET + " if type(m) == 'table' and type(m.setProgram) == 'function' then m.setProgram('" + prog + "') end"
-  // the callback form wraps the command as a function argument -> must be an expression
+  // the callback form wraps the command as a function argument -> expression
   const SHIFT_PROBE =
     '(function() local m = ' + SHIFT_GET + " return type(m) == 'table' and type(m.setProgram) == 'function' end)()"
+
+  // DISPLAY row tooltips (current state is prefixed at runtime)
+  const DP_CL_TIP = 'click: next view (AUTO / HYBRID / EFFICIENCY / SPORT / MINIMAL; AUTO follows the driving experience)'
+  const DP_CD_TIP = 'click: next view (ENERGY / MAP / TRAILER; TRAILER only with trailer data)'
 
   // ------------------------------------------------------------ action rows
   // cell.kind: 'btn' (default, fires cell.lua) or 'val' (read-only readout)
@@ -126,6 +111,18 @@ angular.module('beamng.apps')
       { id: 'aw2', text: '2WD',     lua: AWD + ".setMode('2WD')",       tip: 'Rear-wheel drive only' },
       { id: 'trl', text: 'TRAILER', lua: SUSP + '.toggleTrailerMode()', tip: 'Trailer mode (leveling)', grow: 1.3 },
       { id: 'air', text: 'COMPR', lua: AIR + '.toggle()', tip: 'Electric air compressor (trailer air supply) on/off', grow: 1.4 }
+    ] },
+    // opt: hidden until etk854hybrid_rasSel is a string
+    { id: 'rRs', label: 'R-STEER', opt: true, cells: [
+      { id: 'rsO', text: 'OFF',       lua: RAS + ".setMode('OFF')",   tip: 'Rear-axle steering off - rear wheels straight, as without the system' },
+      { id: 'rsD', text: 'ON + DSC',  lua: RAS + ".setMode('DSC')",   tip: 'Rear-axle steering on with stability assist (default)', grow: 1.35 },
+      { id: 'rsN', text: 'ON NO DSC', lua: RAS + ".setMode('NODSC')", tip: 'Rear-axle steering on without steering assist - rear wheels return to straight while DSC intervenes', grow: 1.45 }
+    ] },
+    // opt: hidden until etk854hybrid_clusterViewSel is a string
+    { id: 'rDp', label: 'DISPLAY', opt: true, cells: [
+      { id: 'dpC', text: 'CLUSTER --', lua: CP + '.cycleClusterView()', tip: DP_CL_TIP, grow: 1.6 },
+      { id: 'dpS', text: 'CENTRE --',  lua: CP + '.cycleCentreView()',  tip: DP_CD_TIP, grow: 1.45 },
+      { id: 'dpM', text: 'MENU',       lua: CP + '.menu()',             tip: 'Settings panel on the centre display: open / close', grow: 0.85 }
     ] }
   ]
   const BY_ID = {}
@@ -135,12 +132,15 @@ angular.module('beamng.apps')
   const DE_BTN  = [['deC', 'COMFORT'], ['deE', 'ECO_PRO'], ['deS', 'SPORT']]
   const ED_BTN  = [['edA', 'AUTO_EDRIVE'], ['edM', 'MAX_EDRIVE'], ['edB', 'BATTERY_CONTROL']]
   const RG_BTN  = [['rgO', 'OFF'], ['rgL', 'LOW'], ['rgM', 'MED'], ['rgH', 'HIGH']]
-  // DSC colours follow the HUD badge / DSE simpleControlButton; OFF is lit
-  // amber here because an active OFF must be unmistakable on a button row.
+  // DSC colours as the HUD badge, but OFF lit amber to be unmistakable
   const DSC_BTN = [['dsD', 'DSC', C.blue], ['dsT', 'DTC', C.red], ['dsO', 'OFF', C.amber]]
   const SP_BTN  = [['spE', 'ECO'], ['spC', 'COMFORT'], ['spS', 'SPORT'], ['spM', 'MANUAL']]
   const AWD_BTN = [['awA', 'AWD'], ['aw2', '2WD']]
+  const RS_BTN  = [['rsO', 'OFF', C.amber], ['rsD', 'DSC', C.blue], ['rsN', 'NODSC', C.blueLt]]
+  const RS_OFF_TIP = ' - inactive while DSC OFF'
   const LC_LABEL = { IDLE: 'LAUNCH', ARMED: 'LC ARMED', READY: 'LC READY', ACTIVE: 'LC GO' }
+  // short view names (as on the panel's DISPLAY tab)
+  const DP_SHORT = { EFFICIENCY: 'EFFIC.' }
 
   const num = v => (v === undefined || v === null || v === '' || isNaN(Number(v))) ? null : Number(v)
   const now = () => (window.performance && performance.now) ? performance.now() : Date.now()
@@ -158,8 +158,9 @@ angular.module('beamng.apps')
     return '<div ' + attr + ' title="' + (c.tip || '') + '" style="' + base + look + '">' + c.text + '</div>'
   }
   function rowHtml(r) {
-    return '<div data-r="' + r.id + '" style="flex:1 1 0;min-height:0;display:flex;align-items:stretch;gap:0.35em;">' +
-      '<div style="flex:none;width:4.6em;display:flex;align-items:center;font-size:0.7em;letter-spacing:0.14em;color:' + C.muted + ';">' +
+    return '<div data-r="' + r.id + '" style="flex:1 1 0;min-height:0;display:' + (r.opt ? 'none' : 'flex') + ';align-items:stretch;gap:0.35em;">' +
+      // nowrap: 'R-STEER' must not break at its hyphen when the font falls back
+      '<div style="flex:none;width:4.6em;display:flex;align-items:center;font-size:0.7em;letter-spacing:0.14em;white-space:nowrap;color:' + C.muted + ';">' +
       r.label + '</div>' + r.cells.map(cellHtml).join('') + '</div>'
   }
   const TPL =
@@ -192,8 +193,7 @@ angular.module('beamng.apps')
         B[el.getAttribute('data-a') || el.getAttribute('data-v') || el.getAttribute('data-r')] = el
       }
 
-      // ----------------------------------------------- memoised DOM writers
-      // (stream ticks arrive at frame rate; only touch the DOM on change)
+      // ------------------------- memoised DOM writers (ticks at frame rate)
       let memo = {}
       const txt = (id, v) => { const el = B[id]; if (el && el.textContent !== v) el.textContent = v }
       const tip = (id, v) => { const el = B[id]; if (el && el.getAttribute('title') !== v) el.setAttribute('title', v) }
@@ -225,9 +225,8 @@ angular.module('beamng.apps')
       }
 
       // ------------------------------------------------ font-size = scale
-      // All inner sizes are em, so one root font-size scales the whole app
-      // with whatever size the layout editor gives it (290x250 -> 10 px,
-      // 400x300 -> 12 px).
+      // all inner sizes are em -> the root font-size scales the app
+      // (290x250 -> 10 px)
       function fit() {
         const w = root.clientWidth, h = root.clientHeight
         if (!w || !h) return
@@ -241,12 +240,11 @@ angular.module('beamng.apps')
       fit()
 
       // ------------------------------------------------ shift-program probe
-      // null = unknown, true/false = etk854hybrid_8hp exposes setProgram.
-      // Re-probed every 10 s so a Ctrl+R vehicle reload (no VehicleChange)
-      // with a different shift logic is picked up.
+      // null = unknown, else whether setProgram exists; re-probed every 10 s
+      // (a Ctrl+R reload with another shift logic fires no VehicleChange)
       let shiftSettable = null, lastProbe = -1e9, probeBusy = false
       function probeShift(t) {
-        if (probeBusy && t - lastProbe < 5000) return    // lost callback -> retry after 5 s
+        if (probeBusy && t - lastProbe < 5000) return    // lost callback: retry
         if (t - lastProbe < (shiftSettable === null ? 1500 : 10000)) return
         lastProbe = t
         probeBusy = true
@@ -299,13 +297,20 @@ angular.module('beamng.apps')
         const e = streams && streams.electrics
         if (!e) return
         const t = now()
-        if (t - lastFit > 1000) { lastFit = t; fit() }   // fallback when ResizeObserver is missing
+        if (t - lastFit > 1000) { lastFit = t; fit() }   // no-ResizeObserver fallback
 
         hybrid = typeof e.etk854hybrid_deMode === 'string'
         if (memo.hybrid !== hybrid) {
           memo.hybrid = hybrid
           root.style.opacity = hybrid ? '1' : '0.4'
         }
+        // optional rows before the early return, so a foreign vehicle hides them
+        const rasRaw = e.etk854hybrid_rasSel
+        const hasRas = typeof rasRaw === 'string'
+        vis('rRs', hasRas)
+        const cvSelRaw = e.etk854hybrid_clusterViewSel
+        const hasDp = typeof cvSelRaw === 'string'
+        vis('rDp', hasDp)
         if (!hybrid) { txt('hdr', 'NO ACTIVEHYBRID'); return }
 
         // ------------------------------------------------ mode groups
@@ -319,7 +324,7 @@ angular.module('beamng.apps')
         group(DSC_BTN, dsc)
 
         // ------------------------------------------------ target SOC
-        // etk854hybrid_targetSoc is 0..1, etk854hybrid_batterySoc is percent
+        // targetSoc 0..1, batterySoc percent
         let tgt = num(e.etk854hybrid_targetSoc)
         if (tgt !== null && tgt > 1.5) tgt /= 100
         const bc = ed === 'BATTERY_CONTROL'
@@ -350,21 +355,19 @@ angular.module('beamng.apps')
         }
 
         const ls = String(e.etk854hybrid_launchState || 'IDLE').toUpperCase()
-        // finer launch phase (etk854hybrid_launchControl): PRELOAD is published
-        // as launchState ARMED, the brake-throttle guard as phase GUARD
+        // finer phase: PRELOAD is launchState ARMED, GUARD = brake-throttle guard
         const lph = String(e.etk854hybrid_launchPhase || '').toUpperCase()
         const gear = e.gear
         const g0 = typeof gear === 'string' ? gear.charAt(0) : ''
-        const lcGear = g0 === 'S' || g0 === 'M' || (g0 === 'D' && String(e.etk854hybrid_deMode || '').toUpperCase() === 'SPORT')
+        const lcGear = g0 === 'S' || g0 === 'M' || (g0 === 'D' && de.toUpperCase() === 'SPORT')
         let lcTxt = LC_LABEL[ls] || ('LC ' + ls)
         if (lph === 'PRELOAD') lcTxt = 'LC PRELOAD'
         else if (lph === 'GUARD' && ls === 'IDLE') lcTxt = 'LC GUARD'
         txt('lc', lcTxt)
         look('lc', ls !== 'IDLE' || lph === 'GUARD', C.amber)
         const trim = num(e.etk854hybrid_launchTrim)
-        tip('lc', 'Launch Control: S/M, or D in SPORT; in SPORT/DTC also brake + kickdown at a standstill; press again = off'
-          + (lph !== '' && lph !== 'OFF' ? ' - ' + lph + (trim !== null && trim < 0.995 ? ' trim ' + trim.toFixed(2) : '') : ''))
-        // not hard-disabled: the VCU answers a click outside S/M/D-SPORT with a toast
+        tip('lc', BY_ID.lc.tip + (lph !== '' && lph !== 'OFF' ? ' - ' + lph + (trim !== null && trim < 0.995 ? ' trim ' + trim.toFixed(2) : '') : ''))
+        // only faded: outside S/M/D-SPORT the VCU answers a click with a toast
         fade('lc', !lcGear && ls === 'IDLE')
 
         // ------------------------------------------------ chassis row
@@ -380,12 +383,11 @@ angular.module('beamng.apps')
           const trlOn = trlRaw === true || (num(trlRaw) || 0) > 0.5
           look('trl', trlOn, C.amber)
           const lvl = e.etk854hybrid_levelState
-          tip('trl', 'Trailer mode (leveling)' + (typeof lvl === 'string' && lvl !== '' ? ' - ' + lvl : ''))
+          tip('trl', BY_ID.trl.tip + (typeof lvl === 'string' && lvl !== '' ? ' - ' + lvl : ''))
         }
 
-        // compressor switch: lit = switched on (green idle / light blue while
-        // pumping / amber below the 4.14 bar spring-brake release pressure),
-        // text = receiver pressure. 'NO TANK' = controller without receiver.
+        // compressor: lit = on (green idle / light blue pumping / amber LOW),
+        // text = receiver pressure; 'NO TANK' = no receiver
         const airSt = e.etk854hybrid_airState
         const hasAir = typeof airSt === 'string' && airSt !== '' && airSt !== 'NO TANK'
         vis('air', hasAir)
@@ -398,13 +400,43 @@ angular.module('beamng.apps')
           look('air', airOn, airSt === 'LOW' ? C.amber : (airRun ? C.blueLt : C.green))
           const inh = e.etk854hybrid_airInhibit
           const trlAir = (num(e.etk854hybrid_airTrailer) || 0) > 0.5
-          // trailer supply protection valve (etk854hybrid_airTrlValve 0 = shut:
-          // trailer gets no air, its spring brakes hold, until 6.0 bar)
+          // protection valve: 0 = shut, trailer gets no air until 6.0 bar
           const trlShut = trlAir && num(e.etk854hybrid_airTrlValve) === 0
           tip('air', 'Electric air compressor (trailer air supply) - ' + airSt + ', ' + barTxt + ' bar' +
             (typeof inh === 'string' && inh !== 'NONE' ? ', inhibit ' + inh : '') +
             (trlAir ? (trlShut ? ', trailer air coupled - supply valve shut until 6.0 bar' : ', trailer air coupled') : '') +
             ' - click: on/off')
+        }
+
+        // ------------------------------------------------ rear-steer row
+        // DSC OFF disables the system: cells faded, selection stays lit and
+        // clicks still pass (the controller keeps the choice)
+        if (hasRas) {
+          group(RS_BTN, rasRaw.toUpperCase())
+          const rsDscOff = dsc === 'OFF'
+          for (let i = 0; i < RS_BTN.length; i++) {
+            const id = RS_BTN[i][0]
+            fade(id, rsDscOff)
+            tip(id, BY_ID[id].tip + (rsDscOff ? RS_OFF_TIP : ''))
+          }
+        }
+
+        // ------------------------------------------------ display row
+        // CLUSTER / CENTRE cycle and show the selection, lit when not on the
+        // default (AUTO / ENERGY); MENU lit while the panel is open
+        if (hasDp) {
+          const cvSel = cvSelRaw.toUpperCase()
+          const cvEff = typeof e.etk854hybrid_clusterView === 'string' ? e.etk854hybrid_clusterView.toUpperCase() : ''
+          txt('dpC', 'CLUSTER ' + (DP_SHORT[cvSel] || cvSel || '--'))
+          look('dpC', cvSel !== '' && cvSel !== 'AUTO', C.blueLt)
+          tip('dpC', 'Instrument cluster: ' + (cvSel || '--') +
+            (cvSel === 'AUTO' && cvEff !== '' ? ' (' + cvEff + ')' : '') + ' - ' + DP_CL_TIP)
+          const cdView = typeof e.etk854hybrid_cdView === 'string' && e.etk854hybrid_cdView !== ''
+            ? e.etk854hybrid_cdView.toUpperCase() : 'ENERGY'
+          txt('dpS', 'CENTRE ' + cdView)
+          look('dpS', cdView !== 'ENERGY', C.blueLt)
+          tip('dpS', 'Centre display: ' + cdView + ' - ' + DP_CD_TIP)
+          look('dpM', (num(e.etk854hybrid_cdMenu) || 0) > 0.5, C.blue)
         }
       })
     }

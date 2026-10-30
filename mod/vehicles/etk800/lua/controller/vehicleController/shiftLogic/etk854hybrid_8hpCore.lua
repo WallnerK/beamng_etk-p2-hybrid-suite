@@ -1,40 +1,32 @@
 -- ETK 854 ActiveHybrid - etk854hybrid_8hp decision core
 -- ============================================================================
--- 8HP / ActiveHybrid style shift program for the P2 hybrid
--- (ICE 'mainEngine' -> K0 'clutchK0' -> E-machine 'integratedMotor' ->
---  torqueConverter -> 8AT 'gearbox').
+-- Shift program for the P2 driveline (ICE 'mainEngine' -> K0 'clutchK0' ->
+-- E-machine 'integratedMotor' -> torqueConverter -> 8AT 'gearbox').
+-- Programs ECO / COMFORT / SPORT / MANUAL are blended by weight (S.w) and
+-- adapted by the sportiness index (S.sEff, capped per program). ECO / COMFORT
+-- are torque-first (low maps, demand downshifts from a torque check); SPORT
+-- has no overdrive (top gear = direct gear) and a calm relax state. With the
+-- ICE decoupled an EV logic (motor operating point, saturation) replaces the
+-- ICE maps; ICE starts get their own gear planning (rev cap, engagement floor).
 --
--- This file holds ALL new decision logic. The shift-logic module
--- etk854hybrid_8hp.lua (a copy of the base shiftLogic/automaticGearbox.lua)
--- only calls into it at five hook points:
---   decide(dt, M)          gear decision, replaces determineTargetGearIndex
---   manualOverride(g, M)   kickdown / EV-lug in M<n> manual mode
---   lockup(dt, M)          torque-converter lock-up ratio (electrics)
---   onShiftStart(g, M)     gear change time + ignition-cut decision
---   publish(dt, M)         HUD / VCU / QA electrics, every GFX frame
+-- Called from etk854hybrid_8hp.lua (copy of the base automaticGearbox.lua):
+--   decide(dt, M)         gear decision (replaces determineTargetGearIndex)
+--   manualOverride(g, M)  kickdown / EV lug protection in M<n>
+--   lockup(dt, M)         torque-converter lock-up ratio
+--   onShiftStart(g, M)    gear change time + ignition cut
+--   publish(dt, M)        HUD / VCU / QA electrics, every GFX frame
+--   tempManual, setProgram, getProgram, getDebug, adapt, isTempManual
 --
--- Why a separate core file: the base automaticGearbox shift logic is ~750
--- lines with ~25 module-level upvalues already; putting the program logic
--- next to it would push single functions towards LuaJIT's 60-upvalue limit.
--- Here every tunable lives in a few tables (K, PT, MAPS, FAMILY, P) and all
--- runtime state in ONE table S, so no function needs more than ~20 upvalues.
+-- Per frame: sense -> program blend + adaptation -> demand integral -> holds
+-- and timers -> RULES.run (gates: shifting, K0 freeze, trailer stability,
+-- launch, stop, ICE start, sailing; then lug, kickdown, fullUp, paddles,
+-- SPORT top gear, ICE-start gear; then RULES.runPartLoad).
 --
--- Everything runs at GFX rate with a variable dt (vehicleController is a
--- controller with updateGFX only, main.lua:88). All filters are
--- alpha = 1 - exp(-dt / tau). VCU channels are read one frame late
--- (hybridControl runs at controller order 100000 > vehicleController 500).
---
--- Design spec: plans/PLAN_8HP_SCHALTPROGRAMM.md (German).
--- Feedback 2026-10 round 2 (package 'shift'): ECO PRO / COMFORT torque-first
--- (capped adaptation, low maps, prompt multi-step upshifts after a demand
--- drop, coupled overrun upshift liftUp, decoupled regenUp, system-torque EV
--- saturation, per-program ICE start cap + engagement floor, passive-downshift
--- dwell, steady-input hunting detector); SPORT without overdrive (top gear
--- 6th, 7th/8th only by fullUp at nUpFull) and a calm relax state (which may
--- use 7th, never 8th). Review fixes: engagement floor only for demand
--- starts, no liftUp in SPORT, liftUp regen floor only before an imminent K0
--- release, lock-up slip gate on the uncapped adaptation, launch ARMED at a
--- standstill held like READY.
+-- Separate from the base shift logic so no function nears LuaJIT's
+-- 60-upvalue limit: tunables in K, PT, MAPS, FAMILY, P; all state in S.
+-- GFX rate, variable dt; filters alpha = 1 - exp(-dt / tau). VCU channels
+-- are one frame late (hybridControl order 100000, vehicleController 500).
+-- Vehicle speeds m/s, rotational speeds rpm.
 -- ============================================================================
 
 local C = {}
@@ -51,218 +43,110 @@ local PROGS = {"ECO", "COMFORT", "SPORT", "MANUAL"}
 -- Fixed calibration (not per program)
 -- ----------------------------------------------------------------------------
 local K = {
-  -- map axis breakpoints on the load axis u (senseDriver)
-  UB = {0, 0.10, 0.20, 0.35, 0.50, 0.70, 0.85, 1.0},
+  UB = {0, 0.10, 0.20, 0.35, 0.50, 0.70, 0.85, 1.0}, -- map columns on the load axis u
   DE2PROG = {ECO_PRO = "ECO", COMFORT = "COMFORT", SPORT = "SPORT"},
-  -- Load axis u (selectAxis), one of two:
-  --  * EV logic (engine off / idling decoupled, no start pending): the VCU's
-  --    normalised torque demand, electrics etk854hybrid_pedalShaped
-  --    (etk854hybridControl.lua mapPedal: torque request / filtered ceiling).
-  --    With the split pedal map (ECO PRO / COMFORT in AUTO EV) the first
-  --    45 % (COMFORT) / 55 % (ECO PRO) of pedal travel only ask for up to the
-  --    E-machine torque; the raw pedal would read that zone as far too much
-  --    load and hold 1st gear to ~4600 rpm (max-power rule, N57 COMFORT 0.40).
-  --  * ICE maps (engine coupled or being started): pLoad^gamma, the v1.0.0
-  --    axis (on the shaped axis the same pedal read up to 0.13 lower in the
-  --    split-map zone, n57_revband 2026-09-30 13:40 vs 13:46). Since the
-  --    torque-first recalibration (feedback 2026-10 round 2) the MAPS on this
-  --    axis are no longer the v1.0.0 rev band, see the MAPS block.
-  --    pLoad (senseDriver) = the raw pedal, except in ECO PRO with the VCU's
-  --    pedal map v3 (feedback round 3): there it is the ROUND-2 ECO pedal that
-  --    asked for the same torque (etk854hybrid_pedalLegacyEq), so the maps
-  --    and the u/uShaped rescale (senseTorque) plan exactly as the round-2
-  --    ECO calibration for the same torque - the new map moved the EV zone to
-  --    0.80 pedal, a raw 0.45 is now deep in the EV zone. In the kickdown
-  --    zone (raw >= kickdownPedal) pLoad blends back to the raw pedal: full
-  --    pedal = full load, as a round-2 pedal >= 0.95 read (without the blend
-  --    the N57's full pedal = 680 Nm system cap would read as the round-2
-  --    0.876 pedal, u 0.83, and short-shift after every kickdown).
-  --  Outside the split map pedalShaped = pedal^gamma, so both axes agree.
-  -- Pedal LOAD gates (EV saturation evIce, ICE-start rev cap startCapPedal,
-  -- upshift time, tip-in threshold, 1st-gear lock-up, lock-up tip-in slip)
-  -- use pLoad; pedal GESTURES (kickdown edge + arming, lift-off hold,
-  -- liftUp / lift / brake-downshift gates, sportTop, pedal-steady guard,
-  -- hunting detector, ignition cut, shift torque envelope) stay on the raw
-  -- pedal S.pRaw. ECO PRO / AUTO EV kickdown needs the pedal held for
-  -- the VCU's urgentDwellS (channel etk854hybrid_pedalUrgentDwellS, fallback
-  -- K.kdDwellEco; S.kdOn, updateHolds), like the VCU's urgent start.
-  -- VCU pedal gammas (etk854hybridControl.lua DE_CFG pedalGamma /
-  -- PEDAL_GAMMA_*): the ICE axis, and the EV axis when the channel is missing.
+  -- Load axis u (selectAxis):
+  --  * EV logic: VCU pedalShaped (request / ceiling); the split pedal map asks
+  --    only for motor torque early in the travel, the raw pedal would read
+  --    that as far too much load.
+  --  * ICE maps: pLoad^gamma; pLoad = raw pedal, in ECO PRO the VCU's linear-
+  --    map equivalent (pedalLegacyEq), blended back to raw in the kickdown zone.
+  -- Load gates use pLoad, pedal gestures S.pRaw. Gammas = the VCU's
+  -- PEDAL_GAMMA_* (keep in sync).
   GAMMA = {ECO_PRO = 1.40, COMFORT = 1.00, SPORT = 0.70},
-  -- IDLE = ICE-off hold after sporty driving: engine idling, K0 open (EV for
-  -- the gearbox; a request re-engages it via SYNC without a crank)
+  -- IDLE = ICE idling with K0 open after sporty driving (re-engages via SYNC)
   ENG = {OFF = true, CRANK = true, SYNC = true, ENGAGE = true, BLEND = true, ON = true, RELEASE = true,
          IDLE = true},
-  -- lift-off recuperation keeps the shaft above this rpm (D2: 8th gear cannot
-  -- deliver MED/HIGH decel with the 265 Nm stage-0 motor)
+  -- lift-off regen keeps the shaft above this rpm (the 265 Nm stage-0 motor
+  -- cannot deliver MED/HIGH decel in top gear)
   REGEN_FLOOR = {OFF = 1200, LOW = 1200, MED = 1500, HIGH = 1800},
   REGEN_FLOOR_BRAKE = 1800,
   REGEN_MAX_RPM = 3200,
-  -- motor corner speed per boost stage: 9549.3 * kW / Nm from BOOST_STAGES
-  -- (etk854hybridControl.lua:174-178); stage 3 is limited by the device
-  -- curve knee at 3500 rpm.
+  -- per boost stage, from the VCU's BOOST_STAGES (keep in sync): motor corner
+  -- speed [rpm] (9549.3 * kW / Nm; stage 3 = curve knee), system cap bonus [Nm]
   EV_CORNER = {[0] = 2990, 3280, 3580, 3500},
-  -- system torque cap bonus per stage (BOOST_STAGES[n].capBonusNm)
   CAP_BONUS = {[0] = 0, 100, 220, 370},
+  -- fallbacks without VCU channels / jbeam system-cap section [Nm]
   EV_FALLBACK_NM = 265,
   SYS_CAP_DEFAULT = 680,
-  -- reasons that count for the hunting detector (driver-commanded shifts
-  -- such as kickdown or paddles are legitimate reversals). The deceleration
-  -- shifts regenDn / coastDn / evCoast are NOT hunting either: a normal
-  -- lift - brake - accelerate sequence (gamepad driving) produced three
-  -- "reversals" in 10 s and doubled every dwell for 15 s (moderate_demand
-  -- 2026-09-30 13:52 COMFORT ~50.5 s, ECO 13:57 ~51.85 s).
+  -- reasons counted by the hunting detector (not driver or decel shifts)
   HUNT = {mapUp = true, skipUp = true, evUp = true, mapDn = true, evDn = true,
           torqueDn = true, evSat = true},
-  -- a reversal only counts while the driver input is steady between the two
-  -- shifts: pedal within huntPedal of the pedal at the previous counted
-  -- shift, brake <= huntBrake at both
-  huntPedal = 0.10, huntBrake = 0.02,
-  -- downshifts caused by deceleration, not by demand: the re-upshift dwell
-  -- after them is PT.tUpAfterPassiveDn. A 2 -> 1 regenDn before a
-  -- re-acceleration held 1st to 3900-4650 rpm for the 1.5 s demand dwell
-  -- (n57_revband 2026-09-30 13:54, 33.80 -> 35.55 s).
+  huntPedal = 0.10, huntBrake = 0.02, -- steady driver input for a counted reversal
+  -- deceleration downshifts: short re-upshift dwell (PT.tUpAfterPassiveDn)
   PASSIVE = {regenDn = true, coastDn = true, evCoast = true, brakeDn = true, lug = true,
              stop = true, sail = true, sportTop = true},
-  -- upshift time load blend (RULES.upTime): raw pedal upTimeLoad0 -> calm,
-  -- upTimeLoad0 + upTimeLoadSpan -> dynamic; + upTimeStep per skipped gear
+  -- upshift time (RULES.upTime): calm at load upTimeLoad0, dynamic at
+  -- + upTimeLoadSpan; + upTimeStep per skipped gear
   upTimeLoad0 = 0.25, upTimeLoadSpan = 0.45, upTimeStep = 0.06,
   progRamp = 2.0,       -- program blend 0 -> 1 per second
   sRise = 0.6,          -- sEff slew +/s
   sFall = 0.15,         -- sEff slew -/s
   settle = 0.15,        -- post-shift settle before any new decision
   hyst = 150,           -- minimum up/down hysteresis in rpm
-  -- (upshift / skip-upshift debounce: PT.debUp / PT.debSkip)
-  -- skip-upshift reach in calm ECO/COMFORT (upCandidate): g+3 below skipU3,
-  -- g+2 below skipU2 on the integrated up-axis uUp
+  -- skip-upshift reach in calm ECO/COMFORT: g+3 below skipU3, g+2 below skipU2 (uUp)
   skipU3 = 0.30, skipU2 = 0.60,
-  -- cap of the rpm gradient compensation over the upshift debounce
-  -- (RULES.upCandidate)
-  upLeadMaxRPM = 250,
+  upLeadMaxRPM = 250,   -- cap of the rpm gradient compensation (upCandidate)
+  -- hunting: 3 reversals in huntWindow s -> dwells x2, dn thresholds -huntDn, for huntHold s
   huntWindow = 10, huntHold = 15, huntDn = 150,
-  -- coupled overrun upshift (RULES.liftUp): pedal gate, max. steps, and the
-  -- margin on the VCU's remaining off-hold (etk854hybrid_iceOffHoldS) under
-  -- which a release is imminent and the shift would overlap the K0 RELEASE
+  -- liftUp: pedal gate, max. steps, min. VCU off-hold left (else overlaps the K0 release)
   liftUpPedal = 0.05, liftUpMaxSteps = 3, liftUpRelMargin = 0.2,
-  -- liftUp targets the DECOUPLED regen floor only while a K0 release is due
-  -- within this many seconds (VCU off-hold running); otherwise the coupled
-  -- coast target. Raising it for every coupled lift dragged the diesel at up
-  -- to 1800+ rpm (HIGH: 70 km/h 4th -> only 5th at ~2060 rpm) for the whole
-  -- ~12 s coupled phase after a COMFORT kickdown (review 2026-10 round 2).
-  liftUpRelSoonS = 2.0,
-  -- decoupled regen upshift (RULES.regenUp): post-shift rpm floor, share of
-  -- the motor envelope the (ratio-scaled) regen torque may use, max. steps
+  liftUpRelSoonS = 2.0, -- s, release due within this: target the decoupled regen floor
+  -- decoupled regen upshift (regenUp): rpm floor, motor envelope share, max. steps
   regenUpMinRPM = 1500, regenUpEnvFrac = 0.90, regenUpMaxSteps = 2,
-  -- ECO/COMFORT brake downshift with the ICE coupled (RULES.brakeDown)
-  brakeDnDecelCoupled = 1.5,
-  -- SPORT top gear (no overdrive): downshift from above the top gear once the
-  -- top gear runs <= nUpFull - sportTopMarginRPM for sportTopPersistS
+  brakeDnDecelCoupled = 1.5, -- m/s^2, ECO/COMFORT brake downshift with the ICE coupled
+  -- SPORT top gear: back down once it runs <= nUpFull - margin for persistS
   sportTopMarginRPM = 600, sportTopPersistS = 0.5, sportTopPedal = 0.90, sportTopTime = 0.35,
-  -- SPORT calm relax (updateHolds): steady low demand for
-  -- relaxBaseS + relaxSEffS * sEff seconds. relaxDrop: a pedal FALL of more
-  -- than this against pSm (tau 0.25 s) ends relax as well, so a pre-corner
-  -- lift gets the active SPORT behaviour (no overrun upshift, brake
-  -- downshifts) instead of the relaxed one.
+  -- SPORT calm relax (updateHolds): steady low demand for relaxBaseS +
+  -- relaxSEffS * sEff; a pedal fall > relaxDrop (pre-corner lift) ends it
   relaxPedal = 0.35, relaxRise = 0.05, relaxRiseExit = 0.12, relaxDrop = 0.10, relaxBrake = 0.05, relaxCornerFrac = 0.7,
   relaxBaseS = 3.0, relaxSEffS = 3.0,
-  -- relaxed SPORT may use this many gears above the SPORT top gear (6th + 1
-  -- = 7th; 8th stays excluded). With 6th as a hard cap the N57 cruised at
-  -- 2293 rpm at 100 km/h and 2982 at 130 km/h at 0.15 pedal (shiftmap_check);
-  -- 7th brings 100 km/h to ~1920 and 130 km/h to ~2500 rpm. The relax exit
-  -- (same frame on any rising / falling pedal, brake, corner) returns to 6th
-  -- through mapDn / sportTop.
-  relaxTopExtra = 1,
-  -- ICE-start engagement floor (RULES.iceStartDown) only for a DEMAND start:
-  -- load axis uDn at or above this, or the start gear cannot carry the
-  -- request with the kUp reserve. A low-load start or re-coupling at cruise
-  -- keeps the ICE-map gear (the floor gave an iceDn that mapUp undid right
-  -- after the start: N57 COMFORT 66 km/h 7th/1270 -> 6th/1514, review 2026-10).
+  relaxTopExtra = 1,    -- relaxed SPORT may use the first overdrive
+  -- engagement floor only for a demand start (uDn >= this, or no kUp reserve);
+  -- otherwise mapUp undoes the iceDn right after the start
   engageFloorU = 0.35,
-  tipinPedal = 0.45,
-  liftPedal = 0.03,
-  brakeDnPedal = 0.05,
-  sailDwell = 1.5,
+  tipinPedal = 0.45,    -- tip-in downshift: minimum load pedal (with dpdt >= kRate)
+  liftPedal = 0.03,     -- lift-off rules below this raw pedal
+  brakeDnPedal = 0.05,  -- brake downshifts only below this raw pedal
+  sailDwell = 1.5,      -- s since the last shift before a sail preselect
   stopSpeed = 2.0,      -- m/s
-  -- the watchdog timer restarts on every freeze phase change (ENGAGE ->
-  -- BLEND, SAIL_EXIT -> BLEND ...): one phase of the P1 sequencer lasts at
-  -- most ENGAGE_MAX_S 1.2 s / tBlend 1.0 s (ECO_PRO) / SAIL_ENTER_MAX_S 1.2 s
-  -- (etk854hybrid_iceSequencer.lua:109,139; sailing.lua:79), a whole restart
-  -- ~1.6-2.4 s. The total cap only catches a sequencer that loops phases.
+  -- rule gear change times [s]
+  tLug = 0.25, tStop = 0.30, tIceDn = 0.30, tRegenDn = 0.30, tCoastDn = 0.35, tBrakeDn = 0.18,
+  tSail = 0.40, tPaddleDn = 0.20,
+  tDnAfterDn = 0.45,    -- s after a downshift before a map / torque downshift (x2 hunting)
+  regenDnHyst = 100,    -- regenDn below the regen floor - this [rpm]
+  coastDwellS = 0.8,    -- s since the last shift before coastDn / evCoast
+  -- EV lug: K0 open, shaft below evLugRPM at load u above evLugU; evCoast below evCoastRPM
+  evLugRPM = 600, evLugU = 0.05, evCoastRPM = 900,
+  -- the freeze watchdog restarts on every phase change (one phase <= ~1.2 s);
+  -- the total cap only catches a sequencer that loops phases
   freezeTotalCoef = 2.5, -- total freeze cap = coef * freezeWatchdogS
   kdLatchMaxS = 3.0,    -- latched kickdown survives a full ENGAGE + BLEND
-  -- ECO PRO / AUTO EV kickdown dwell [s] (pedal map v3): the pedal must
-  -- stay >= kickdownPedal this long, = the VCU's urgentDwellS - a 0.08 s
-  -- gamepad stab to full trigger gave a kickdown down/up pair
-  kdDwellEco = 0.12,
-  -- ECO PRO EV power line (Step B, jbeam etk854hybrid8hp.evPowerLineEco,
-  -- default on; updateDemand): with the E-machine asked for (nearly) its full
-  -- torque - VCU etk854hybrid_pedalEvFrac from evPowF0 0.85 (pedal ~0.70) to
-  -- 1.0 (pedal 0.80, EV MAX) - the EV upshift threshold evUp rises
-  -- towards min(evCorner, startCap - evPowCapMargin) (diesel 2150 / petrol
-  -- 2550 post-shift), so the E-machine runs nearer its corner speed: 53-83 kW
-  -- at the wheel instead of ~38 kW. Kept below the ECO ICE-start rev cap
-  -- (startCapRPM ECO 2400 / 2800), so a kick start from the plateau needs no
-  -- iceUp first. Rise / fall time constants [s]; SOC floor (a weak pack
-  -- falls back to the efficiency line).
+  kdDwellEco = 0.12,    -- s, ECO PRO / AUTO EV kickdown dwell (fallback for the VCU channel)
+  -- ECO PRO EV power line (updateDemand): evUp rises towards min(evCorner,
+  -- startCap - evPowCapMargin) as the motor fill nears full (evPowF0..+Span);
+  -- below the start cap, so a kick start needs no iceUp; tau [s], SOC floor
   evPowF0 = 0.85, evPowSpan = 0.15, evPowRiseS = 0.20, evPowFallS = 1.5,
   evPowCapMargin = 250, evPowSoc = 0.20,
-  -- ICE start (2026-09-30). CRANK/SYNC hold the gear for at most
-  -- startFreezeS (jbeam etk854hybrid8hp.startFreezeS) so the rev-match target
-  -- does not move under the sequencer - bounded, the old unbounded ICESTART
-  -- upshift guard deadlocked with the sequencer's rev ceiling (cruise_100:
-  -- 1st gear to 78 km/h, SYNC blocked for 5 s). While the ICE is requested
-  -- (etk854hybrid_iceRequested) or starting, the decisions use the ICE maps
-  -- with the pending ICE torque; in ECO/COMFORT without kickdown the gear is
-  -- chosen so the predicted engagement rpm stays below startCapRPM.
   startLead = {OFF = 0.9, CRANK = 0.7, SYNC = 0.35, IDLE = 0.5}, -- s until K0 closes (rpm prediction)
-  -- + the torque BLEND after the lock: the K0 freeze (G2) lasts through
-  -- BLEND, so the gear chosen at the request has to carry the car until the
-  -- blend is over. Predicting only up to the lock let a strong ICE start in
-  -- 1st gear leave the freeze at 4400 rpm (B58S COMFORT, 0.5 pedal from rest,
-  -- sweep 2026-09-30: engaged in 1st at 3100 rpm, 4412 rpm at BLEND end,
-  -- 6791 rpm before the next upshift).
+  -- + the torque blend: the K0 freeze lasts through BLEND
   startBlendLead = {ECO = 0.8, COMFORT = 0.6},
-  startCapPedal = 0.85,
-  -- EV saturation band. Where the VCU pedal map scales linearly with the
-  -- COMBINED ceiling (motor + ICE potential: BATTERY CONTROL, SPORT, and in
-  -- ECO PRO / COMFORT above the EV pedal zone) the demand crosses the motor
-  -- torque early: before the split map a quarter pedal on the N57S (887 Nm
-  -- ICE) asked for 1.09 x the E-machine. With the old 0.95 / 0.97 limits
-  -- that counted as saturated, the max-power rule held 1st gear to 4200 rpm
-  -- at 0.25 pedal and the falling constant-power cap then pushed the demand
-  -- over the VCU start threshold -> 12 V start in 1st at 40 km/h (sweep
-  -- 2026-09-30). A request up to evUpSat x the motor torque after the shift
-  -- (motor carries >= 89 % of it) is driven like an unsaturated one; the
-  -- saturation downshift needs evSat (6 % hysteresis against re-downshifting).
-  -- With a healthy E-machine the EV pedal zone asks for at most the motor
-  -- cap (knee), so the whole zone stays unsaturated; a derated machine (low
-  -- SOC, cold) slides the knee up towards the old map's torque at pEv
-  -- (etk854hybridControl.lua mapPedal), then evSat judges the VCU's Treq.
-  -- MAX EV maps the full pedal travel onto the E-machine alone, there
-  -- the old limits stay (full pedal = saturated = max-power rule).
+  startCapPedal = 0.85, -- load pedal above which no start rev cap and no S.evIce apply
+  -- EV saturation band (Treq / motor torque). Where the VCU map scales with
+  -- the combined ceiling the demand crosses the motor torque early: up to
+  -- evUpSat x motor torque after an upshift counts as unsaturated, the
+  -- saturation downshift needs evSat. MAX EV (pedal = motor only) uses *Max.
   evUpSat = 1.12,
   evSat = 1.18,
   evUpSatMax = 0.95,
   evSatMax = 0.97,
-  -- SYNC re-targets when the rev-cap gear changes: allowed only when the
-  -- current gear would overshoot the cap by this much (a sync that is about
-  -- to converge in a sane gear is not disturbed)
-  startCapSyncMargin = 400,
-  -- ICE-start downshift (iceStartDown) with the rev cap active: the target
-  -- gear keeps this much rpm below the cap. nPred extrapolates the CURRENT
-  -- acceleration; a start requested out of a lift (nDotG ~ 0) then gains
-  -- ~800 rpm/s in the lower gear on the E-machine alone during CRANK/SYNC,
-  -- the SYNC re-check shifts back up and the sync restarts (lift_release B58
-  -- 2026-10: 3 -> 2 in CRANK at 3100 rpm predicted, 2 -> 3 in SYNC 0.5 s
-  -- later, K0 lock 1650 ms instead of ~1000 ms).
+  startCapSyncMargin = 400, -- SYNC re-targets to the rev-cap gear only above cap + this
+  -- iceStartDown stays this far below the cap: a start out of a lift still
+  -- gains rpm in CRANK/SYNC and the SYNC re-check would shift back up
   startDnHeadroom = 500,
-  -- EV saturation downshift in AUTO EV ECO/COMFORT (torqueDownEv): rpm
-  -- prediction horizon for the same cap (request -> OFF lead 0.9 s + blend)
-  evSatLeadS = 1.5,
-  -- TC / DSC slip control holds upshifts (wheel speed, and with it the
-  -- synchronous rpm, is inflated) - but at most tcUpHoldS per event and never
-  -- above tcUpMaxFrac * nUpFull: a 700 Nm B58S in 1st under TC otherwise ran
-  -- from 4600 to 6800 rpm at 0.5 pedal before fullUp freed it (sweep 2026-09-30)
+  evSatLeadS = 1.5,     -- s, rpm prediction for torqueDownEvIce (request + start lead + blend)
+  -- TC / DSC slip holds upshifts (inflated wheel speed), at most tcUpHoldS
+  -- per event and below tcUpMaxFrac * nUpFull
   tcUpHoldS = 0.5,
   tcUpMaxFrac = 0.70,
   syncCeilMargin = 500,  -- = the sequencer's SYNC_CEIL_MARGIN_RPM
@@ -272,81 +156,65 @@ local K = {
   kdStartLead = 1.0,    -- s kickdown -> K0 locked (ICE still to be started)
   pendMaxAge = 0.25,    -- a decided target older than this is not ours any more
   cornerMinSpeed = 8.3, -- m/s (30 km/h)
+  -- trailer mode: kUp / kUpShift reserve factor, up-row lift [rpm] (fades with
+  -- the adaptation), lug floor lift [rpm]
+  trailerKUp = 0.8, trailerUpRPM = 200, trailerLugRPM = 250,
 }
 
 -- ----------------------------------------------------------------------------
--- Per-program scalars (MANUAL = temporary/permanent manual, uses SPORT data).
--- Pairs *Calm/*Dyn are blended linearly with sEff.
+-- Per-program scalars (MANUAL uses SPORT data); *Calm/*Dyn pairs are blended
+-- linearly with sEff.
 -- ----------------------------------------------------------------------------
 local PT = {
   adaptFloor = {ECO = 0, COMFORT = 0, SPORT = 0.30, MANUAL = 0.30},
-  -- ECO / COMFORT are torque-first (feedback 2026-10 round 2: "Haltedrehzahl
-  -- in Comfort und besonders in Eco zu lang zu hoch"). One kickdown raised
-  -- sIdx to 0.90-0.96 and COMFORT followed with gain 1.0 to 'COMFORT++'
-  -- (dynamic maps, lift-off hold, brake downshifts to 1900-2500 rpm) for
-  -- 20+ s (kickdown_100 2026-09-30). ECO never adapts, COMFORT reaches at
-  -- most 'COMFORT+'; the lift-off hold (sEff >= 0.45) and the sporty brake
-  -- downshift (sEff >= 0.55) stay SPORT-only.
+  -- torque-first ECO never adapts, COMFORT reaches 'COMFORT+' at most: one
+  -- kickdown must not make them sporty for seconds
   adaptGain = {ECO = 0.0, COMFORT = 0.5, SPORT = 0.70, MANUAL = 0.70},
   sEffCap = {ECO = 0.0, COMFORT = 0.35, SPORT = 1.0, MANUAL = 1.0},
-  -- the v1.0.1 (uncapped) adaptation gains, used ONLY for the lock-up tip-in
-  -- slip gate in C.lockup: with the cap, 'sEff < 0.5' is always true in
-  -- COMFORT and every kickdown into 1st-3rd would get the up-to-22.5 % slip;
-  -- v1.0.1 dropped it once repeated kickdowns raised the adaptation
+  -- uncapped gains, only for the lock-up tip-in slip gate (C.lockup): with the
+  -- capped sEff every COMFORT kickdown into 1st-3rd would get the slip
   slipAdaptGain = {ECO = 0.6, COMFORT = 1.0, SPORT = 0.70, MANUAL = 0.70},
+  -- torque reserve: a target gear must carry the request within kUp x Tav;
+  -- torque downshift once the request exceeds kDn x Tav
   kUpCalm = {ECO = 0.85, COMFORT = 0.75, SPORT = 0.60, MANUAL = 0.60},
   kUpDyn = {ECO = 0.75, COMFORT = 0.62, SPORT = 0.48, MANUAL = 0.48},
   kDnCalm = {ECO = 0.98, COMFORT = 0.95, SPORT = 0.85, MANUAL = 0.85},
   kDnDyn = {ECO = 0.92, COMFORT = 0.88, SPORT = 0.75, MANUAL = 0.75},
-  kRate = {ECO = 3.5, COMFORT = 2.5, SPORT = 1.5, MANUAL = 3.0},
+  kRate = {ECO = 3.5, COMFORT = 2.5, SPORT = 1.5, MANUAL = 3.0}, -- tip-in pedal rate [1/s], lowered with sEff
+  -- corner hold above this lateral acceleration [m/s^2]
   cornerCalm = {ECO = 4.5, COMFORT = 4.0, SPORT = 3.0, MANUAL = 3.0},
   cornerDyn = {ECO = 3.0, COMFORT = 2.5, SPORT = 2.0, MANUAL = 2.0},
-  -- upshift ratio-blend time (RULES.upTime: blended by max(sEff, load)).
-  -- Feedback round 2 (R3, "langsamer als ein 8HP"): was ECO 0.42/0.32,
-  -- COMFORT 0.38/0.25, SPORT 0.22/0.12 - measured 0.40-0.43 s for every
-  -- ECO/COMFORT upshift, 0.23 s in SPORT (shift_table 2026-09-30 19:22-19:41).
+  -- upshift ratio-blend time [s]
   upTimeCalm = {ECO = 0.32, COMFORT = 0.30, SPORT = 0.14, MANUAL = 0.14},
   upTimeDyn = {ECO = 0.24, COMFORT = 0.20, SPORT = 0.10, MANUAL = 0.10},
-  -- Upshift rate: tUpAfterUp 0.6 s + debounce 0.2 s + shift time allowed one
-  -- upshift per 0.8 s; at 0.5-0.6 pedal the car gains 700-1400 rpm/s in
-  -- 1st-3rd, so every gear overshot its map point by 1000-2300 rpm
-  -- (n57_revband 2026-09-30 13:54: 1->2 at 3987 / 4665 rpm, shifts exactly
-  -- every 0.80 s at 35.55 / 36.40 / 37.20 / 38.00 s).
-  -- (counted from the shift START; the gap after the ratio is reached is
-  -- max(tUpAfterUp - upTime, debUp) ~ 0.20-0.25 s, round 2: SPORT 0.5 -> 0.40)
+  -- minimum time between two upshifts [s] from the shift start; short, or
+  -- every gear overshoots its map point under acceleration
   tUpAfterUp = {ECO = 0.30, COMFORT = 0.35, SPORT = 0.40, MANUAL = 0.40},
+  -- re-upshift dwell after a demand downshift [s]
   tUpAfterDnCalm = {ECO = 1.0, COMFORT = 1.2, SPORT = 2.0, MANUAL = 2.0},
   tUpAfterDnDyn = {ECO = 1.0, COMFORT = 2.0, SPORT = 4.0, MANUAL = 4.0},
-  -- after a passive downshift (K.PASSIVE); SPORT / MANUAL have no entry and
-  -- keep their tUpAfterDn blend (passiveDwell)
+  -- after a passive downshift; SPORT / MANUAL keep tUpAfterDn
   tUpAfterPassiveDn = {ECO = 0.30, COMFORT = 0.35},
-  -- upshift debounce (was K.debUp 0.20) / skip-upshift debounce (K.debSkip 0.40)
+  -- upshift / skip-upshift debounce [s]
   debUp = {ECO = 0.15, COMFORT = 0.20, SPORT = 0.20, MANUAL = 0.20},
   debSkip = {ECO = 0.25, COMFORT = 0.30, SPORT = 0.40, MANUAL = 0.40},
-  -- torque downshift persistence (was 0.25 s for all)
-  tdPersist = {ECO = 0.50, COMFORT = 0.30, SPORT = 0.20, MANUAL = 0.20},
-  -- demand integral: window W = intW0 + 3.5 * sEff (was 1.5 + ...), weight
-  -- wI = intW + 0.5 * sEff (was 0.5 + ...). 0.6 s after a 0.65 -> 0.25 ease
-  -- the old up-axis still read ~0.40 (lift_release D 2026-09-30).
+  tdPersist = {ECO = 0.50, COMFORT = 0.30, SPORT = 0.20, MANUAL = 0.20}, -- torque downshift persistence [s]
+  -- demand integral: window intW0 + 3.5 * sEff [s], weight intW + 0.5 * sEff
   intW0 = {ECO = 1.0, COMFORT = 1.0, SPORT = 1.5, MANUAL = 1.5},
   intW = {ECO = 0.0, COMFORT = 0.3, SPORT = 0.5, MANUAL = 0.5},
-  -- corner hold release base (s, + sEff)
-  cornerRel = {ECO = 0.6, COMFORT = 1.0, SPORT = 1.0, MANUAL = 1.0},
-  -- coupled overrun upshift delay after the pedal fell below K.liftUpPedal
-  -- (RULES.liftUp runs in ECO/COMFORT only; the SPORT/MANUAL entries keep
-  -- the table complete for the program blend)
+  cornerRel = {ECO = 0.6, COMFORT = 1.0, SPORT = 1.0, MANUAL = 1.0}, -- corner hold release [s] (+ sEff)
+  -- coupled overrun upshift delay after the lift [s] (liftUp: ECO/COMFORT only)
   liftUpDelay = {ECO = 0.30, COMFORT = 0.60, SPORT = 0, MANUAL = 0},
   -- decoupled regen upshift above this rpm (SPORT only while relaxed)
   regenUpRPM = {ECO = 2600, COMFORT = 2800, SPORT = 3200, MANUAL = 3200},
+  -- minimum time after an upshift before a map / torque downshift [s]
   tDnAfterUpCalm = {ECO = 1.2, COMFORT = 1.2, SPORT = 0.8, MANUAL = 0.8},
   tDnAfterUpDyn = {ECO = 0.8, COMFORT = 0.8, SPORT = 0.8, MANUAL = 0.8},
+  -- deepest torque coefficient of the upshift torque intervention
   cMinCalm = {ECO = 0.75, COMFORT = 0.75, SPORT = 0.50, MANUAL = 0.50},
   cMinDyn = {ECO = 0.55, COMFORT = 0.55, SPORT = 0.50, MANUAL = 0.50},
-  brakeSpacing = {ECO = 0.30, COMFORT = 0.30, SPORT = 0.25, MANUAL = 0.25},
-  -- kickdown time = base + step x (gears - 1); round 2 (R3): 0.20 + 0.04 /
-  -- SPORT 0.15 + 0.03 -> 0.18 + 0.03 / 0.12 + 0.02
-  -- demand downshift times (R4 tip-in / R7 map + torque downshifts), round 2
-  -- (R3): were 0.25 / 0.30 s for every program
+  brakeSpacing = {ECO = 0.30, COMFORT = 0.30, SPORT = 0.25, MANUAL = 0.25}, -- s between brake-downshift steps
+  -- downshift times [s]: tip-in, map / torque; kickdown = base + step x (gears - 1)
   dnTimeTip = {ECO = 0.22, COMFORT = 0.20, SPORT = 0.15, MANUAL = 0.15},
   dnTimeDemand = {ECO = 0.26, COMFORT = 0.24, SPORT = 0.18, MANUAL = 0.18},
   kdTimeBase = {ECO = 0.18, COMFORT = 0.18, SPORT = 0.12, MANUAL = 0.12},
@@ -354,24 +222,13 @@ local PT = {
 }
 
 -- ----------------------------------------------------------------------------
--- Shift maps (rpm). Columns = K.UB on u. "up" rows are the POST-shift rpm in
--- gear g+1, "dn" rows the rpm in the current gear below which g -> g-1.
--- -1 = full-load column F[g] = nUpFull * R[g+1] / R[g], filled in per gear.
--- Values above the family knee are rescaled at init to the fitted engine's
--- nUpFull (petrol knee 3000 / ref 6100, diesel knee 2500 / ref 4900).
+-- Shift maps [rpm], columns = K.UB on u. "up" rows: POST-shift rpm in gear
+-- g+1; "dn" rows: rpm in gear g below which g -> g-1. -1 = full-load column
+-- F[g] = nUpFull * R[g+1] / R[g]. Values above the family knee are rescaled
+-- at init to the engine's nUpFull. Torque-first ECO / COMFORT: low flat up
+-- rows, dn rows near the lug floor (demand downshifts: RULES.torqueDownIce).
 -- tools/etk854hybrid_shiftmap_check.py parses this block (keep the format:
 -- "name = {" / "}," / "name = {n, n, ...},").
---
--- Torque-first calibration (feedback 2026-10 round 2): ECO / COMFORT ride the
--- ICE torque band (N57 630 Nm from 1500 rpm + the 265 Nm E-machine against a
--- 680 Nm system cap) instead of revving: the up rows are lower and flatter
--- above u 0.35 and the dn rows are little more than the lug floor - a demand
--- downshift comes from the torque check (RULES.torqueDownIce: request above
--- kDn x what the system delivers in this gear), not from the pedal alone.
--- The v1.0.0 COMFORT rev band ("N57 so lassen") is deliberately given up:
--- the user now wants low rpm and no revving without load. SPORT rows are
--- 100-600 rpm lower (half pedal ran 1st/2nd into fullUp at 4800-4900 rpm,
--- N57 SPORT 2026-09-30 06:42) and SPORT has no overdrive (S.topGear).
 -- ----------------------------------------------------------------------------
 -- BEGIN 8HP MAPS
 local MAPS = {
@@ -418,19 +275,21 @@ local MAPS = {
 }
 -- END 8HP MAPS
 
--- Engine-family defaults; the fitted ECU part overrides them through the
--- vehicleController key "etk854hybrid8hpEngine" (etk854hybrid_engines.jbeam).
--- petrol = series B58 values, diesel = series N57 values. The i4 base engine has
--- no such block and runs on the powertrain part's default block, else these.
---   brakeTargetRPM  [calm, dyn] per program: brake-downshift target; the
---                   ECO/COMFORT calm value is also the coupled-ICE regen floor
---                   under the brake (the re-acceleration reserve)
---   coastTargetRPM  coupled-ICE overrun: liftUp target and regen floor (lift)
---   startCapRPM     ECO/COMFORT ICE-start rev cap (<= etk854hybrid8hp.iceStartCapRPM)
---   iceEngageMinRPM ECO/COMFORT lowest predicted engagement rpm of a DEMAND
---                   ICE start (RULES.engageFloorWanted)
---   sportRelaxRPM   SPORT relaxed upshift floor, and the minimum post-shift
---                   rpm into the relaxed 7th (nUpPost, K.relaxTopExtra)
+-- Engine-family defaults (petrol = B58, diesel = N57), overridden by the ECU
+-- part's vehicleController block "etk854hybrid8hpEngine" (or the powertrain
+-- part's default block, see initParams).
+--   lugMinRPM       lowest coupled rpm (stall protection, dn threshold floor)
+--   coastDnRPM      coupled overrun downshift below this
+--   evLugBonusRPM   max. threshold lowering while the E-machine covers the demand
+--   turboRampRPM    boost build-up range, lagMin = derate at its start (reserve checks)
+--   resvMaxRPM      torque-reserve checks only below this
+--   knee / ref      map rescale: ref lands on the engine's nUpFull
+--   brakeTargetRPM  [calm, dyn] brake-downshift target; ECO/COMFORT calm =
+--                   coupled regen floor under the brake
+--   coastTargetRPM  coupled overrun: liftUp target and regen floor
+--   startCapRPM     ECO/COMFORT ICE-start rev cap (<= iceStartCapRPM)
+--   iceEngageMinRPM ECO/COMFORT lowest engagement rpm of a demand ICE start
+--   sportRelaxRPM   relaxed SPORT upshift floor (also into the relaxed overdrive)
 local FAMILY = {
   petrol = {lugMinRPM = 950, coastDnRPM = 1050, evLugBonusRPM = 250, turboRampRPM = {1200, 1800},
             lagMin = 0.55, resvMaxRPM = 2400, knee = 3000, ref = 6100,
@@ -449,14 +308,14 @@ local FAMILY = {
 }
 
 local P = {}      -- parameters, rebuilt in init
-local S = {}      -- runtime state, rebuilt in init (init runs again on every reset)
+local S = {}      -- runtime state, rebuilt in init (runs again on every reset)
 local D = {}      -- device references and precomputed gear data
 local RULES = {}  -- decision rules (fields keep the chunk's local count low)
 
 -- ----------------------------------------------------------------------------
 -- Helpers
 -- ----------------------------------------------------------------------------
--- electrics values may be nil, a bool, NaN or a string; everything is sanitised
+-- electrics values may be nil, bool, NaN or string
 local function num(x, def)
   if type(x) == "number" and x == x and x > -1e30 and x < 1e30 then return x end
   return def
@@ -489,8 +348,7 @@ local function alpha(dt, tau)
   return 1 - exp(-dt / tau)
 end
 
--- base game channels are bool (yawControl.lua:93, tractionControl.lua:74) or
--- 0/1 numbers (esc.lua:170) depending on the controller generation
+-- base game flags are bool or 0/1 numbers depending on the controller generation
 local function truthy(x)
   return x == true or (type(x) == "number" and x > 0.5)
 end
@@ -533,9 +391,7 @@ local function pvs(calm, dyn)
   return lerp(pv(calm), pv(dyn), S.sEff)
 end
 
--- program-blended re-upshift dwell after a passive downshift (K.PASSIVE):
--- programs without a PT.tUpAfterPassiveDn entry (SPORT / MANUAL) keep their
--- calm/dyn tUpAfterDn blend
+-- re-upshift dwell after a passive downshift; SPORT / MANUAL keep tUpAfterDn
 local function passiveDwell()
   local w, sEff, pd = S.w, S.sEff, PT.tUpAfterPassiveDn
   local acc = 0
@@ -549,9 +405,8 @@ local function passiveDwell()
   return acc
 end
 
--- program-blended map value at adaptation sEff (calm..dyn). kind 1 = up,
--- 2 = dn. The up rows are read at S.sEffUp (= 0 while SPORT is relaxed,
--- RULES.applyRelax), the dn rows at the real adaptation.
+-- program-blended map value (kind 1 = up, 2 = dn) at adaptation sEff;
+-- callers pass S.sEffUp for the up rows (0 while SPORT is relaxed)
 local function mapVal(kind, u, F, sEff)
   local w, maps = S.w, D.maps
   local acc = 0
@@ -571,9 +426,7 @@ end
 -- ----------------------------------------------------------------------------
 -- Torque model
 -- ----------------------------------------------------------------------------
--- steady-state ICE curve incl. turbo, cached every 25 rpm at init from
--- engine.torqueData.curves[finalCurveName].torque (indexed rpm + 1,
--- combustionEngine.lua getTorqueData)
+-- steady-state ICE curve incl. turbo, cached every 25 rpm at init
 local function iceCurve(n)
   local tab = D.iceTab
   if not tab then return 0 end
@@ -585,21 +438,24 @@ local function iceCurve(n)
   return a + (tab[i + 1] - a) * (x - i)
 end
 
--- turbo-lag derate for the reserve checks only (the static curve assumes
--- full boost, a part-load upshift lands at low boost)
+-- turbo-lag derate for the reserve checks (a part-load upshift lands at low boost)
 local function lag(n)
   return clamp((n - P.ramp1) / max(P.ramp2 - P.ramp1, 1), P.lagMin, 1)
+end
+
+-- derated steady-state ICE torque (reserve checks)
+local function iceShare(n)
+  return 0.95 * iceCurve(n) * lag(n)
 end
 
 local function iceAvail(n)
   local es = S.engState
   if es ~= "ON" and es ~= "BLEND" and not S.icePending then return 0 end
-  return 0.95 * iceCurve(n) * lag(n)
+  return iceShare(n)
 end
 
--- motor torque available at shaft speed n, extrapolated from the VCU's
--- current availability evAvail (measured at nShaft). Correct in both the
--- constant-torque (below corner) and the constant-power region.
+-- motor torque at shaft speed n, extrapolated from the VCU's availability
+-- at nShaft (constant torque below the corner speed, constant power above)
 local function evAt(n)
   local ea = S.evAvail
   if ea <= 0 then return 0 end
@@ -613,15 +469,12 @@ local function Tav(n)
   return min(S.sysCap, iceAvail(n) + evAt(n))
 end
 
--- what the system will deliver once the ICE start the VCU is about to make
--- has coupled (EV logic in AUTO EV / BATTERY CONTROL ECO/COMFORT,
--- RULES.torqueDownEv): the same derated ICE share as iceAvail
+-- what the system will deliver once the pending ICE start has coupled
 local function TavPend(n)
-  return min(S.sysCap, 0.95 * iceCurve(n) * lag(n) + evAt(n))
+  return min(S.sysCap, iceShare(n) + evAt(n))
 end
 
--- kickdown potential: the ICE counts because the VCU will start it
--- (not in MAX EV, which the VCU keeps purely electric)
+-- kickdown potential: the ICE counts because the VCU will start it (not in MAX EV)
 local function TavKD(n)
   local ice = 0
   local e = D.engine
@@ -632,9 +485,8 @@ end
 -- ----------------------------------------------------------------------------
 -- Effective thresholds
 -- ----------------------------------------------------------------------------
--- "E-motor covers it -> lower rpm": bonus for gear k at rpm nGear when the
--- motor alone could carry the (integrated) demand, faded out with low SOC and
--- with sportiness.
+-- threshold lowering for gear k while the motor alone could carry the
+-- (integrated) demand; faded out with low SOC and with sportiness
 local function lugBonus(nGear, k)
   local need = max(S.DwUp / D.R[k], 1)
   return P.evLugBonus * clamp01((evAt(nGear) / need - 0.8) / 0.4)
@@ -650,26 +502,19 @@ end
 local function nUpPost(g, u, bonus)
   local F = D.F[g] or P.nUpFull
   local base = offset(u) - bonus
-  local v = mapVal(1, u, F, S.sEffUp) + base + 200 * S.trailer * (1 - S.sEffUp)
+  local v = mapVal(1, u, F, S.sEffUp) + base + K.trailerUpRPM * S.trailer * (1 - S.sEffUp)
   if S.sportRelax then
-    -- relaxed SPORT: the calm rows lifted to the relax floor, but never above
-    -- the active threshold - relaxing must not raise a shift point (the
-    -- petrol floor 2000 alone would hold 3rd at 2415 rpm at 50 km/h where
-    -- active SPORT cruises in 4th at 1912, shiftmap_check)
-    local act = mapVal(1, u, F, S.sEff) + base + 200 * S.trailer * (1 - S.sEff)
+    -- calm rows lifted to the relax floor, never above the active threshold
+    local act = mapVal(1, u, F, S.sEff) + base + K.trailerUpRPM * S.trailer * (1 - S.sEff)
     v = min(act, max(v, P.sportRelaxRPM))
-    -- the relaxed overdrive (above D.topSport, K.relaxTopExtra) needs at
-    -- least the relax floor after the shift: N57 7th from ~88 km/h
-    -- (1700 rpm), B58 from ~104 km/h (2000 rpm)
+    -- the relaxed overdrive needs at least the relax floor
     if g >= D.topSport then v = max(v, P.sportRelaxRPM) end
   end
   return min(F, max(S.upFloor, v))
 end
 
--- downshift threshold g -> g-1 (rpm in gear g). The clamp against the
--- upshift threshold of g-1 -> g guarantees >= K.hyst of hysteresis by
--- construction: after an upshift n >= nUpPost > nDn + hyst, after a
--- downshift the re-upshift test sees the old rpm < nDn.
+-- downshift threshold g -> g-1 (rpm in gear g); the clamp below the g-1 -> g
+-- upshift threshold guarantees >= K.hyst of hysteresis
 local function nDn(g, u, bonus)
   local v = mapVal(2, u, 0, S.sEff) + offset(u) - bonus - (S.hunt and K.huntDn or 0)
   local up = (g > 1) and nUpPost(g - 1, u, bonus) or 1e9
@@ -677,7 +522,7 @@ local function nDn(g, u, bonus)
 end
 
 -- ----------------------------------------------------------------------------
--- Sensing (G0, every decision frame)
+-- Sensing (every decision frame)
 -- ----------------------------------------------------------------------------
 local function senseDriver(dt, M)
   local ev = electrics.values
@@ -692,9 +537,7 @@ local function senseDriver(dt, M)
   local p = clamp01(num(M.throttle, 0))
   S.pRaw = p
   S.brake = clamp01(num(M.brake, 0))
-  -- load pedal (see K.GAMMA): ECO PRO with the VCU's map v3 = the round-2
-  -- ECO pedal for the same torque (pedalLegacyEq, -1 = not published),
-  -- blended back to the raw pedal across the kickdown zone
+  -- load pedal (K.GAMMA); pedalLegacyEq -1 = not published
   local pl = (de == "ECO_PRO") and num(ev.etk854hybrid_pedalLegacyEq, -1) or -1
   local pLoad = p
   if p > 0 and pl >= 0 then
@@ -703,9 +546,8 @@ local function senseDriver(dt, M)
     if kz > 0 and p > pLoad then pLoad = pLoad + (p - pLoad) * kz end
   end
   S.pLoad = pLoad
-  -- E-machine share of the zone the VCU map asks for (Step B power line)
-  S.evFracRaw = clamp01(num(ev.etk854hybrid_pedalEvFrac, 0))
-  -- the two load axes (see K.GAMMA); selectAxis picks one after senseHybrid
+  S.evFracRaw = clamp01(num(ev.etk854hybrid_pedalEvFrac, 0)) -- motor fill (EV power line)
+  -- the two load axes; selectAxis picks one after senseHybrid
   local uPed = (pLoad > 0) and pLoad ^ (K.GAMMA[de] or 1) or 0
   S.uPed = uPed
   local uSh = uPed
@@ -724,11 +566,9 @@ local function senseDriver(dt, M)
   S.vPrev = v
   S.v = v
   S.decel = -S.dvF
-  -- synchronous rpm rate in the current gear (accelerating only), from the
-  -- vehicle acceleration - no derivative of S.n, which jumps at every shift
+  -- synchronous rpm rate from the vehicle acceleration (S.n jumps at shifts)
   S.nDotG = (v > 1) and max(0, S.dvF) * S.n / v or 0
-  -- lateral acceleration is sensors.gx2 (haptics.lua:64, electricMotor
-  -- shiftLogic:268); gy2 is longitudinal
+  -- lateral acceleration is sensors.gx2 (gy2 is longitudinal)
   local sn = sensors
   local gx = (type(sn) == "table") and num(sn.gx2, 0) or 0
   S.gxS = S.gxS + (abs(gx) - S.gxS) * alpha(dt, 0.3)
@@ -738,10 +578,8 @@ local function senseDriver(dt, M)
   S.slipDnOK = not (type(spd) == "table" and spd.wheelSlipShiftDown == false)
 end
 
--- Load axis for this frame (see K.GAMMA): shaped demand for the EV logic,
--- pedal^gamma for the ICE maps. On a switch (ICE start requested, engine
--- released) the axis filters restart on the new axis, so the change of axis
--- is no step through uSm / uInt (a step would read as a tip-in / demand peak).
+-- load axis for this frame (K.GAMMA). On a switch the filters restart on the
+-- new axis: a step through uSm / uInt would read as a tip-in
 local function selectAxis(dt)
   local ice = not S.evLogic
   local u = ice and S.uPed or S.uShaped
@@ -757,8 +595,7 @@ local function senseGearbox()
   local gb, R = D.gearbox, D.R
   local g = gb.gearIndex or 0
   S.g = g
-  -- synchronous turbine rpm of the current gear: every map decision uses it,
-  -- converter slip must not move shift points
+  -- synchronous turbine rpm: converter slip must not move shift points
   S.n = abs(num(gb.outputAV1, 0)) * abs(R[g] or 0) * AV2RPM
   S.nIn = num(gb.inputAV, 0) * AV2RPM
   local tc = D.tc
@@ -791,8 +628,7 @@ local function senseHybrid(dt)
   -- stall protection must also act while the ICE is dragged mid-transition
   S.lugCoupled = k0 >= 0.5 and not iceOff
   S.isEV = k0 < 0.05 and iceOff
-  -- ICE start pending (requested by the VCU arbiter, one frame late) or in
-  -- progress: plan with the ICE (maps + pending ICE torque), not the EV rules
+  -- ICE start requested or in progress: plan with the ICE maps + pending torque
   local req = ev.etk854hybrid_iceRequested
   local reqOn = (req == true) or num(req, 0) >= 0.5
   local starting = (es == "CRANK" or es == "SYNC")
@@ -809,15 +645,12 @@ local function senseHybrid(dt)
   S.launchT = (ls == "ACTIVE") and (S.launchT + dt) or 0
   S.launch = ls
   S.regenLvl = str(ev.etk854hybrid_regenLevel, "MED")
-  -- pedal gate: BATTERY_CONTROL cruise charging writes evRegen > 0 while the
-  -- driver is on the pedal; that is generator load, not lift-off recuperation
+  -- pedal gate: cruise charging also writes evRegen (generator load, not regen)
   local rq = max(0, num(ev.etk854hybrid_regenTorqueNm, 0))
   S.regenTq = rq
   S.regenOn = S.pRaw < 0.05 and S.v > 4.2
     and (num(ev.etk854hybrid_evRegen, 0) > 0.05 or rq > 20)
-  -- ICE-off hold of the VCU arbiter (etk854hybrid_iceSequencer.lua
-  -- arbitrate: iceHoldKind none | hold | lift | brake, iceOffHoldS = the hold
-  -- time left; both reset to none / 0 while the ICE is wanted)
+  -- VCU ICE-off hold: kind none | hold | lift | brake, time left [s]
   S.holdKind = str(ev.etk854hybrid_iceHoldKind, "none")
   S.holdRemain = max(0, num(ev.etk854hybrid_iceOffHoldS, 0))
 
@@ -833,11 +666,8 @@ local function senseHybrid(dt)
   S.charging = ev.etk854hybrid_chargeMode == "CRUISE"
   local tm = ev.etk854hybrid_trailerMode
   S.trailer = (tm == true or num(tm, 0) >= 0.5) and 1 or 0
-  -- DSC slip control: the QUALIFIED lamp of the cluster module
-  -- (etk854hybrid_gaugeData: trim < 0.90 for >= 0.25 s or a brake stage)
-  -- when fitted - the raw escActive / tcsActive rise on any didAct, even a
-  -- 0.999 throttle factor, and held upshifts on phantom DSE activity
-  -- (feedback 2026-10). Raw flags, then the VCU copy, without the module.
+  -- DSC slip control: the cluster's qualified lamp (raw escActive / tcsActive
+  -- rise on any tiny intervention), else the raw flags, else the VCU copy
   local lamp = ev.etk854hybrid_dscLamp
   local esc, tcs = ev.escActive, ev.tcsActive
   if type(lamp) == "number" then
@@ -848,20 +678,17 @@ local function senseHybrid(dt)
     S.tc = truthy(esc) or truthy(tcs)
   end
   if S.tc then S.tcT = S.tcT + dt else S.tcT = 0 end
-  -- qualified ABS event from the VCU (real wheel slip or a hard stop); the
-  -- raw wheels.lua flag also rises on its slip-rate term with ~1 % slip and
-  -- opened the lock-up under full regen (see etk854hybridControl
-  -- updateRecuperation). Raw flag only without the VCU.
+  S.tsa = num(ev.etk854hybrid_tsaFreeze, 0) >= 0.5 -- trailer stability gear hold
+  -- qualified ABS from the VCU: the raw flag rises at ~1 % slip and would
+  -- open the lock-up under full regen
   local absQ = ev.etk854hybrid_absQualified
   if absQ ~= nil then S.abs = truthy(absQ) else S.abs = truthy(ev.absActive) end
   S.source = (S.sail == "SAIL") and "SAIL" or (S.isEV and "EV" or "ICE")
 
-  -- K0 freeze: no gear change while the ICE is being engaged/released or the
-  -- sailing FSM moves K0 - the synchronisation target would jump mid-slip
-  -- SAIL_EXIT is frozen only while K0 actually slips: during OFF/CRANK/SYNC
-  -- (K0 open, sailing.lua:347-363 holds SAIL_EXIT through them) the car is
-  -- in EV and may downshift (EV kickdown) - the sequencer syncs to the live
-  -- shaft speed (CR-P1c). ENGAGE/BLEND inside SAIL_EXIT is caught above.
+  -- K0 freeze: no gear change while K0 engages / releases or sailing moves it
+  -- (the sync target would jump mid-slip). SAIL_EXIT only while K0 slips:
+  -- with K0 open the car is EV and may kick down. frzT restarts on every
+  -- phase change.
   local frozen, why = false, ""
   if es == "ENGAGE" or es == "BLEND" or es == "RELEASE" then frozen, why = true, "K0"
   elseif S.sail == "SAIL_ENTER" then frozen, why = true, "SAILTRANS"
@@ -879,19 +706,17 @@ local function senseHybrid(dt)
   end
   S.frozen, S.freezeWhy = frozen, why
 
-  S.lugMinEff = max(P.lugMin, 1.30 * P.idle) + 250 * S.trailer + (S.charging and 150 or 0)
+  S.lugMinEff = max(P.lugMin, 1.30 * P.idle) + K.trailerLugRPM * S.trailer + (S.charging and 150 or 0)
   S.upFloor = S.lugMinEff + 150
 end
 
--- local sportiness index (P3) - identical math is requested from the VCU
--- (etk854hybrid_sportIndex); used only while that channel is nil.
--- Rise tau 1.5 s, decay window 6..25 s that grows only with SUSTAINED sporty
--- driving (h = history EMA, 45 s up / 120 s down). Frozen at standstill.
+-- local sportiness index, used only while the VCU's etk854hybrid_sportIndex
+-- is nil. Rise tau 1.5 s; decay 6..25 s, growing with sustained sporty
+-- driving (history h: 45 s up / 120 s down). Frozen at standstill.
 local function sportLocal(dt)
   local L = S.sl
   if S.v < 1 then return L.I end
-  -- pedal^gamma, not the shaped load axis: the fallback index must not change
-  -- with the VCU's EV pedal zone
+  -- pedal^gamma: independent of the VCU's EV pedal zone
   local x = max(clamp01((S.uPed - 0.25) / 0.60),
                 0.9 * clamp01(max(0, S.dpdt) / 3.0),
                 0.8 * clamp01((S.gxS - 2.5) / 4.0),
@@ -917,27 +742,16 @@ local function senseTorque(dt)
   if cap <= 0 then cap = 1e6 end -- VCU: 0 disables the cap
   S.sysCap = cap
 
-  -- VCU request is pedalShaped * (motorCap(n) + icePotential(n)) at the
-  -- CURRENT shaft rpm (etk854hybridControl.lua updateGFX "Request ceiling +
-  -- pedal map" -> mapPedal); the fallback model uses the load axis S.u the
-  -- same way
-  -- the MAP demand: while the ICE is coupled the VCU refers the request to a
-  -- wheel-torque reference and raises it at low rpm (etk854hybridControl.lua
-  -- demandComp), capped at 0.90 x Tav (etk854hybrid_shiftTavNm below) so it
-  -- never triggers a torque downshift itself; the program keeps planning on
-  -- the pedal map demand
+  -- VCU pedal-map demand, not the coupled request raised at low rpm (that
+  -- one must not trigger torque downshifts); fallback: load-axis model
   local tr = num(ev.etk854hybrid_torqueRequestMapNm, nil) or num(ev.etk854hybrid_torqueRequestNm, nil)
   if tr == nil then
     local ref = clamp(max(S.nIce, min(S.nShaft, P.lim)), P.idle, P.lim)
     tr = S.u * (S.evAvail + iceCurve(ref))
   end
   S.Treq = max(0, tr)
-  -- ICE axis (selectAxis): plan with the request the v1.0.0 pedal map would
-  -- make at this pedal (pedal^gamma x ceiling). The split map asks for less
-  -- in its lower half (0.50 pedal N57: 322 instead of 448 Nm); with the real
-  -- request the E-machine "covered" more of it (lugBonus) and the torque
-  -- downshift armed later, so the coupled N57 still upshifted ~400 rpm
-  -- earlier than v1.0.0 at 0.50 pedal (n57_revband 2026-09-30 13:50).
+  -- ICE axis: plan with the request of a linear pedal^gamma map; the split
+  -- map's lower request would upshift the coupled engine too early
   if S.axisIce and S.uShaped > 0.01 and S.u > S.uShaped then
     S.Treq = S.Treq * S.u / S.uShaped
   end
@@ -957,6 +771,11 @@ end
 -- ----------------------------------------------------------------------------
 -- Program selection, adaptation, demand integral
 -- ----------------------------------------------------------------------------
+-- uncapped adaptation target for a gain table (PT.adaptGain / PT.slipAdaptGain)
+function RULES.adaptRaw(gain)
+  return pv(PT.adaptFloor) + pv(gain) * S.sIdx * P.adaptGainUser
+end
+
 local function updateProgram(dt)
   local mode = D.AH.mode
   local prog
@@ -989,12 +808,10 @@ local function updateProgram(dt)
     end
   end
 
-  -- adaptation, capped per program (PT.sEffCap). The cap is applied to sEff
-  -- itself, not only to the target: after SPORT -> COMFORT the sFall slew
-  -- would otherwise show 'COMFORT++' for seconds; the blended cap follows
-  -- the 0.5 s program ramp instead.
+  -- adaptation, capped per program; the cap applies to sEff itself, else
+  -- SPORT -> COMFORT would show 'COMFORT++' while sEff slews down
   local cap = pv(PT.sEffCap)
-  local target = min(cap, clamp01(pv(PT.adaptFloor) + pv(PT.adaptGain) * S.sIdx * P.adaptGainUser))
+  local target = min(cap, clamp01(RULES.adaptRaw(PT.adaptGain)))
   S.sEff = min(cap, clamp01(S.sEff + clamp(target - S.sEff, -K.sFall * dt, K.sRise * dt)))
 
   -- HUD suffix '' / '+' / '++' with 0.05 hysteresis
@@ -1008,20 +825,17 @@ local function updateProgram(dt)
   else S.progLabel = prog .. ((lvl == 2) and "++" or ((lvl == 1) and "+" or "")) end
 
   local hm = S.hunt and 2 or 1
-  S.kUp = pvs(PT.kUpCalm, PT.kUpDyn) * ((S.trailer > 0) and 0.8 or 1)
+  S.kUp = pvs(PT.kUpCalm, PT.kUpDyn) * ((S.trailer > 0) and K.trailerKUp or 1)
   S.kDn = pvs(PT.kDnCalm, PT.kDnDyn)
   S.kRate = pv(PT.kRate) * lerp(1, 0.6, S.sEff)
   S.tUpAfterUp = pv(PT.tUpAfterUp) * hm
-  -- the re-upshift dwell after a downshift depends on what caused it: a
-  -- demand downshift (tip-in, torque, kickdown) is held, a passive one
-  -- (regen / coast / brake / stop, K.PASSIVE) only briefly in ECO/COMFORT
+  -- re-upshift dwell: held after a demand downshift, brief after a passive one
   S.tUpAfterDn = (S.lastDnPassive and passiveDwell() or pvs(PT.tUpAfterDnCalm, PT.tUpAfterDnDyn)) * hm
   S.tDnAfterUp = pvs(PT.tDnAfterUpCalm, PT.tDnAfterUpDyn) * hm
-  S.tDnAfterDn = 0.45 * hm
+  S.tDnAfterDn = K.tDnAfterDn * hm
   S.cMin = (mode == "S" or prog == "MANUAL") and 0.5 or pvs(PT.cMinCalm, PT.cMinDyn)
-  -- highest gear the program may select: SPORT has no overdrive (D.topSport,
-  -- the 1.00 gear), 7th/8th only through fullUp (RULES.fullUp) at nUpFull;
-  -- relaxed SPORT adds K.relaxTopExtra (RULES.applyRelax, updateHolds)
+  -- highest selectable gear: SPORT has no overdrive (D.topSport), the gears
+  -- above only through fullUp; relaxed SPORT adds K.relaxTopExtra
   S.topGear = (prog == "SPORT") and min(D.topSport, S.modeMax) or S.modeMax
   -- program-blended engine calibration (initParams)
   S.startCap = pv(P.startCap)
@@ -1030,9 +844,8 @@ local function updateProgram(dt)
   S.brakeCalmP = pv(P.brakeCalm)
 end
 
--- short demand integral (the "Integral der letzten Sekunden"): window grows
--- with adaptation, holds the gear after demand peaks (uUp), downshift axis
--- stays fast (uDn)
+-- short demand integral: the window grows with the adaptation and holds the
+-- gear after demand peaks (up-axis uUp); the downshift axis uDn stays fast
 local function updateDemand(dt)
   local W = pv(PT.intW0) + 3.5 * S.sEff
   local a = alpha(dt, W)
@@ -1040,33 +853,19 @@ local function updateDemand(dt)
   S.DwInt = S.DwInt + (S.Dw - S.DwInt) * a
   local wI = pv(PT.intW) + 0.5 * S.sEff
   S.uUp = S.uSm + wI * max(0, S.uInt - S.uSm)
-  -- ECO/COMFORT on the ICE maps: a rising pedal raises the up-axis at once
-  -- (the upshift threshold follows the new demand without the uSm lag);
-  -- this replaces the PEDAL guard there, which waited ~0.5 s for pSm after
-  -- a pedal step while the car gained ~830 rpm/s in 2nd (offline harness,
-  -- ECO 0 -> 0.60 at 20 km/h: 2->3 at 2150 instead of ~1850 rpm). Not on
-  -- the EV axis: the EV maps (evUp / evDn follow uUp) keep their dynamics
-  -- and the rising-pedal guard (RULES.upGuard).
+  -- ECO/COMFORT on the ICE maps: a rising pedal raises uUp at once (replaces
+  -- the PEDAL guard, which would block upshifts while the car gains rpm)
   if (S.prog == "ECO" or S.prog == "COMFORT") and not S.evLogic then S.uUp = max(S.uUp, S.u) end
   S.uDn = max(S.u, S.uSm)
   S.DwUp = max(S.Dw, wI * S.DwInt)
 
-  -- EV maps: gear-independent motor operating point for the requested power
-  local R, g = D.R, S.g
-  local rg = abs(R[g] or 1)
-  if rg <= 0 then rg = 1 end
-  -- operating point n = 950 + 17 * P_kW with P evaluated AT that point: the
-  -- VCU request is a shaft torque T that follows the pedal in every gear, so
-  -- P = T * n / 9549 and n = 950 / (1 - 17 * T / 9549). Evaluating P at the
-  -- CURRENT shaft speed made the threshold chase the rpm (0.25 pedal: 1->2
-  -- only at 2980 rpm / 27 km/h).
+  -- EV maps: gear-independent motor operating point n = 950 + 17 * P_kW,
+  -- P evaluated at that point (shaft torque T): n = 950 / (1 - 17 * T / 9549)
   local tq = min(RULES.reqAt(max(S.nShaft, P.idle), S.uUp), S.evAvail)
   local opt = clamp(950 / max(0.05, 1 - 17 * tq / 9549.3), 950, S.evCorner) * (1 + 0.25 * S.sEff)
   local up = lerp(opt, S.evCorner, clamp01((S.uUp - 0.60) / 0.25))
-  -- ECO PRO EV power line (K.evPow*, P.evPowLine): the shaped axis S.uUp
-  -- stays below ~0.30 in the whole EV zone of the map v3 (265 Nm of a
-  -- 700-900 Nm ceiling), so the line above never leaves the efficiency
-  -- point; the VCU's E-machine fill (S.evFracRaw) raises evUp instead.
+  -- ECO PRO EV power line: uUp stays low in the whole ECO PRO EV zone, so the
+  -- motor fill S.evFracRaw raises evUp instead
   if P.evPowLine and S.prog == "ECO" and S.edrive == "AUTO_EDRIVE" and S.evLogic and S.soc >= K.evPowSoc then
     local ut = clamp01((S.evFracRaw - K.evPowF0) / K.evPowSpan)
     S.kPow = S.kPow + (ut - S.kPow) * alpha(dt, (ut > S.kPow) and K.evPowRiseS or K.evPowFallS)
@@ -1088,8 +887,7 @@ end
 
 -- holds, latches, dwell and hold timers
 local function updateHolds(dt)
-  -- corner hold on |gx2|, released after < 0.7 * threshold for
-  -- PT.cornerRel + sEff s
+  -- corner hold on |gx2|, released after < 0.7 * thr for cornerRel + sEff s
   local thr = pvs(PT.cornerCalm, PT.cornerDyn)
   if S.gxS > thr and S.v > K.cornerMinSpeed then
     S.cornerHold, S.cornerRelT = true, 0
@@ -1098,13 +896,12 @@ local function updateHolds(dt)
     if S.cornerRelT >= pv(PT.cornerRel) + S.sEff then S.cornerHold = false end
   end
 
-  -- time since the pedal fell below K.liftUpPedal (RULES.liftUp)
+  -- time since the pedal fell below K.liftUpPedal
   local p = S.pRaw
   if p < K.liftUpPedal then S.liftT = S.liftT + dt else S.liftT = 0 end
 
-  -- lift-off hold (Schubhochschaltverhinderung): pedal drop > 0.30 from a
-  -- peak > 0.5 within 0.5 s (peak = running max, re-seeded 0.5 s after it
-  -- was last refreshed)
+  -- lift-off hold (no upshift after a quick lift): drop > 0.30 from a peak
+  -- > 0.5 within 0.5 s
   if p >= S.pPeak then
     S.pPeak, S.pPeakT = p, 0
   else
@@ -1121,13 +918,8 @@ local function updateHolds(dt)
   -- cancelled by re-applying the pedal (only after it was really released)
   if S.liftOffT > 0 and S.liftLow and p > 0.15 then S.liftOffT = 0 end
 
-  -- kickdown arming, dwell (ECO PRO / AUTO EV only, stab protection of
-  -- the map v3) and latch expiry. The dwell is the VCU policy's urgentDwellS
-  -- (etk854hybrid_pedalUrgentDwellS, one source with the urgent ICE start and
-  -- torqueCoord's KICK_RUP); K.kdDwellEco only without the VCU channel.
-  -- S.kdOn = the kickdown request of this frame (RULES.kick, the K0-freeze
-  -- latch in RULES.run); the M<n> manual kickdown (C.manualOverride) stays
-  -- on the raw edge.
+  -- kickdown arming, dwell against pedal stabs (ECO PRO / AUTO EV, shared
+  -- with the VCU's urgent ICE start) and latch expiry
   if p < 0.85 then S.kdArmed = true end
   S.kdHoldT = (p >= P.kickdownPedal) and (S.kdHoldT + dt) or 0
   local kdDw = 0
@@ -1161,21 +953,14 @@ local function updateHolds(dt)
   S.tSinceDn = S.tSinceDn + dt
   S.tSinceBrakeStep = S.tSinceBrakeStep + dt
 
-  -- TORQUEDOWN persistence (PT.tdPersist) and re-arm latch
+  -- torque downshift persistence
   if (not S.evLogic) and S.n < P.resvMax and S.Treq > S.kDn * Tav(S.n) then
     S.tdIceT = S.tdIceT + dt
   else
     S.tdIceT = 0
   end
-  -- EV saturation with the ICE available (AUTO EV / BATTERY CONTROL,
-  -- ECO/COMFORT, no kickdown): judged against the SYSTEM the start will
-  -- bring (TavPend), not the E-machine alone. The EV-only judgement shifted
-  -- 2 gears down for EV max power 0.3-1.8 s before the ICE (630 Nm) would
-  -- have covered the request in the original gear (moderate_demand
-  -- 2026-09-30 13:52 P57: evSat 4 -> 2 at 2180 -> 4217 rpm).
-  -- (load gates on S.pLoad: ECO map v3 pLoad <= 0.85 up to raw ~0.94 (B58)
-  -- / ~0.96 (N57, kickdown-zone blend), so kick starts at 0.90-0.94 keep
-  -- the ECO rev cap)
+  -- EV saturation with the ICE available: judged against TavPend, else the
+  -- car downshifts for EV max power just before the ICE takes over
   local e = D.engine
   S.evIce = S.edrive ~= "MAX_EDRIVE" and (S.prog == "ECO" or S.prog == "COMFORT")
     and S.pLoad <= K.startCapPedal and not S.kdLatch and not (e and e.isDisabled)
@@ -1188,19 +973,9 @@ local function updateHolds(dt)
   if S.uLatch >= 0 and S.u < S.uLatch - 0.10 then S.uLatch = -1 end
   S.pending = S.kdLatch or (tm.req ~= 0)
 
-  -- SPORT calm relax (T7): steady low demand for 3-6 s. SPORT keeps the
-  -- torque band while the driver is active, but not at a steady 0.18-0.35
-  -- pedal (N57 SPORT 2026-09-30 06:43: 106-125 km/h at 2500-2630 rpm in
-  -- 6th). Any active input (pedal rising or > relaxPedal, brake, corner,
-  -- kickdown latch, launch) resets it in the same frame, so a tip-in reaches
-  -- the tip-in / torque rules at once. A quick pedal fall (relaxDrop) too: a
-  -- pre-corner lift must not run on the relaxed up rows.
+  -- SPORT calm relax; any active input ends it in the same frame. Rise
+  -- hysteresis: a cruise-control wobble must not toggle it.
   local dps = p - S.pSm
-  -- hysteresis on the pedal RISE: entering needs a steady pedal (relaxRise),
-  -- leaving a clear tip-in (relaxRiseExit). With one threshold a cruise-
-  -- control / gamepad wobble of 0.05-0.10 toggled relax every few seconds
-  -- and the B58 hunted 3 <-> 4 at a steady 50 km/h (round 2 verification,
-  -- shift_table_sport 2026-09-30 20:15)
   local rise = S.sportRelax and K.relaxRiseExit or K.relaxRise
   local calm = p <= K.relaxPedal and dps < rise and dps > -K.relaxDrop and S.brake < K.relaxBrake
     and not S.cornerHold and S.gxS < K.relaxCornerFrac * thr and not S.kdLatch and S.launch == "IDLE"
@@ -1222,28 +997,25 @@ end
 -- ----------------------------------------------------------------------------
 -- Rules
 -- ----------------------------------------------------------------------------
--- Upshift time (gearbox ratio blend, automaticGearbox.lua setGearIndex): the
--- calm / dynamic pair blended by the adaptation OR the load, whichever is
--- higher (feedback round 2, R3 "Schaltzeiten ... schneller, wie ein 8HP":
--- a light-load upshift ~0.30 s, a medium-load one ~0.20 s, SPORT ~0.12 s;
--- before, only sEff blended and the capped ECO/COMFORT adaptation left every
--- upshift at 0.38-0.43 s). Skip-shifts add K.upTimeStep per extra gear.
+-- upshift time (gearbox ratio blend): calm/dyn blended by max(adaptation,
+-- load) - the capped ECO/COMFORT adaptation alone keeps every upshift slow
 function RULES.upTime(steps)
   local load = clamp01((S.pLoad - K.upTimeLoad0) / K.upTimeLoadSpan)
   return lerp(pv(PT.upTimeCalm), pv(PT.upTimeDyn), max(S.sEff, load)) + K.upTimeStep * max(0, steps - 1)
 end
 
--- upshift-side values while SPORT is relaxed (S.sportRelax): the SPORT calm
--- up rows (sEffUp = 0, mapVal / nUpPost, lifted to P.sportRelaxRPM there)
--- and the calm reserve factor (kUpShift, upPass). The dn rows and the
--- downshift reserve keep the real sEff. Also used by shadowPlan.
--- Relaxed SPORT also lifts the top gear by K.relaxTopExtra (7th, never 8th);
--- the caller has set S.topGear to the program's top gear first
--- (updateProgram / shadowPlan).
+-- kickdown time: base + step per skipped gear
+function RULES.kdTime(steps)
+  return pv(PT.kdTimeBase) + pv(PT.kdTimeStep) * max(0, steps - 1)
+end
+
+-- upshift-side values while SPORT is relaxed: calm up rows (sEffUp = 0),
+-- calm reserve kUpShift, top gear + K.relaxTopExtra; the dn side keeps the
+-- real sEff. The caller sets S.topGear to the program's top gear first.
 function RULES.applyRelax()
   if S.sportRelax then
     S.sEffUp = 0
-    S.kUpShift = pv(PT.kUpCalm) * ((S.trailer > 0) and 0.8 or 1)
+    S.kUpShift = pv(PT.kUpCalm) * ((S.trailer > 0) and K.trailerKUp or 1)
     S.topGear = min(D.topSport + K.relaxTopExtra, S.modeMax)
   else
     S.sEffUp = S.sEff
@@ -1251,32 +1023,29 @@ function RULES.applyRelax()
   end
 end
 
--- R1 lug / stall protection (bypasses dwell and freeze)
+-- EV lug: K0 open, shaft too slow under load (RULES.lug, C.manualOverride)
+function RULES.evLugging()
+  return S.isEV and S.n < K.evLugRPM and S.u > K.evLugU
+end
+
+-- lug / stall protection (bypasses dwell and freeze)
 function RULES.lug()
   local R, g, n = D.R, S.g, S.n
   if g <= 1 then return nil end
   if S.lugCoupled and n < S.lugMinEff then
     for h = g - 1, 1, -1 do
-      if n * R[h] / R[g] >= S.upFloor then return h, "lug", 0.25 end
+      if n * R[h] / R[g] >= S.upFloor then return h, "lug", K.tLug end
     end
-    return 1, "lug", 0.25
+    return 1, "lug", K.tLug
   end
-  if S.isEV and n < 600 and S.u > 0.05 then return g - 1, "lug", 0.25 end
+  if RULES.evLugging() then return g - 1, "lug", K.tLug end
   return nil
 end
 
--- best kickdown gear: argmax of wheel torque potential within the rev limit,
--- the higher gear wins inside a 5 % band (less rpm for the same thrust).
--- The landing rpm is checked where the car will be a moment later: the
--- kickdown accelerates it by ~K.kdAccel, so the rpm grows by
--- kdAccel * lead / v. Coupled ICE: lead K.kdHoldLead - a gear landing 300 rpm
--- under the full-load upshift point would be left again after ~0.3 s (QA T21b
--- 2026-09-30: 4 -> 1 at 51 km/h = 5640 rpm, 1 -> 2 after 0.36 s). ICE still
--- to be started (not coupled, not MAX EV): lead K.kdStartLead (fire,
--- rev-match, K0 lock) and the sequencer's rev-match ceiling lim -
--- syncCeilMargin, or the gear is upshifted again (iceCeil) before the ICE
--- ever pulls (QA T19b: 7 -> 2 at 75 km/h = 5570 rpm, 2 -> 3 in the middle of
--- SYNC, K0 locked after 1.7 s instead of ~1.1 s).
+-- best kickdown gear: max wheel torque potential within the rev limit, the
+-- higher gear wins within 5 %. Landing rpm checked after the lead (coupled:
+-- kdHoldLead; ICE still to start: kdStartLead and the sync ceiling, else
+-- iceCeil upshifts again before the ICE pulls).
 function RULES.kickTarget()
   local R, g, n = D.R, S.g, S.n
   local evOnly = S.edrive == "MAX_EDRIVE"
@@ -1306,8 +1075,7 @@ function RULES.kickTarget()
   return nil
 end
 
--- R2 kickdown (edge on the raw pedal incl. the ECO dwell = S.kdOn, or
--- latched during a K0 freeze)
+-- kickdown (this frame's request, or latched during a K0 freeze)
 function RULES.kick()
   if not (S.kdOn or S.kdLatch) then return nil end
   if not S.slipDnOK then
@@ -1316,16 +1084,12 @@ function RULES.kick()
   end
   S.kdArmed, S.kdLatch = false, false
   local h = RULES.kickTarget()
-  if h and h < S.g then
-    local steps = S.g - h
-    return h, "kickdown", pv(PT.kdTimeBase) + pv(PT.kdTimeStep) * (steps - 1)
-  end
+  if h and h < S.g then return h, "kickdown", RULES.kdTime(S.g - h) end
   return nil
 end
 
--- predicted synchronous rpm in gear k at the end of the start, i.e. when the
--- K0 freeze releases the gearbox again (S.lead = time to the K0 lock + the
--- torque blend; only while the ICE-start rev cap is active)
+-- rpm in gear k when the K0 freeze ends (S.lead = K0 lock + blend); the
+-- acceleration term only with the rev cap active
 function RULES.nPred(k)
   local R, g = D.R, S.g
   local ratio = R[k] / R[g]
@@ -1334,12 +1098,8 @@ function RULES.nPred(k)
   return n
 end
 
--- ICE-start gear: upshift when the predicted engagement rpm would exceed
--- the cap (never below the lug floor). Evaluated while requested (OFF) and
--- in CRANK, i.e. before the sequencer tracks the shaft. The cap S.startCap
--- is per program (P.startCap: diesel ECO 2400 / COMFORT 2800, petrol 2800 /
--- 3300; was 3500 for all, which left 3rd gear at 3000-4400 rpm after the
--- start, moderate_demand(_eco) 2026-09-30).
+-- ICE-start gear: upshift when the predicted engagement rpm exceeds
+-- S.startCap (never below the lug floor); before the sequencer tracks the shaft
 function RULES.iceStartGear()
   if not S.capActive then return nil end
   local R, g = D.R, S.g
@@ -1352,16 +1112,9 @@ function RULES.iceStartGear()
   return nil
 end
 
--- Engagement floor gate for iceStartDown, start gear g (nPred(g) is already
--- below S.engageMin):
---  * skip when the ICE map would keep g anyway - nPred(g) meets the g-1 -> g
---    upshift threshold on the up-axis, so a downshift to g-1 would be undone
---    by mapUp right after the start (the busy down-up pair at cruise:
---    shiftmap_check u 0.15, N57 COMFORT 50 km/h 6th/1147, 66 km/h 7th/1270,
---    80 km/h 8th/1224, B58 100 km/h 8th/1530 - all below the floors);
---  * otherwise only for demand: uDn >= K.engageFloorU, or the start gear
---    cannot carry the request with the kUp reserve once the ICE is in
---    (TavPend, the derated ICE share + the E-machine).
+-- engagement floor gate (nPred(g) < S.engageMin): not when the ICE map keeps
+-- g anyway (mapUp would undo the downshift); else only for demand (uDn >=
+-- engageFloorU, or g lacks the kUp reserve with the ICE in)
 function RULES.engageFloorWanted(g)
   local ng = RULES.nPred(g)
   if ng >= nUpPost(g - 1, S.uUp, 0) then return false end
@@ -1369,36 +1122,25 @@ function RULES.engageFloorWanted(g)
   return RULES.reqAt(ng, S.uDn) > S.kUp * TavPend(ng)
 end
 
--- ICE start pending in a high EV gear: the demand that started the ICE (a
--- tip-in while rolling in EV) wants a lower gear on the ICE maps. The EV
--- logic saw no reason to downshift (the E-machine pulls in any gear) and
--- the CRANK/SYNC hold plus the K0 freeze then kept the gear until the end
--- of the blend: 0.65 tip-in at 43 km/h -> ICE engaged at 1340 rpm in 5th,
--- downshift 5 -> 3 only 1.4 s later (tipin_rolling 2026-09-30). Chosen in
--- the same window as iceUp (requested / CRANK, before the shaft is tracked);
--- the rev cap (nPred) still applies in ECO/COMFORT.
+-- ICE start pending in a high EV gear: the demand wants a lower ICE-map gear
+-- the EV logic never picks, and the start hold + K0 freeze would keep the
+-- gear until the blend ends. Same window as iceStartGear.
 function RULES.iceStartDown()
-  if not S.icePending or S.evLogic then return nil end
+  if not S.icePending then return nil end -- icePending excludes evLogic (senseHybrid)
   local g = S.g
-  -- rev cap with headroom (K.startDnHeadroom): a gear that would end the
-  -- start close to the cap is not worth a shift that the SYNC re-check undoes
   local lim = S.capActive and (S.startCap - K.startDnHeadroom) or P.kdMax
-  -- engagement floor: the ICE must not couple below S.engageMin (predicted
-  -- at the end of the start). With the low torque-first dn rows the map
-  -- alone would let a start out of a high EV gear engage at ~1100 rpm.
-  -- Highest gear that reaches the floor, within the cap. Only for a demand
-  -- start (RULES.engageFloorWanted): a low-load start or re-coupling at
-  -- cruise keeps the gear the ICE map itself would hold.
+  -- engagement floor (the low dn rows would let the ICE couple near idle):
+  -- highest gear reaching S.engageMin within the cap
   if g > 1 and RULES.nPred(g) < S.engageMin and RULES.engageFloorWanted(g) then
     local h = g - 1
     while h > 1 and RULES.nPred(h) < S.engageMin and RULES.nPred(h - 1) <= lim do h = h - 1 end
-    if RULES.nPred(h) <= lim then return h, "iceDn", 0.30 end
+    if RULES.nPred(h) <= lim then return h, "iceDn", K.tIceDn end
   end
   local k = RULES.downLoop(S.uDn, false)
   if S.capActive then
     while k < g and RULES.nPred(k) > lim do k = k + 1 end
   end
-  if k < g then return k, "iceDn", 0.30 end
+  if k < g then return k, "iceDn", K.tIceDn end
   return nil
 end
 
@@ -1412,7 +1154,7 @@ function RULES.startCeilUp()
   return nil
 end
 
--- R3 full-load upshift at nUpFull (or the rev limiter), ignores holds
+-- full-load upshift at nUpFull (or the rev limiter), ignores holds
 function RULES.fullUp()
   local g = S.g
   if g >= S.modeMax then return nil end
@@ -1423,7 +1165,8 @@ function RULES.fullUp()
   return nil
 end
 
--- multi-step map downshift loop (EV: gear-independent nDnEV / nFullEV)
+-- multi-step map downshift loop; returns the target gear (= g for none).
+-- EV: gear-independent S.evDn threshold and S.nFullEV limit.
 function RULES.downLoop(u, ev)
   local R, g, n = D.R, S.g, S.n
   local lim = ev and S.nFullEV or P.kdMax
@@ -1440,12 +1183,10 @@ function RULES.downLoop(u, ev)
   return k
 end
 
--- torque-reserve downshift, ICE: only in the lug region (below resvMax the
--- request is gear-invariant, above it a veto would just be a pedal threshold).
--- This is THE demand downshift of the torque-first ECO/COMFORT maps: the
--- request exceeds kDn x what the system delivers in this gear for
--- PT.tdPersist; target = the highest gear that carries the same wheel torque
--- with the kUp reserve.
+-- torque-reserve downshift, ICE (the demand downshift of torque-first
+-- ECO/COMFORT): request > kDn x Tav for tdPersist, only below resvMax (above
+-- it a veto would just be a pedal threshold); target = highest gear carrying
+-- the wheel torque with the kUp reserve
 function RULES.torqueDownIce()
   local R, g, n = D.R, S.g, S.n
   if n >= P.resvMax or S.tdIceT < pv(PT.tdPersist) or S.u <= S.uLatch + 0.05 then return nil end
@@ -1464,15 +1205,9 @@ function RULES.torqueDownIce()
   return nil
 end
 
--- EV saturation downshift with the ICE available (S.evIce, updateHolds):
--- like torqueDownIce, but against the system the pending start brings
--- (TavPend). The rpm prediction adds the current acceleration over
--- K.evSatLeadS (request + start lead + blend) and keeps the iceStartDown
--- headroom below the start cap, so iceStartGear does not shift up again in
--- CRANK (6 -> 3 evSat, 3 -> 4 iceUp 0.7 s later: lift_release /
--- moderate_demand / tipin_rolling 2026-10, B58 and N57). Otherwise the gear
--- is held: the E-machine delivers its maximum until the VCU's deficit start
--- couples the ICE.
+-- EV saturation downshift with the ICE available: like torqueDownIce against
+-- TavPend, rpm predicted over K.evSatLeadS with the start headroom (else
+-- iceStartGear shifts back up). No target: hold until the ICE couples.
 function RULES.torqueDownEvIce()
   local R, g, n = D.R, S.g, S.n
   local lim = S.startCap - K.startDnHeadroom
@@ -1491,45 +1226,35 @@ function RULES.torqueDownEvIce()
   return nil
 end
 
--- torque-reserve downshift, EV: motor saturated. Re-armed only when demand
--- rises another 0.05 (uLatch), which stops the saturation cascade. ECO /
--- COMFORT with the ICE available: RULES.torqueDownEvIce. MAX EV, SPORT,
--- a disabled ICE and the kick pedal keep the EV max-power logic with the
--- full EV range.
+-- torque-reserve downshift, EV (motor saturated): first gear carrying the
+-- request, else the max-power gear, within the EV range. Re-armed only after
+-- demand rises another 0.05 (uLatch): stops the saturation cascade.
 function RULES.torqueDownEv()
   local R, g, n = D.R, S.g, S.n
   if S.tdEvT < pv(PT.tdPersist) or S.u <= S.uLatch + 0.05 then return nil end
   if S.evIce then return RULES.torqueDownEvIce() end
   local need = S.Treq * R[g] / 0.85
   local limit = S.nFullEV - 300
-  local acc = 0
-  local target, tv = nil, 0
+  -- best: max reachable wheel torque, read only when no gear carries the request
+  local target, tv, best = nil, 0, 0
   for h = g - 1, 1, -1 do
     local nh = n * R[h] / R[g]
-    if nh + acc * R[h] > limit then break end
+    if nh > limit then break end
     local vh = evAt(nh) * R[h]
     if vh >= need then
       target, tv = h, vh
       break
     end
+    if vh > best then best = vh end
   end
-  if not target then
-    local best = 0
+  if not target and best > 0 then
     for h = g - 1, 1, -1 do
       local nh = n * R[h] / R[g]
-      if nh + acc * R[h] > limit then break end
+      if nh > limit then break end
       local vh = evAt(nh) * R[h]
-      if vh > best then best = vh end
-    end
-    if best > 0 then
-      for h = g - 1, 1, -1 do
-        local nh = n * R[h] / R[g]
-        if nh + acc * R[h] > limit then break end
-        local vh = evAt(nh) * R[h]
-        if vh >= 0.95 * best then
-          target, tv = h, vh
-          break
-        end
+      if vh >= 0.95 * best then
+        target, tv = h, vh
+        break
       end
     end
   end
@@ -1542,14 +1267,9 @@ function RULES.torqueDown()
   return RULES.torqueDownIce(), "torqueDn"
 end
 
--- R5 brake downshift: sequential steps towards a target rpm, ready for the
--- corner exit / re-acceleration.
---  * SPORT (or sEff >= 0.55, i.e. SPORT/MANUAL since the ECO/COMFORT cap):
---    program/adaptation dependent target (brakeTargetRPM calm..dyn)
---  * ECO/COMFORT with the ICE coupled: only the re-acceleration reserve
---    (brakeTargetRPM calm, diesel 1250/1350, petrol 1400/1600) - the old
---    1800 rpm regen floor dragged the coupled diesel at 1700-1800 rpm down
---    to 1st (n57_revband 2026-09-30 13:54 B40/B50)
+-- brake downshift, sequential steps towards a target rpm: SPORT (sEff >=
+-- 0.55) the calm..dyn brake target; ECO/COMFORT only with the ICE coupled
+-- and only to the re-acceleration reserve (calm target)
 function RULES.brakeDown()
   local g = S.g
   if S.brake < 0.15 or S.pRaw >= K.brakeDnPedal or S.abs or g <= 2 then return nil end
@@ -1569,24 +1289,12 @@ function RULES.brakeDown()
   return nil
 end
 
--- R5b overrun upshift with the ICE COUPLED (ECO/COMFORT only).
--- The REGEN guard blocked every upshift while recuperating: in ~30 lifts
--- with the ICE coupled the gear was never upshifted, and after a COMFORT
--- kickdown the diesel was dragged at 4200 -> 3200 rpm in 5th for 8.9 s
--- (kickdown_100 N57 2026-09-30, B58 9.2 s). The VCU's ICE drag credit
--- (etk854hybridControl.lua updateRecuperation "ICE drag credit") keeps the
--- selected decel level in the higher gear. Target: the highest gear up to
--- K.liftUpMaxSteps whose rpm stays at or above the coupled coast target -
--- and, while recuperating with a K0 release due within K.liftUpRelSoonS,
--- above the DECOUPLED regen floor, so that release does not trigger a
--- regenDn right back (a later release may still regenDn: one shift, instead
--- of dragging the coupled engine above its coast target meanwhile).
--- Not in SPORT, not even relaxed: a pre-corner lift would upshift and the
--- SPORT brakeDn shift straight back (up-down pair at the corner entry).
--- Not with the recuperation selector at OFF (sailing owns the lift, the sail
--- entry opens K0 0.35 s after the lift, sailing.lua SAIL_ARM_S), and not
--- when the VCU is about to release anyway (off-hold nearly over): the shift
--- would overlap the K0 RELEASE, and the EV logic takes over after it.
+-- overrun upshift with the ICE COUPLED (ECO/COMFORT): the REGEN guard would
+-- leave the engine dragged at high rpm after a kickdown (the VCU's drag
+-- credit keeps the decel level in the higher gear). Target: highest gear
+-- at or above the coast target (the decoupled regen floor if a K0 release is
+-- due soon). Not in SPORT (brakeDn would shift back), not with regen OFF
+-- (sailing owns the lift), not overlapping the K0 release.
 function RULES.liftUp()
   if not S.coupled or S.pRaw >= K.liftUpPedal or S.brake >= 0.02 or S.cornerHold then return nil end
   local p = S.prog
@@ -1607,11 +1315,9 @@ function RULES.liftUp()
   return nil
 end
 
--- regen upshift with the ICE DECOUPLED (reached from the REGEN guard of R8):
--- a recuperating E-machine above regenUpRPM moves up as long as the same
--- wheel regen torque stays deliverable (regen torque x R[g]/R[k] within
--- K.regenUpEnvFrac of the motor envelope, evAt as its proxy) and the rpm
--- stays above the regen floor. SPORT only while relaxed.
+-- regen upshift with the ICE DECOUPLED (from the REGEN guard): up while the
+-- same wheel regen torque stays within regenUpEnvFrac of the motor envelope
+-- and above the regen floor; SPORT only while relaxed
 function RULES.regenUp()
   if S.coupled or S.brake >= 0.02 then return nil end
   local p = S.prog
@@ -1630,9 +1336,7 @@ function RULES.regenUp()
   return nil
 end
 
--- SPORT top-gear target: the lowest gear from S.topGear up whose rpm stays
--- <= nUpFull - sportTopMarginRPM (also the shift recommendation in M<n>,
--- shadowPlan)
+-- SPORT top-gear target: lowest gear from S.topGear up at <= nUpFull - margin
 function RULES.sportTopTarget()
   local g, top = S.g, S.topGear
   if g <= top then return nil end
@@ -1644,9 +1348,8 @@ function RULES.sportTopTarget()
   return nil
 end
 
--- SPORT top gear (no overdrive): above S.topGear (COMFORT -> SPORT in 8th,
--- or after the top-speed fullUp) back to the top gear once it runs calm
--- enough for sportTopPersistS, after the program ramp and not at full load
+-- SPORT top gear: from above it (program switch, top-speed fullUp) back down
+-- once it runs calm enough, after the program ramp, not at full load
 function RULES.sportTop()
   if S.g <= S.topGear or S.lambda < 1 or S.pRaw >= K.sportTopPedal or S.sportTopT < K.sportTopPersistS
      or not S.slipDnOK then return nil end
@@ -1655,11 +1358,9 @@ function RULES.sportTop()
   return nil
 end
 
--- R6 lift-off: regen floor, ICE coast floor, EV coast floor.
--- Regen floor with the ICE COUPLED: the program's coast target (lift) or
--- brake-downshift calm target (brake) - a coupled engine gets no efficiency
--- from the higher rpm, it is only dragged. Decoupled (tacho READY): the
--- efficiency floors K.REGEN_FLOOR / REGEN_FLOOR_BRAKE as before.
+-- lift-off: regen floor, ICE coast floor, EV coast floor. Coupled regen
+-- floor = coast / brake calm target (a dragged engine gains nothing from
+-- rpm); decoupled: the efficiency floors K.REGEN_FLOOR*
 function RULES.lift()
   local R, g, n = D.R, S.g, S.n
   if g <= 1 then return nil end
@@ -1671,51 +1372,41 @@ function RULES.lift()
     else
       fl = brk and K.REGEN_FLOOR_BRAKE or (K.REGEN_FLOOR[S.regenLvl] or 1500)
     end
-    if n < fl - 100 and S.tSinceShift >= 0.30 then
+    if n < fl - K.regenDnHyst and S.tSinceShift >= 0.30 then
       for h = g - 1, 1, -1 do
         local nh = n * R[h] / R[g]
         if nh > K.REGEN_MAX_RPM then break end
-        if nh >= fl then return h, "regenDn", 0.30 end
+        if nh >= fl then return h, "regenDn", K.tRegenDn end
       end
     end
     return nil
   end
   if S.coupled and n < P.coastDn then
-    if S.tSinceShift >= 0.8 then return g - 1, "coastDn", 0.35 end
+    if S.tSinceShift >= K.coastDwellS then return g - 1, "coastDn", K.tCoastDn end
     return nil
   end
-  if S.isEV and n < 900 and S.tSinceShift >= 0.8 then return g - 1, "evCoast", 0.35 end
+  if S.isEV and n < K.evCoastRPM and S.tSinceShift >= K.coastDwellS then return g - 1, "evCoast", K.tCoastDn end
   return nil
 end
 
--- VCU drive request at shaft rpm n: u * ceiling(n), u = load axis (VCU
--- pedalShaped = request / ceiling, or pedal^gamma), ceiling = motor + ICE
--- potential (motor only in MAX EV), capped at the system cap
--- (etk854hybridControl.lua updateGFX "Request ceiling + pedal map"). It is a
--- SHAFT torque that follows the pedal in every gear, not a fixed wheel torque.
--- In the EV pedal zone the VCU request is a fraction of the motor cap, not
--- of the ceiling, so u * ceiling(n) is off by the ICE-curve ratio
--- ceiling(n) / ceiling(nShaft) (a few % between adjacent gears).
+-- VCU drive request at shaft rpm n (mirrors the VCU's mapPedal): u *
+-- min(sysCap, motor + ICE potential), motor only in MAX EV. A shaft torque
+-- that follows the pedal in every gear (EV pedal zone: off by a few %).
 function RULES.reqAt(n, u)
   local ice = (S.edrive == "MAX_EDRIVE") and 0 or iceCurve(clamp(n, P.idle, P.lim))
   return u * min(S.sysCap, evAt(n) + ice)
 end
 
--- R8 candidate test for the post-shift gear k at post-shift rpm nk
+-- upshift test for gear k at post-shift rpm nk: compares the request AFTER
+-- the shift (reqAt on uUp), not the current wheel torque, which would veto
+-- every part-load upshift
 function RULES.upPass(k, nk)
   local R = D.R
   if S.evLogic then
     if nk < S.evUp or nk < S.evFloor then return false end
-    -- EV: what the driver will ask for AFTER the shift (at nk, integrated
-    -- up-axis) against what the E-machine delivers there. The old check
-    -- DwUp/R[k] <= 0.85*evAt(nk) held the current WHEEL torque constant; with
-    -- the VCU's shaft-torque request that vetoed every light-pedal EV upshift
-    -- until fullUp (ice_start_comfort 2026-09-30: 0.25 pedal, 1st gear to
-    -- 53 km/h / 5800 rpm).
     local upSat = (S.edrive == "MAX_EDRIVE") and K.evUpSatMax or K.evUpSat
     if S.evSat or RULES.reqAt(nk, S.uUp) > upSat * evAt(nk) then
-      -- saturated (now or after the shift): max-power rule, keeps the motor
-      -- at/above its corner speed
+      -- saturated (now or after the shift): max-power rule
       return evAt(nk) * R[k] >= 0.98 * evAt(S.n) * R[S.g]
     end
     return true
@@ -1723,21 +1414,11 @@ function RULES.upPass(k, nk)
   if nk < S.upFloor then return false end
   if nk < nUpPost(k - 1, S.uUp, lugBonus(nk, k)) then return false end
   if nk >= P.resvMax then return true end
-  -- Torque reserve in the lug region, against what the VCU will ask for
-  -- AFTER the shift (a shaft torque that follows the pedal in every gear,
-  -- reqAt on the integrated up-axis) - the same correction the EV branch
-  -- got above. The old test held the current WHEEL torque constant
-  -- (DwUp / R[k]), i.e. demanded 1.5x the shaft torque after a 1->2 shift:
-  -- with the ICE on at half pedal it vetoed every upshift until the
-  -- post-shift rpm passed resvMax (B58 COMFORT 0.5 pedal: 1st to 4100 rpm,
-  -- 2nd to 3600 rpm; B58S 2nd to 4150 rpm - sweep 2026-09-30).
   return RULES.reqAt(nk, S.uUp) <= S.kUpShift * Tav(nk)
 end
 
--- highest passing upshift target. Skip-shifts: calm ECO/COMFORT up to g+3
--- (uUp < skipU3) / g+2 (uUp < skipU2), so a demand drop lands in the
--- lowest-rpm gear that still covers it in one shift; SPORT g+1, g+2 while
--- relaxed. Never above S.topGear.
+-- highest passing upshift target; skips up to g+3 in calm ECO/COMFORT (a
+-- demand drop lands in one shift), g+2 in relaxed SPORT
 function RULES.upCandidate()
   local R, g, n = D.R, S.g, S.n
   local top = S.topGear
@@ -1750,11 +1431,8 @@ function RULES.upCandidate()
     kMax = g + 2
   end
   if kMax > top then kMax = top end
-  -- rpm gradient compensation over the upshift debounce (TCU-style): the
-  -- candidate is tested at the rpm the car will have when the debounce
-  -- confirms it, otherwise every gear overshoots its map point by
-  -- nDotG x debUp (~175 rpm in 2nd at 0.40 pedal, offline harness of this
-  -- core); bounded by K.upLeadMaxRPM against wheel-speed noise
+  -- test at the rpm when the debounce confirms (else every gear overshoots
+  -- its map point), capped against wheel-speed noise
   local nEff = n + min(K.upLeadMaxRPM, S.nDotG * pv(PT.debUp))
   for k = kMax, g + 1, -1 do
     if RULES.upPass(k, nEff * R[k] / R[g]) then return k end
@@ -1762,11 +1440,9 @@ function RULES.upCandidate()
   return nil
 end
 
--- R8 guards; returns the inhibit reason or nil. The REGEN guard stays for
--- the map upshift in every program: at u = 0 the map lands at 1050-1100 rpm,
--- below the coupled regen floor, and would ping-pong with regenDn. Overrun
--- upshifts are RULES.liftUp (coupled) and RULES.regenUp (decoupled, from the
--- REGEN branch of R8), whose targets respect the floors.
+-- map upshift guards; returns the inhibit reason or nil. REGEN: at u = 0 the
+-- map lands below the regen floor and would ping-pong with regenDn (overrun
+-- upshifts: liftUp / regenUp)
 function RULES.upGuard()
   if S.tSinceUp < S.tUpAfterUp or S.tSinceDn < S.tUpAfterDn then return "DWELL" end
   if S.cornerHold then return "CORNER" end
@@ -1775,11 +1451,8 @@ function RULES.upGuard()
   if S.regenOn then return "REGEN" end
   if not S.slipUpOK then return "SLIP" end
   if S.tc and S.tcT < K.tcUpHoldS and S.n < K.tcUpMaxFrac * P.nUpFull then return "TC" end
-  -- pedal not steady. SPORT/MANUAL: either direction. ECO/COMFORT: a
-  -- falling pedal never blocks (that is exactly when the torque-first
-  -- program should shift up; the symmetric guard blocked ~0.4 s after every
-  -- ease, lift_release D 2026-09-30); a rising one only on the EV axis - on
-  -- the ICE maps it is judged on the instantly raised up-axis (updateDemand)
+  -- pedal not steady: SPORT/MANUAL either way; ECO/COMFORT only rising on
+  -- the EV axis (ICE maps use the raised uUp)
   local dp = S.pRaw - S.pSm
   if S.prog ~= "ECO" and S.prog ~= "COMFORT" then
     dp = abs(dp)
@@ -1790,8 +1463,7 @@ function RULES.upGuard()
   return nil
 end
 
--- G5 sail preselect: highest gear whose rpm lets the ICE drag-start land at
--- a usable point (up map at u = 0.20, at least lugMinEff + 250)
+-- sail preselect: highest gear where the ICE drag-start lands at a usable rpm
 function RULES.sailSelect()
   local R, g, n = D.R, S.g, S.n
   local need0 = S.lugMinEff + 250
@@ -1805,7 +1477,7 @@ function RULES.sailSelect()
     end
   end
   if best and best ~= g then
-    if S.tSinceShift >= K.sailDwell then return best, "sail", 0.40 end
+    if S.tSinceShift >= K.sailDwell then return best, "sail", K.tSail end
     S.inhibit = "DWELL"
   end
   return nil
@@ -1819,19 +1491,20 @@ function RULES.paddle()
   local t = clamp(g + tm.req, 1, S.modeMax)
   tm.req = 0
   while t < g and n * R[t] / R[g] > P.nUpFull - 200 do t = t + 1 end
-  if t ~= g then return t, "paddle", (t > g) and RULES.upTime(1) or 0.20 end
+  if t ~= g then return t, "paddle", (t > g) and RULES.upTime(1) or K.tPaddleDn end
   return nil
 end
 
--- the whole decision chain for forward auto modes D / S
+-- decision chain for D / S: target gear, reason, gear change time, or nil
+-- (S.inhibit says why)
 function RULES.run(dt)
   local g = S.g
-  -- G1 shifting / settle
+  -- shifting / settle
   if D.gearbox.isShifting or S.tSinceShift < K.settle then
     S.inhibit = "SHIFTING"
     return nil
   end
-  -- G2 K0 freeze (with watchdog)
+  -- K0 freeze (with watchdog)
   if S.frozen then
     if S.frzT < P.freezeWatchdogS and S.frzTotT < K.freezeTotalCoef * P.freezeWatchdogS then
       if S.kdOn then
@@ -1850,11 +1523,17 @@ function RULES.run(dt)
     end
     S.inhibit = "WATCHDOG"
   end
-  -- G3 launch control. ARMED at a standstill counts like READY: the launch
-  -- module publishes its PRELOAD phase (ICE under load against the brake) as
-  -- ARMED (etk854hybrid_launchControl.lua PUBLIC), and the normal chain
-  -- would let fullUp shift 1 -> 2 on a limiter hit there, then the G4 stop
-  -- rule back. Below K.stopSpeed nothing but 1st is wanted anyway.
+  -- trailer stability acting: hold the gear (only lug and fullUp)
+  if S.tsa then
+    local t1, w1, tt1 = RULES.lug()
+    if t1 then return t1, w1, tt1 end
+    local t2 = RULES.fullUp()
+    if t2 then return t2, "fullUp", RULES.upTime(1) end
+    S.inhibit = "TSA"
+    return nil
+  end
+  -- launch control; ARMED at standstill (PRELOAD against the brake) counts
+  -- as READY, else fullUp would shift 1 -> 2 on a limiter hit
   if S.launch == "READY" or (S.launch == "ARMED" and S.v < K.stopSpeed) then
     if S.v < K.stopSpeed and g ~= 1 then return 1, "launch", 0.25 end
     S.inhibit = "LAUNCH"
@@ -1866,12 +1545,11 @@ function RULES.run(dt)
     S.inhibit = "LAUNCH"
     return nil
   end
-  -- G4 stop
-  if S.v < K.stopSpeed and g > 1 then return 1, "stop", 0.30 end
-  -- G4b ICE start (CRANK/SYNC, bounded by startFreezeS): hold the gear so
-  -- the rev-match target does not move; only stall protection, kickdown
-  -- (the sequencer re-targets at once, URGENT profile), the sync ceiling and
-  -- - in CRANK, before the shaft is tracked - the rev-cap gear
+  -- stop
+  if S.v < K.stopSpeed and g > 1 then return 1, "stop", K.tStop end
+  -- ICE start (CRANK/SYNC, max startFreezeS): hold the rev-match target;
+  -- only lug, kickdown (the sequencer re-targets), the sync ceiling and the
+  -- rev-cap gear (CRANK, or SYNC far above the cap)
   if S.startFreeze then
     local t1, w1, tt1 = RULES.lug()
     if t1 then return t1, w1, tt1 end
@@ -1891,8 +1569,7 @@ function RULES.run(dt)
     S.inhibit = "ICESTART"
     return nil
   end
-  -- G5 sailing: kickdown first (a pedal stab must not wait for the whole
-  -- restart - the next frame is SAIL_EXIT), otherwise preselect only
+  -- sailing: kickdown first (must not wait for the restart), else preselect
   if S.sail == "SAIL" then
     local tk, wk, ttk = RULES.kick()
     if tk then return tk, wk, ttk end
@@ -1903,8 +1580,7 @@ function RULES.run(dt)
   if tg then return tg, why, t end
   tg, why, t = RULES.kick()
   if tg then return tg, why, t end
-  -- fullUp also runs in / above the SPORT top gear: the top-speed exception
-  -- (7th only when 6th is at nUpFull)
+  -- fullUp also above the SPORT top gear (top-speed exception)
   tg = RULES.fullUp()
   if tg then return tg, "fullUp", RULES.upTime(1) end
   if S.tm.active then return RULES.paddle() end
@@ -1921,11 +1597,10 @@ function RULES.run(dt)
   return RULES.runPartLoad(dt)
 end
 
--- R4..R9
+-- part-load rules, in priority order
 function RULES.runPartLoad(dt)
   local g = S.g
-  -- R4 tip-in (bypasses dwell). Load threshold on pLoad (ECO map v3: a raw
-  -- 0.45 is in the EV zone), the rate dpdt stays on the raw pedal.
+  -- tip-in (bypasses dwell): load on pLoad, rate on the raw pedal
   if not S.cornerHold and S.pLoad >= K.tipinPedal and S.dpdt >= S.kRate and S.slipDnOK then
     local k = RULES.downLoop(S.u, S.evLogic)
     if k < g then return k, "tipin", pv(PT.dnTimeTip) end
@@ -1935,23 +1610,21 @@ function RULES.runPartLoad(dt)
       return k2, w2, pv(PT.dnTimeTip)
     end
   end
-  -- R5 brake downshift
+  -- brake downshift
   local tg = RULES.brakeDown()
-  if tg then return tg, "brakeDn", 0.18 end
-  -- R5b overrun upshift, ICE coupled
+  if tg then return tg, "brakeDn", K.tBrakeDn end
+  -- overrun upshift, ICE coupled
   local t5, w5, tt5 = RULES.liftUp()
   if t5 then return t5, w5, tt5 end
-  -- R6 lift-off
+  -- lift-off
   if S.pRaw < K.liftPedal then
     local t6, w6, tt6 = RULES.lift()
     if t6 then return t6, w6, tt6 end
   end
-  -- R7 map / torque downshift
+  -- map / torque downshift
   if not S.cornerHold and S.slipDnOK then
     local k = RULES.downLoop(S.uDn, S.evLogic)
-    -- a map downshift from above the SPORT top gear goes straight to it
-    -- (COMFORT -> SPORT in 8th: 8 -> 7 mapDn during the program ramp, then
-    -- 7 -> 6 sportTop 0.5 s later on the B58, offline harness)
+    -- from above the SPORT top gear straight to it (no mapDn + sportTop pair)
     local top = S.topGear
     if k < g and k > top and g > top and S.n * D.R[top] / D.R[g] <= P.kdMax then k = top end
     local k2, w2
@@ -1966,7 +1639,7 @@ function RULES.runPartLoad(dt)
       return nil
     end
   end
-  -- R8 upshift (debounced)
+  -- map / EV upshift (debounced)
   local k = RULES.upCandidate()
   if not k then
     S.upCand, S.upCandT = nil, 0
@@ -1982,12 +1655,9 @@ function RULES.runPartLoad(dt)
     S.upCand, S.upCandT = nil, 0
     return nil
   end
-  -- the debounce runs while ANY upshift candidate persists, and its length
-  -- is set by the FIRST candidate (debSkip only for a skip from the start):
-  -- with a falling demand or a fast-revving low gear the candidate grows
-  -- g+1 -> g+2 -> g+3 within a few frames; a restart on every change, or a
-  -- switch to the longer skip debounce, delayed the shift (offline harness,
-  -- B58 COMFORT 0.5 pedal in 1st: 1->3 at 3983 instead of ~3350 rpm)
+  -- the debounce runs while ANY candidate persists, its length set by the
+  -- first one: the candidate may grow g+1 -> g+3 within frames, a restart
+  -- would delay the shift
   if S.upCand then
     S.upCandT = S.upCandT + dt
   else
@@ -2002,11 +1672,8 @@ function RULES.runPartLoad(dt)
   return nil
 end
 
--- hunting detector: >= 3 direction reversals of autonomous shifts in 10 s.
--- A reversal counts only while the driver input was steady between the two
--- shifts (pedal within K.huntPedal of the previous counted shift, brake off
--- at both): a changed pedal or a brake application is the driver, not the
--- program, reversing the shift direction.
+-- hunting detector: >= 3 reversals of autonomous shifts in huntWindow, each
+-- with steady driver input (else the driver reversed it, not the program)
 function RULES.noteShift(dir, why)
   if not K.HUNT[why] then return end
   local steady = S.brake <= K.huntBrake and S.huntB <= K.huntBrake and abs(S.pRaw - S.huntP) <= K.huntPedal
@@ -2023,8 +1690,7 @@ function RULES.noteShift(dir, why)
   S.lastDir, S.huntP, S.huntB = dir, S.pRaw, S.brake
 end
 
--- stock shiftDecisionData debug app stays truthful (vehicleController.lua
--- :619-631 streams shiftBehavior.shiftUpAV/shiftDownAV)
+-- keeps the stock shiftDecisionData debug app truthful
 local function writeShiftBehavior(M)
   local sb = M.shiftBehavior
   if type(sb) ~= "table" then return end
@@ -2049,17 +1715,9 @@ local function writeShiftBehavior(M)
   sb.shiftUpAV, sb.shiftDownAV = upAV, dnAV
 end
 
--- Shift recommendation (production-style "Schaltempfehlung", electrics
--- etk854hybrid_gearPlanned) while the gearbox is in M<n> or temporary manual:
--- the gear the automatic program of the lever-D position (DE-derived program,
--- or the setProgram override) would select right now. Evaluated WITHOUT
--- executing anything and without the timing guards (dwell, debounce,
--- pedal-steady, corner / lift-off holds): lug protection, full-load upshift,
--- map / EV downshift, map / EV upshift. The fields these rules read for the
--- program (blend weights, adaptation, reserve factors) and the M<n> gear clamp
--- (AH.maxGearIndex = the manual gear) are swapped for the call and restored,
--- so the manual gearbox behaviour is untouched. Kickdown is an edge on the
--- raw pedal and stays with manualOverride.
+-- shift recommendation in M<n> / temp manual: the gear the D program would
+-- select now, without timing guards; program fields and the M<n> gear clamp
+-- are swapped for the call and restored
 local SHW = {ECO = 0, COMFORT = 0, SPORT = 0, MANUAL = 0}
 local function shadowPlan()
   local g = S.g
@@ -2074,8 +1732,8 @@ local function shadowPlan()
   local top0, rlx0, sUp0, kUs0 = S.topGear, S.sportRelax, S.sEffUp, S.kUpShift
   S.w, S.prog = SHW, prog
   -- same capped adaptation, top gear and SPORT relax as the D program
-  S.sEff = min(pv(PT.sEffCap), clamp01(pv(PT.adaptFloor) + pv(PT.adaptGain) * S.sIdx * P.adaptGainUser))
-  S.kUp = pvs(PT.kUpCalm, PT.kUpDyn) * ((S.trailer > 0) and 0.8 or 1)
+  S.sEff = min(pv(PT.sEffCap), clamp01(RULES.adaptRaw(PT.adaptGain)))
+  S.kUp = pvs(PT.kUpCalm, PT.kUpDyn) * ((S.trailer > 0) and K.trailerKUp or 1)
   S.kDn = pvs(PT.kDnCalm, PT.kDnDyn)
   local gb = D.gearbox
   S.modeMax = (gb and num(gb.maxGearIndex, nil)) or mm0
@@ -2086,8 +1744,7 @@ local function shadowPlan()
   if not t then
     local k = RULES.downLoop(S.uDn, S.evLogic)
     if k < g then t = k else t = RULES.upCandidate() end
-    -- SPORT: no overdrive recommended either (RULES.sportTop without its
-    -- persistence / ramp gates)
+    -- SPORT: no overdrive recommended either
     if (t or g) > S.topGear then t = RULES.sportTopTarget() or t end
   end
   S.w, S.prog, S.sEff, S.kUp, S.kDn, S.modeMax = w0, prog0, sEff0, kUp0, kDn0, mm0
@@ -2096,21 +1753,17 @@ local function shadowPlan()
 end
 
 -- ----------------------------------------------------------------------------
--- Public API
+-- Public API (Hn = hook markers of etk854hybrid_8hp.lua)
 -- ----------------------------------------------------------------------------
--- H2: gear decision, used by updateInGear AND updateInGearArcade.
--- S.planned (published as etk854hybrid_gearPlanned): the gear the shift
--- program plans. D / S: the decided target, or the upshift candidate that is
--- being debounced; M<n> and temporary manual: shadowPlan(); otherwise the
--- engaged gear.
+-- H2: gear decision (updateInGear and updateInGearArcade). S.planned: D / S
+-- the target or debounced candidate, M<n> / temp manual shadowPlan(), else
+-- the engaged gear.
 function C.decide(dt, M)
   dt = clamp(num(dt, 0.016), 0.001, 0.1)
   local gb = D.gearbox
   if not gb then return 0 end
   S.clock = S.clock + dt
-  S.dt = dt
-  -- a decided target that never started a shift (arcade N/P handling, M
-  -- clamps overrode it) must not label a later unrelated shift
+  -- a target that never started a shift must not label a later one
   if S.pendTarget and not gb.isShifting and S.clock - S.pendClock > K.pendMaxAge then
     S.pendTarget = nil
   end
@@ -2164,15 +1817,14 @@ function C.manualOverride(gearIndex, M)
     S.kdArmed = false
     local h = RULES.kickTarget()
     if h and h < gearIndex then
-      local steps = S.g - h
       S.pendTarget, S.pendReason, S.pendClock = h, "Mkd", S.clock
-      S.pendTime = pv(PT.kdTimeBase) + pv(PT.kdTimeStep) * max(0, steps - 1)
+      S.pendTime = RULES.kdTime(S.g - h)
       S.lastReason, S.target = "Mkd", h
       return h
     end
   end
-  if S.isEV and S.n < 600 and S.u > 0.05 and gearIndex > 1 then
-    S.pendTarget, S.pendReason, S.pendTime = gearIndex - 1, "lug", 0.25
+  if RULES.evLugging() and gearIndex > 1 then
+    S.pendTarget, S.pendReason, S.pendTime = gearIndex - 1, "lug", K.tLug
     S.pendClock = S.clock
     S.lastReason, S.target = "lug", gearIndex - 1
     return gearIndex - 1
@@ -2180,9 +1832,8 @@ function C.manualOverride(gearIndex, M)
   return gearIndex
 end
 
--- H4: torque-converter lock-up ratio (replaces the base partial/without
--- partial functions). Latched lock with hysteresis instead of the base
--- 1200..2600 rpm linear ramp; EV thresholds when the ICE is not coupled.
+-- H4: lock-up ratio: latched lock with hysteresis instead of the base linear
+-- ramp; EV thresholds when the ICE is not coupled
 function C.lockup(dt, M)
   local sm = D.lockSm
   if not sm then return 0 end
@@ -2195,14 +1846,14 @@ function C.lockup(dt, M)
   if g <= 0 or mode == "P" or mode == "N" or mode == "R" then
     S.lockLatched = false
   elseif S.abs or (S.coupled and (S.nIce < 1.15 * P.idle or S.decel > 7)) then
-    -- ABS, ICE stall guard, emergency stop with the ICE coupled: open NOW
+    -- ABS, ICE stall guard, emergency stop: open NOW
     hard = true
     S.lockLatched = false
   elseif (S.brake >= 0.2 and S.v < 4.2) or S.launch == "READY"
       or (S.launch == "ACTIVE" and S.launchT < 1.0) then
     S.lockLatched = false
   elseif g == 1 and g < P.lockupMinGear then
-    -- first gear: ramp 12 -> 20 km/h, only below 0.7 load pedal (D3)
+    -- 1st gear: ramp 12 -> 20 km/h below 0.7 load pedal
     local kmh = S.v * 3.6
     L = (kmh >= 12 and S.pLoad < 0.7) and clamp01((kmh - 12) / 8) or 0
   elseif g >= P.lockupMinGear then
@@ -2220,12 +1871,9 @@ function C.lockup(dt, M)
   if L > 0 then
     local sm_ = mode == "S" or (type(mode) == "string" and mode:sub(1, 1) == "M")
     local sporty = sm_ or S.prog == "SPORT" or S.prog == "MANUAL"
-    -- gate on the UNCAPPED adaptation (PT.slipAdaptGain, v1.0.1 behaviour),
-    -- not on the capped S.sEff
+    -- tip-in slip like the base partial lock-up, gated on the uncapped adaptation
     if (S.prog == "ECO" or S.prog == "COMFORT") and g <= 3
-       and pv(PT.adaptFloor) + pv(PT.slipAdaptGain) * S.sIdx * P.adaptGainUser < 0.5 then
-      -- tip-in slip like the base partial lock-up (threshold 0.85, gain 1.5;
-      -- load pedal pLoad)
+       and RULES.adaptRaw(PT.slipAdaptGain) < 0.5 then
       L = L * (1 - max(0, S.pLoad - 0.85) * 1.5)
     end
     if gb.isShiftingUp then
@@ -2244,12 +1892,11 @@ function C.lockup(dt, M)
     sm:set(0)
     return 0
   end
-  -- NO blanket brake release above 15 km/h: recuperation needs the lock
-  -- (the VCU additionally max()-overrides the ratio while regenerating)
+  -- no blanket brake release: recuperation needs the lock
   return sm:get(clamp01(L), dt)
 end
 
--- H5: shift start. Returns gearChangeTime and whether to cut ignition.
+-- H5: shift start; returns gearChangeTime and whether to cut ignition
 function C.onShiftStart(newGear, M)
   local gb = D.gearbox
   local old = gb.gearIndex or 0
@@ -2276,8 +1923,6 @@ function C.onShiftStart(newGear, M)
       S.tSinceUp = 0
     else
       S.tSinceDn = 0
-      -- which re-upshift dwell applies (updateProgram): passive (deceleration)
-      -- or demand downshift
       S.lastDnPassive = K.PASSIVE[why] == true
     end
     if why == "brakeDn" then S.tSinceBrakeStep = 0 end
@@ -2302,8 +1947,7 @@ function C.publish(dt, M)
     S.shiftTau = S.shiftTau + dt
     local shifting = gb and gb.isShifting
     if not shifting then S.shiftWait = S.shiftWait + dt else S.shiftWait = 0 end
-    -- torque intervention envelope during an upshift under load (applied by
-    -- the VCU to motor + ICE targets; M.throttle stays the driver pedal)
+    -- torque intervention during an upshift under load (applied by the VCU)
     if S.shiftUp and S.pRaw > 0.05 and S.shiftT > 0 then
       coef = 1 - (1 - S.cMin) * sin(PI * clamp01(S.shiftTau / S.shiftT))
     end
@@ -2321,26 +1965,14 @@ function C.publish(dt, M)
   ev.etk854hybrid_shiftActive = S.shiftActive and 1 or 0
   ev.etk854hybrid_shiftPending = S.pending and 1 or 0
   ev.etk854hybrid_inputRpm = S.nIn
-  -- load axis the maps are read on (telemetry: compare with pedalShaped)
-  ev.etk854hybrid_shiftLoadU = S.u
-  -- planned gear for the cluster's shift recommendation (C.decide); the
-  -- engaged gear is published by the cluster module as
-  -- etk854hybrid_gearActual (gearbox.gearIndex)
-  ev.etk854hybrid_gearPlanned = S.planned or 0
-  -- highest gear the program selects (SPORT: 6, no overdrive; 7 while
-  -- relaxed) and the SPORT
-  -- calm relax state (telemetry / QA)
+  ev.etk854hybrid_shiftLoadU = S.u -- load axis the maps are read on
+  ev.etk854hybrid_gearPlanned = S.planned or 0 -- cluster shift recommendation
   ev.etk854hybrid_shiftTopGear = S.topGear
   ev.etk854hybrid_shiftRelax = S.sportRelax and 1 or 0
-  -- the gearbox device's momentary ratio (automaticGearbox.lua:117-121 blends
-  -- it linearly over the commanded gear change time): shift-duration
-  -- telemetry (tools/analyze_shift_table.py)
-  ev.etk854hybrid_gbRatio = gb and gb.gearRatio or 0
-  -- what the system delivers in this gear right now (Tav at the shaft rpm):
-  -- the cap of the VCU's wheel-torque demand reference (demandComp)
+  ev.etk854hybrid_gbRatio = gb and gb.gearRatio or 0 -- momentary ratio (shift-duration telemetry)
+  -- Tav in this gear: cap of the VCU's wheel-torque demand reference
   ev.etk854hybrid_shiftTavNm = Tav(S.n)
-  -- ECO PRO EV power line (updateDemand): blend weight and the resulting EV
-  -- upshift threshold [post-shift rpm] (telemetry / QA)
+  -- EV power line: blend weight, EV upshift threshold [post-shift rpm]
   ev.etk854hybrid_shiftEvPowK = S.kPow
   ev.etk854hybrid_shiftEvUpRpm = S.evUp
   if S.sportFromLocal then ev.etk854hybrid_sportIndexLocal = S.sLocal end
@@ -2357,8 +1989,8 @@ function C.publish(dt, M)
   end
 end
 
--- H11: temporary manual (series car: D -> M<g> on a paddle tap, auto-return).
--- Returns true when the tap was consumed.
+-- H11: temporary manual (D -> M<g> on a paddle tap, auto-return); true when
+-- the tap was consumed
 function C.tempManual(dir, M)
   if not P.paddleTempManual then return false end
   local gh = M.gearboxHandling
@@ -2380,12 +2012,13 @@ function C.isTempManual()
   return S.tm ~= nil and S.tm.active == true
 end
 
+-- H6: adaptation index 0..1 (the shift logic's shiftingAggression)
 function C.adapt()
   return S.sEff or 0
 end
 
--- override of the deMode-derived program; nil / "AUTO" = follow the driving
--- experience again (the lever S / M<n> gates always win, see updateProgram)
+-- override of the deMode-derived program; nil / "AUTO" = follow it again
+-- (lever S / M<n> always win)
 function C.setProgram(p)
   if p == "AUTO" or p == "" then p = nil end
   if p == nil or p == "ECO" or p == "COMFORT" or p == "SPORT" or p == "MANUAL" then
@@ -2395,10 +2028,12 @@ function C.setProgram(p)
   return false
 end
 
+-- returns HUD label (e.g. "COMFORT+"), active program, override (or nil)
 function C.getProgram()
   return S.progLabel, S.prog, S.override
 end
 
+-- state snapshot for the QA suite / dev tools (new table per call)
 function C.getDebug()
   return {
     g = S.g, n = S.n, nIn = S.nIn, nShaft = S.nShaft, nIce = S.nIce,
@@ -2421,11 +2056,11 @@ function C.getDebug()
 end
 
 -- ----------------------------------------------------------------------------
--- Init (runs on spawn AND on every reset, vehicleController.lua:917)
+-- Init (on spawn AND on every reset: vehicleController re-inits the shift logic)
 -- ----------------------------------------------------------------------------
 local function newState()
   return {
-    clock = 0, dt = 0.016,
+    clock = 0,
     g = 0, n = 0, nIn = 0, nShaft = 0, nIce = 0, modeMax = 8,
     pRaw = 0, pLoad = 0, evFracRaw = 0, kPow = 0,
     brake = 0, u = 0, uPed = 0, uShaped = 0, axisIce = nil, uSm = 0, pSm = 0, pF = 0, dpdt = 0,
@@ -2438,6 +2073,7 @@ local function newState()
     sail = "DRIVE", launch = "IDLE", launchT = 0, regenLvl = "MED", regenOn = false, regenTq = 0,
     holdKind = "none", holdRemain = 0, evIce = false,
     soc = 1, stage = 0, evCorner = K.EV_CORNER[0], charging = false, trailer = 0, tc = false, abs = false,
+    tsa = false,
     source = "ICE",
     evAvail = 0, Treq = 0, Dw = 0, sysCap = K.SYS_CAP_DEFAULT, evSat = false,
     sIdx = 0, sLocal = 0, sportFromLocal = true, sl = {I = 0, h = 0},
@@ -2446,7 +2082,7 @@ local function newState()
     wFrom = {ECO = 0, COMFORT = 1, SPORT = 0, MANUAL = 0},
     sEff = 0, sEffUp = 0, suffixLevel = 0, progLabel = "COMFORT",
     kUp = 0.75, kUpShift = 0.75, kDn = 0.95, kRate = 2.5, cMin = 0.75,
-    tUpAfterUp = 0.35, tUpAfterDn = 1.2, tDnAfterUp = 1.2, tDnAfterDn = 0.45, lastDnPassive = false,
+    tUpAfterUp = 0.35, tUpAfterDn = 1.2, tDnAfterUp = 1.2, tDnAfterDn = K.tDnAfterDn, lastDnPassive = false,
     topGear = 8, startCap = 3500, engageMin = 0, coastTarget = 1300, brakeCalmP = 1800,
     sportCalmT = 0, sportCalm = false, sportRelax = false, sportTopT = 0, liftT = 0,
     uInt = 0, DwInt = 0, uUp = 0, uDn = 0, DwUp = 0,
@@ -2468,8 +2104,7 @@ local function newState()
   }
 end
 
--- highShiftUpRPM may be a scalar or a per-gear table (base engines ship
--- scalars, vehicleController.lua:1057-1070 expands them)
+-- highShiftUpRPM may be a scalar or a per-gear table
 local function maxEntry(x)
   if type(x) == "table" then
     local m = 0
@@ -2483,9 +2118,8 @@ end
 
 local function initParams(jb, engine)
   local cfg = (type(jb.etk854hybrid8hp) == "table") and jb.etk854hybrid8hp or {}
-  -- engine calibration: the ECU part's block wins; without one (the 2.0 i4
-  -- on its stock base-game ECU) the powertrain part's default block applies,
-  -- and only without both the FAMILY table below
+  -- engine calibration: ECU part block, else the powertrain part's default
+  -- block (i4 on the stock ECU), else FAMILY
   local eng = (type(jb.etk854hybrid8hpEngine) == "table") and jb.etk854hybrid8hpEngine or nil
   P.engCfgSrc = "ecu"
   if not eng then
@@ -2506,19 +2140,18 @@ local function initParams(jb, engine)
   P.legacyPedalCut = cfg.legacyPedalCut == true
   P.startIsolation = clamp(num(cfg.startIsolation, 1.0), 0, 1)
   P.kickdownPedal = clamp(num(cfg.kickdownPedal, 0.95), 0.80, 1.0)
-  -- ECO PRO EV power line (K.evPow*, updateDemand); default on, false = off
-  P.evPowLine = cfg.evPowerLineEco ~= false and cfg.evPowerLineEco ~= 0
+  P.evPowLine = cfg.evPowerLineEco ~= false and cfg.evPowerLineEco ~= 0 -- default on
   P.freezeWatchdogS = clamp(num(cfg.freezeWatchdogS, 1.5), 0.5, 5)
+  -- CRANK/SYNC gear hold, bounded: an unbounded hold deadlocks with the
+  -- sequencer's rev ceiling
   P.startFreezeS = clamp(num(cfg.startFreezeS, 1.2), 0.3, 3)
-  -- global ICE-start rev cap (jbeam etk854hybrid8hp.iceStartCapRPM): the upper
-  -- bound of the per-program caps P.startCap below
+  -- global ICE-start rev cap, upper bound of the per-program P.startCap
   P.startCapRPM = clamp(num(cfg.iceStartCapRPM, 3500), 2000, 6000)
   P.debug = num(cfg.debug, 0)
 
   P.idle = num(engine and engine.idleRPM, 700)
-  P.lim = num(engine and engine.maxRPM, 6000) -- = rev limiter (combustionEngine.lua:1968-1972)
-  -- full-load upshift point: the engine block may pin it (nUpFullRPM, the
-  -- i4 default block does), else the ECU/engine highShiftUpRPM
+  P.lim = num(engine and engine.maxRPM, 6000) -- = rev limiter (combustionEngine)
+  -- full-load upshift point: engine block nUpFullRPM, else highShiftUpRPM
   local hs = num(eng.nUpFullRPM, nil) or maxEntry(jb.highShiftUpRPM)
   P.nUpFull = min(hs or (P.lim - 200), P.lim - 200)
   P.kdMax = min(P.nUpFull - 300, P.lim - 400)
@@ -2539,9 +2172,8 @@ local function initParams(jb, engine)
     P.brakeDyn[p] = num(row[2], fam.brakeTargetRPM[p][2])
   end
   P.brakeCalm.MANUAL, P.brakeDyn.MANUAL = P.brakeCalm.SPORT, P.brakeDyn.SPORT
-  -- per-program torque-first keys (engine block, else FAMILY). SPORT /
-  -- MANUAL: the global start cap, the COMFORT engagement floor (the SPORT dn
-  -- rows sit above it anyway) and the SPORT coast target.
+  -- per-program torque-first keys; SPORT / MANUAL use the global start cap
+  -- and the COMFORT engagement floor
   local sc = (type(eng.startCapRPM) == "table") and eng.startCapRPM or {}
   local em = (type(eng.iceEngageMinRPM) == "table") and eng.iceEngageMinRPM or {}
   local ct = (type(eng.coastTargetRPM) == "table") and eng.coastTargetRPM or {}
@@ -2559,7 +2191,7 @@ local function initParams(jb, engine)
   P.sportRelaxRPM = clamp(num(eng.sportRelaxRPM, fam.sportRelaxRPM), 1000, 3500)
   P.knee, P.kneeRef = fam.knee, fam.ref
 
-  -- converter lock-up (CR-J1 changes the base keys to 2 / 250 / 4 / 10)
+  -- converter lock-up (a range outside 100..600 is clamped + logged)
   P.tcLockupRPM = num(jb.torqueConverterLockupRPM, 1200)
   local rawRange = num(cfg.lockupRangeRPM, num(jb.torqueConverterLockupRange, 250))
   P.lockupRange = clamp(rawRange, 100, 600)
@@ -2578,8 +2210,8 @@ local function initParams(jb, engine)
   return eng
 end
 
--- copy the family maps, knee-scale them to this engine's nUpFull and apply
--- an optional per-ECU override (absolute values, not scaled)
+-- family maps knee-scaled to this engine's nUpFull; per-ECU override rows
+-- are absolute (not scaled)
 local function initMaps(eng)
   local src = MAPS[P.family]
   local fac = (P.nUpFull - P.knee) / max(P.kneeRef - P.knee, 1)
@@ -2633,6 +2265,7 @@ local function checkMaps()
   end
 end
 
+-- torqueData curves are indexed rpm + 1 (combustionEngine getTorqueData)
 local function buildIceTable(engine)
   D.iceTab, D.iceN = nil, 0
   local td = engine and engine.torqueData
@@ -2653,7 +2286,7 @@ end
 function C.init(jbeamData, engine, gearbox, torqueConverter, sharedFunctions, automaticHandling)
   local jb = (type(jbeamData) == "table") and jbeamData or {}
   D = {engine = engine, gearbox = gearbox, tc = torqueConverter, AH = automaticHandling,
-       sft = sharedFunctions, R = (gearbox and gearbox.gearRatios) or {}}
+       R = (gearbox and gearbox.gearRatios) or {}}
   P = {}
   S = newState()
   local eng = initParams(jb, engine)
@@ -2661,15 +2294,14 @@ function C.init(jbeamData, engine, gearbox, torqueConverter, sharedFunctions, au
   checkMaps()
   buildIceTable(engine)
 
-  -- full-load post-shift rpm per gear: F[g] = nUpFull * R[g+1] / R[g]
+  -- full-load post-shift rpm per gear (the -1 map columns)
   local R = D.R
   D.F = {}
   local gmax = gearbox and gearbox.maxGearIndex or 0
   for g = 1, gmax - 1 do
     if R[g] and R[g + 1] and R[g] ~= 0 then D.F[g] = P.nUpFull * R[g + 1] / R[g] end
   end
-  -- SPORT top gear: the highest direct-drive or underdrive gear (|R| >= 1,
-  -- 8HP 6th = 1.00); 7th/8th (0.839 / 0.667) are overdrives
+  -- SPORT top gear: highest gear with |R| >= 1 (6th = 1.00)
   D.topSport = gmax
   for g = gmax, 1, -1 do
     if R[g] and abs(R[g]) >= 0.999 then
@@ -2677,9 +2309,8 @@ function C.init(jbeamData, engine, gearbox, torqueConverter, sharedFunctions, au
       break
     end
   end
-  -- lock-up smoother: newTemporalSmoothing(inRate, outRate) uses the SECOND
-  -- rate while moving away from 0 (engage) and the first towards 0
-  -- (release), filters.lua:390-424
+  -- newTemporalSmoothing(inRate, outRate) uses the SECOND rate moving away
+  -- from 0 (engage), the first towards 0 (release)
   D.lockSm = torqueConverter and newTemporalSmoothing(P.lockRelease, P.lockEngage) or nil
 
   C.P, C.S = P, S

@@ -1,118 +1,43 @@
 -- etk854hybrid_launchControl.lua - ETK 854 ActiveHybrid - launch control
 --
--- User requirement: "Die Launch Control muss das Ausgabedrehmoment so regeln,
--- dass das Auto nicht ueber die Bremse losschiebt. Erst beim Loslassen der
--- Bremse losfahren. Der E-Motor muss nicht vorgespannt werden, nur der
--- Verbrenner wegen Ladedruck. Dann volle Leistung voraus." Clarification:
--- "Der Wandler soll Druck aufbauen - das Auto soll sich hinten senken und
--- Kraft gegen die Bremse arbeiten."
+-- Brake + full pedal at a standstill preloads the drivetrain against the brakes
+-- (ICE builds boost under load, the rear squats) without creeping; releasing the
+-- brake fires the launch. Uncapped, the stall torque would turn the rear wheels
+-- through their brakes, so PRELOAD / READY use:
+--   * pump torque cap T_ff = MARGIN x C_hold / (stall ratio x cumulativeGearRatio),
+--     C_hold = C_R + r_R x min(mu N_R, mu N_F, C_F / r_F): rear brakes plus the
+--     rear tyres pushing the body against the front brakes (what squats the rear)
+--   * shaft speed target n* = sqrt(T* / c), T* = T_ff x anti-creep trim: the
+--     converter turns a held shaft speed into exactly that pump torque
+--   * K0 closed, ICE loaded for boost, E-machine never drives (evThrottle 0).
+--     GEN_LOAD: 0 pure ICE (ICE torque = pump torque, little boost) | 1 GEN: the
+--     ICE makes what the generator can absorb on top of the cap, the generator
+--     holds the shaft speed | 2 GEN on petrol engines only
+--   * regulator: GEN = ICE torque feed-forward (a throttle PI on shaft speed
+--     limit-cycles at graphics rate) + generator speed loop; pure ICE = the speed
+--     loop in Nm through the inverse model; both on the frame-mean shaft speed.
+--   * DSC hold assist at physics rate: full brakeTorque on every wheel, so the
+--     capacity does not depend on the driver's pedal
+--   * anti-creep trim on turbine / wheel / body speed. n* is clamped to idle +
+--     N_MIN_OVER_IDLE; when the trim needs less, the ICE torque is cut ('trim-floor').
+-- FIRE (brake < BRAKE_FIRE, pedal floored): generator and assist off, torqueCoord
+-- re-seeded with the shaft torque (launchSeedNm), LAUNCH row for WINDOW_S.
+-- GUARD (brake + pedal at a standstill, any mode): the same capacity model on the
+-- pedal brake torque as a cap on the coordinator request (launchGuardNm). Instant
+-- while the brake is held; while it is released only after GUARD_DWELL_S, so a
+-- gamepad trigger cross-over at a normal start stays out of it.
+-- With K0 closed the ICE speed is the stall speed (~1400-1550 rpm with the assist).
+-- AWD: the stock split-shaft lock stays open while braked at a standstill, so the
+-- car holds like RWD; a closed lock (clutchRatio >= AWD_LOCK_R) drives both axles
+-- against their own brakes.
 --
--- Why the old launch pushed through the brake: while armed the normal SPORT
--- pedal map passed the full 680 Nm system cap into the torque converter at
--- stall. Pump torque at stall is c * w^2 (torqueConverter.lua:35-36 with
--- avRatio = 0: kFactor = 0.004 * S / (1 + S)), the output is that times the
--- stall ratio (:38) times gear 1 x axle (13.25 on the R6 cars): ~7000-9000 Nm
--- on a rear axle whose brakes hold ~2700-3000 Nm (wheels.lua:556). The rear
--- wheels turned through their own brakes (QA T14 2026-09-30: 1-8 km/h).
---
--- What this module does instead (PRELOAD / READY):
---   * feed-forward pump torque cap  T_ff = MARGIN x hold capacity C_hold /
---     (stall ratio x gearbox cumulativeGearRatio), where C_hold is what the
---     WHOLE car holds at the driven axle (holdCapacity):
---       C_hold = C_R + r_R x min(mu N_R, mu N_F, C_F / r_F)
---     The rear brakes take the axle torque first (brake and propulsion both
---     act between hub and body, wheels.lua:648-652); the rest turns the rear
---     tyres against the road, the body is pushed forward and held by the
---     front brakes through the front tyres. That tyre pre-tension between the
---     axles is what squats the rear ("Wandler soll Druck aufbauen, hinten
---     senken, Kraft gegen die Bremse"; etk854hybrid_selfLeveling.lua:392-399
---     measured the same wind-up after hard stops: rear 10-15 mm low).
---   * shaft speed target n* = sqrt(T* / c) - the converter itself turns a
---     held shaft speed into exactly that pump torque, so regulating SPEED is
---     exact physics (T* = T_ff x closed-loop anti-creep trim)
---   * K0 stays closed, the ICE runs loaded for boost (turbocharger.lua:178
---     exhaust power ~ (0.1 + 0.8 * load) * throttle^2), the E-machine never
---     drives (evThrottle 0). Generator mode (tuning $etk854hybrid_lcGenLoad):
---       0 = pure ICE: ICE torque = pump torque at the reference (inverse
---           model), speed feedback in Nm, E-machine 0
---       1 = GEN: the ICE runs at the torque the E-machine can absorb as a
---           generator on top of the cap (full throttle while it cannot reach
---           it), the generator holds the shaft speed
---       2 = GEN on petrol engines only. Default 1 since the round-2 in-game
---           check: the offline estimate (N57 pure ICE ~23 psi) did not hold,
---           pure ICE regulated the N57 to ~170 Nm / 13 % throttle at the
---           ~1420 rpm hold and it released at -1.8 psi; with the generator
---           the ICE runs loaded (B58 6.9 psi, 387 Nm at 1413 rpm)
---   * hold regulator (fix of the round-2 open issue, regulate()): it limit-
---     cycled on N57 / N57S / B58S (launch_hold_full 20260930-202657 / -202722
---     / -202609: generator 0 <-> 250 Nm and ICE throttle 0 <-> 1 every 2-3
---     frames, shaft 950-1900 rpm, trim down to 0.45). Cause: once the
---     generator saturated, a throttle PI on the shaft speed took over -
---     ICE_KP 0.002 /rpm through the throttle map slope (~1200-1800 Nm per
---     unit throttle at 10-30 %, combustionEngine.lua:751) is ~2.5-3.5 Nm/rpm
---     at the 30 fps graphics rate, past the discrete stability limit of the
---     ~0.3-0.4 kg m^2 shaft (the pure-ICE hold 20260930-202033 already
---     alternated with period 2 frames). Now (offline lumped model and
---     robustness sweep in scratch_build/launch_fix/):
---       ICE side = torque feed-forward, no speed feedback: the ICE torque is
---         driven to T* + GEN_ICE_SHARE x Gmax by a slow throttle integrator on
---         the measured ICE torque, hard-capped every frame at T* + Gmax by
---         the exact inverse model (torqueCoord throttleForTorque)
---       generator = G = T_ice(feed-forward) - c w_ref^2 + GEN_KP e + I with
---         GEN_KP 0.25 Nm/rpm (was 0.8) and the shaft speed taken as the mean
---         over the physics steps of the frame (wheelsIntermediate) plus a
---         first-order low-pass - the 30 fps sample aliased the K0 ringing
---       pure ICE = the same feedback in the torque domain, linearised by the
---         inverse model (gain independent of the throttle-map slope)
---   * DSC hold assist at physics rate: desiredBrakingTorque = full brakeTorque
---     on every wheel (same pattern as brakeControl.lua:49-56), so the hold
---     capacity does not depend on how hard the driver presses
---   * closed-loop anti-creep trim on turbine / wheel / body speed
--- FIRE (brake < 0.15 with the pedal floored): generator and assist off in the
--- same frame, the torque coordinator is re-seeded with the ICE torque that is
--- already on the shaft (ctx.launchSeedNm) and runs its LAUNCH row for 3 s.
--- GUARD (brake >= 0.35 + pedal > 0.3 at standstill, every mode, also while
--- armed and waiting for the ICE): the same capacity model on the PEDAL brake
--- torque as a plain torque cap on the coordinator request
--- (ctx.launchGuardNm) - production brake override. It engages at once while the
--- brake is held or pressed; only while the brake is being RELEASED (it fell
--- faster than GUARD_FALL_RATE within the last GUARD_FALL_HOLD_S) the overlap
--- must last GUARD_DWELL_S - that keeps the gamepad trigger cross-over at a
--- normal braked start out of it. Round-2 bug: at exactly half brake
--- (launch_hold_half, brake 1 -> 0.5 with the pedal floored in one frame) the
--- 0.2 s dwell (started only once the brake-rate filter had settled) ran
--- past the moment the half brake let go at ~0.2 s; above 1 km/h the guard
--- waits, so it came ~0.85 s late and the car jumped ~1 m (20260930-203037 /
--- -203243: 10 / 5.7 km/h peak). Offline replay of those inputs
--- (scratch_build/launch_fix/guard_replay.py): new logic on at +0.13 s.
---
--- Physics limit (documented for the user): with K0 closed the ICE speed IS
--- the stall speed; the capacity above puts it at ~1450-1550 rpm with the
--- DSC hold assist (R6 steel / carbon, i4 ~1400). xAllrad at a standstill: the
--- stock electronicSplitShaftLock keeps the lock clutch at 0 while braking
--- below avThreshold 1 rad/s (electronicSplitShaftLock.lua:64-79, minimumLock
--- 0), so the front axle is not driven and holds the car through the road
--- exactly like on the RWD cars. Only a closed lock (clutchRatio >= 0.9)
--- drives both axles against their own brakes (no tyre path, AWD branch).
---
--- Effective anti-creep trim range: n* is clamped to idle + N_MIN_OVER_IDLE,
--- so a trim below T(idle + 150) / T_ff cannot lower the pump torque further
--- (~0.32 on the N57 at 700 rpm idle, ~0.38 at 800 rpm). When the clamp binds
--- the hold cuts the ICE torque (reason 'trim-floor') instead of letting the
--- car creep up to the 1.5 km/h overspeed cut.
---
--- Public contract (unchanged for the Actions app and the 8HP):
---   etk854hybrid_launchState IDLE | ARMED | READY | ACTIVE
---   (PRELOAD is published as ARMED; 8hpCore READY holds gear 1)
--- ctx outputs: launchArmed / launchReady / launchActive (iceSequencer:1447
--- forces the ICE on + urgent), launchHold (torqueCoord hold branch),
--- launchIceThr, launchGenNm, launchPumpCapNm, launchTargetRpm,
--- launchGuardNm (torqueCoord request cap), launchSeedNm (one-shot at FIRE).
---
--- Contract: M.isReal, init / initStage2 / reset, arm(ctx, src),
--- updateGFX(ctx, dt), applyOutputs(ctx, dt), wheelsIntermediate(dt),
--- setParam(key, value), getState(). All constants in LC, all state in st
--- (LuaJIT: 60 upvalues per function).
+-- etk854hybrid_launchState (Actions app) IDLE | ARMED | READY | ACTIVE (PRELOAD
+-- published as ARMED; the shift logic holds gear 1 in READY), plus launch* diagnostics.
+-- ctx: launchArmed / Ready / Active (iceSequencer forces the ICE on), launchHold
+-- (torqueCoord hold branch), launchIceThr, launchGenNm, launchPumpCapNm,
+-- launchTargetRpm, launchGuardNm (request cap), launchSeedNm (one-shot at FIRE),
+-- launchDrop (one-shot torqueCoord reset after an abort).
+-- All constants in LC, all state in st (LuaJIT 60-upvalue limit).
 
 local M = {}
 M.name = "launchControl"
@@ -126,96 +51,64 @@ local AV_TO_RPM = 9.549296596
 -- Parameters
 -- ===========================================================
 local LC = {
-  -- pedal thresholds (raw electrics throttle / brake)
-  BRAKE_ENTER = 0.45, BRAKE_HOLD = 0.30, BRAKE_FIRE = 0.15,   -- ENTER was 0.50 (exactly
-                                     -- the half brake of launch_hold_half)
+  -- pedal thresholds (raw throttle / brake)
+  BRAKE_ENTER = 0.45, BRAKE_HOLD = 0.30, BRAKE_FIRE = 0.15,   -- ENTER < 0.5: a half-pressed brake enters
   PEDAL_ENTER = 0.90, PEDAL_HOLD = 0.80, PEDAL_HOLD_S = 0.20, PEDAL_FIRE = 0.90,
   PEDAL_REARM = 0.20,                -- after an abort / a launch: lift below this first
-  V_ENTER_KMH = 0.5,                 -- arm / PRELOAD only at a standstill
+  V_ENTER_KMH = 0.5,
   V_OVER_KMH = 1.5,                  -- hold failed: ICE torque 0 for the rest of the hold
-  V_DISARM_KMH = 5.0,                -- armed and driven off without a launch
-  -- Production-style auto-arm (the gamepad path, no Alt+K there): DE SPORT, DTC or
-  -- DSC OFF, D/S/M, standstill, brake + kickdown held AUTO_S
-  AUTO_ARM = true, AUTO_PEDAL = 0.95, AUTO_BRAKE = 0.45, AUTO_S = 0.30,   -- BRAKE was 0.50
+  V_DISARM_KMH = 5.0,                -- driven off without a launch
+  -- auto-arm (gamepad path): SPORT, DTC / DSC OFF, D/S/M, brake + kickdown for AUTO_S
+  AUTO_ARM = true, AUTO_PEDAL = 0.95, AUTO_BRAKE = 0.45, AUTO_S = 0.30,
   ARM_TIMEOUT_S = 60,
-  HOLD_MAX_S = 8.0,                  -- UX limit (BeamNG has no converter thermal
-                                     -- model, torqueConverter.lua:21-45)
+  HOLD_MAX_S = 8.0,                  -- UX limit (no converter thermal model)
   READY_TOL_RPM = 100, READY_SETTLE_S = 0.5, READY_MAX_S = 1.5,
-  WINDOW_S = 3.0,                    -- LAUNCH window (was LAUNCH_WINDOW_S in the master)
+  WINDOW_S = 3.0,                    -- LAUNCH window after FIRE
   ACTIVE_ABORT_BRAKE = 0.2, ACTIVE_ABORT_PEDAL = 0.2,
   COOLANT_MAX_C = 112,
   -- capacity model
-  MARGIN = 0.75,                     -- share of the hold capacity (rear brakes +
-                                     -- tyre path) that may reach the axle at stall
-  GROUND_PATH = true,                -- count the rear tyre -> body -> front brake path
-  MU_HOLD = 0.80,                    -- static tyre-road friction for that path
-                                     -- (conservative; rear-tyre spin is caught by
-                                     -- the wheel-speed trim, CREEP_WHEEL_MS)
-  AXLE_N_MIN = 1500,                 -- [N] less normal force on an axle: no tyre path
-  LOAD_TAU_S = 0.5,                  -- LPF of wheels downForce (wheels.lua:310);
-                                     -- latched during a hold / guard (the squat
-                                     -- itself moves load rearward)
+  MARGIN = 0.75,                     -- share of C_hold that may reach the axle at stall
+  GROUND_PATH = true,                -- count the rear tyre -> front brake path
+  MU_HOLD = 0.80,                    -- static tyre mu, conservative (spin is caught by the trim)
+  AXLE_N_MIN = 1500,                 -- [N] below this: no tyre path
+  LOAD_TAU_S = 0.5,                  -- downForce LPF; latched in a hold (the squat moves load)
   LOAD_FALLBACK = 0.80,              -- no downForce yet: 0.8 x m g / 2 per axle
-  MASS_FALLBACK_KG = 1900,           -- node-weight sum unavailable
+  MASS_FALLBACK_KG = 1900,
   BRAKE_ASSIST = true,               -- DSC hold assist in PRELOAD / READY
-  AWD_REAR_SHARE = 0.60,             -- only with the xAllrad lock clutch closed
+  AWD_REAR_SHARE = 0.60,             -- lock clutch closed only
   AWD_LOCK_R = 0.90,                 -- transfercase.clutchRatio above which it counts
   RATIO_MIN = 0.5, RATIO_MAX = 40, RATIO_FALLBACK = 15,   -- conservative (larger = lower cap)
-  C_FALLBACK = 0.0075726,            -- c for D 0.30 / S 12 (torqueConverter.lua:35/181)
+  C_FALLBACK = 0.0075726,            -- c for D 0.30 / S 12
   TR_FALLBACK = 1.7,
-  N_MIN_OVER_IDLE = 150,             -- no preload below idle + this ("Bremse fester")
-  N_MAX_DIESEL = 2600, N_MAX_PETROL = 3500,               -- upper clamps only
-  N_RAMP_UP = 1500, N_RAMP_DN = 3000,  -- [rpm/s] shaft speed reference ramp
-  -- generator load (E-machine absorbs the ICE torque above the cap). Values
-  -- from the offline lumped model + robustness sweep in
-  -- scratch_build/launch_fix/ (sim_hold.py, sweep2.py, report.py): 5 engines
-  -- x 20/30/60 fps (+-25 % frame jitter) x 40 rpm K0 ringing x turbo lag
-  -- 0.1-0.6 s x ICE model error +-3 % x entry 1350/1550 rpm, -1/12 psi:
-  -- no limit cycle, pump torque peak <= 1.19 x T*, READY rpm std <= 16 (old
-  -- regulator in the same grid: 1.70 x T*, std 231 rpm, 104 G sign flips);
-  -- Lua-in-the-loop (lua_harness.py, this file under LuaJIT): entry <= +44 rpm,
-  -- re-floor after a lift <= +107 rpm (both < the 1.33 x T* static margin)
-  GEN_LOAD = 1,                      -- 0 off / 1 on / 2 petrol only (header)
-  -- 250 -> 290 (2026-10-10): the N57 hold ran G = 231 Nm against the 250 cap
-  -- and reached only 9.5 psi at the release (T14a floor 10); the motor's
-  -- regen curve allows ~300 Nm at the ~1400 rpm hold speed, the stage regen
-  -- power (stageRegenKw / w) still bounds it per boost stage
+  N_MIN_OVER_IDLE = 150,             -- no preload below idle + this ("brake harder")
+  N_MAX_DIESEL = 2600, N_MAX_PETROL = 3500,
+  N_RAMP_UP = 1500, N_RAMP_DN = 3000,  -- [rpm/s] reference ramp
+  -- generator load
+  GEN_LOAD = 1,                      -- 0 off / 1 on / 2 petrol only
+  -- regen curve ~300 Nm at the hold speed; stageRegenKw / w bounds it per stage
   GEN_MAX_NM = 290, GEN_SOC_MAX = 0.92, GEN_MIN_NM = 30,
-  GEN_KP = 0.25,                     -- [Nm/rpm] (was 0.8; 20 fps / i4 0.27 kg m^2:
-                                     -- KP x 9.55 x dt / J = 0.44)
-  GEN_KI = 1.0,                      -- [Nm/(rpm*s)] (was 4.0)
-  GEN_I_MAX = 150,                   -- [Nm] (was 250) - the feed-forward does the work
-  GEN_ICE_PRED = 2.0,                -- feed-forward: + this x the RISE of the ICE torque
-                                     -- over the last frame (boost build-up: frame mean,
-                                     -- LPF and the held command lag ~2 frames)
-  RPM_TAU_S = 0.01,                  -- LPF of the frame-mean shaft speed (alpha = dt/(tau+dt));
-                                     -- the frame mean is the anti-aliasing filter, a longer
-                                     -- tau only adds lag (0.03: +40 % entry overshoot)
-  -- ICE torque feed-forward in GEN mode: the ICE makes what the generator can
-  -- absorb on top of the cap (boost), never more; replaces the round-2
-  -- saturation switch (GEN_SAT_S / _SHARE / UNSAT) and its throttle PI
-  GEN_ICE_SHARE = 0.85,              -- ICE torque target T* + this x Gmax (15 % headroom)
-  GEN_ICE_HARD = 1.00,               -- hard cap T* + this x Gmax, exact inverse, every frame
-  ICE_TQ_KI_UP = 0.006,              -- [1/(Nm*s)] throttle integrator, ICE below the target
-  ICE_TQ_KI_DN = 0.003,              -- [1/(Nm*s)] ... above it (the hard cap catches spikes)
-  ICE_BOOST_RISE = 0.3,              -- [1/s] min. throttle rise while the target is out of
-                                     -- reach even at full throttle on the current boost
-                                     -- (i4: full throttle in ~2 s; a jump to 1 pulses at
-                                     -- the reachability boundary - offline sweep)
-  ICE_THR_RISE = 4.0,                -- [1/s] max. rise of the hold throttle (both modes)
-  GEN_TRIM_E_RPM = 25,               -- generator at its limit + shaft this far too fast:
-  GEN_TRIM_DN = 300, GEN_TRIM_UP = 100,   -- [Nm/s] ICE target trimmed (model error)
-  -- pure-ICE regulation (GEN off / pack full): ICE torque = c w_ref^2 - KP e - I,
-  -- throttle by the exact inverse - the loop gain is KP whatever the slope of
-  -- the throttle map (round 2: 0.002 /rpm on the throttle = ~2.5 Nm/rpm at
-  -- 13 % throttle, period-2 ringing in 20260930-202033)
-  ICE_KP = 0.30,                     -- [Nm/rpm] (was 0.002 1/rpm)
-  ICE_KI = 1.5,                      -- [Nm/(rpm*s)] (was 0.005 1/(rpm*s))
-  ICE_I_MAX = 80,                    -- [Nm] (was 0.40 throttle)
-  ICE_TAU_S = 0.03,                  -- LPF of the frame-mean ice.combustionTorque (CE:802)
-                                     -- (was 0.05 on the single graphics-frame sample)
+  GEN_KP = 0.25,                     -- [Nm/rpm] loop gain KP x 9.55 x dt / J = 0.44
+                                     -- (20 fps, lightest shaft J 0.27 kg m^2)
+  GEN_KI = 1.0,                      -- [Nm/(rpm*s)]
+  GEN_I_MAX = 150,                   -- [Nm] small: the feed-forward does the work
+  GEN_ICE_PRED = 2.0,                -- + this x the ICE torque rise per frame (~2 frames lag)
+  RPM_TAU_S = 0.01,                  -- short: the frame mean already anti-aliases
+  -- ICE torque feed-forward in GEN mode
+  GEN_ICE_SHARE = 0.85,              -- target T* + this x Gmax (15 % headroom)
+  GEN_ICE_HARD = 1.00,               -- hard cap T* + this x Gmax
+  ICE_TQ_KI_UP = 0.006,              -- [1/(Nm*s)] throttle integrator, ICE below target
+  ICE_TQ_KI_DN = 0.003,              -- [1/(Nm*s)] ... above it
+  ICE_BOOST_RISE = 0.3,              -- [1/s] min. rise while out of reach (a jump to 1 pulses)
+  ICE_THR_RISE = 4.0,                -- [1/s] max. hold throttle rise
+  GEN_TRIM_E_RPM = 25,               -- generator saturated + shaft this far too fast:
+  GEN_TRIM_DN = 300, GEN_TRIM_UP = 100,   -- [Nm/s] ICE target trim (model error)
+  -- pure-ICE regulation (GEN off / pack full)
+  ICE_KP = 0.30,                     -- [Nm/rpm]
+  ICE_KI = 1.5,                      -- [Nm/(rpm*s)]
+  ICE_I_MAX = 80,                    -- [Nm]
+  ICE_TAU_S = 0.03,                  -- combustion torque LPF
   -- anti-creep trim
-  CREEP_TURBINE_RPM = 40,            -- = ~0.1 m/s at the wheel in gear 1
+  CREEP_TURBINE_RPM = 40,            -- ~0.1 m/s at the wheel in gear 1
   CREEP_WHEEL_MS = 0.083, CREEP_BODY_MS = 0.083,
   HARD_TURBINE_RPM = 150, HARD_WHEEL_MS = 0.30,
   CREEP_TAU_S = 0.05, BODY_TAU_S = 0.10,
@@ -223,27 +116,22 @@ local LC = {
   TRIM_SOFT_RATE = 1.5,              -- [1/s]
   TRIM_HARD_MUL = 0.70, TRIM_HARD_EVERY_S = 0.25, HARD_CUT_S = 0.20,
   TRIM_QUIET_S = 0.5, TRIM_RECOVER = 0.10, TRIM_MIN = 0.30,
-  -- generator unload after a hold ends WITHOUT a fire (the ICE is at full
-  -- throttle; dropping the generator at once would put ~400 Nm on the shaft)
+  -- generator unload after a hold ends without a fire (ICE at full throttle:
+  -- dropping the generator at once would put ~400 Nm on the shaft)
   UNLOAD_MAX_S = 0.8, UNLOAD_DONE_NM = 15,
-  -- ... but not when the brake is released with at least this much pedal:
-  -- the driver asks for more than the ICE makes (SPORT map at 0.5: ~0.6 x
-  -- ceiling), the unload would only cut a ~150 ms torque hole (offline plant)
-  UNLOAD_SKIP_PEDAL = 0.50,
+  UNLOAD_SKIP_PEDAL = 0.50,          -- released with this much pedal: no unload (torque hole)
   -- brake-throttle guard outside the hold
   GUARD_ENABLE = true, GUARD_MARGIN = 0.75,
-  GUARD_BRAKE = 0.35, GUARD_PEDAL = 0.30, GUARD_V_KMH = 1.0,   -- BRAKE was 0.50
-  GUARD_DWELL_S = 0.20,              -- overlap must persist this long, but ONLY while
-  GUARD_FALL_RATE = 0.30,            -- ... the brake is being released: it fell faster
-  GUARD_FALL_HOLD_S = 0.12,          -- ... than this [1/s] within the last this [s]
-                                     -- (the scenario runner holds each cross-over step
-                                     -- 0.05-0.13 s; a gamepad release is continuous)
-  GUARD_BRAKE_FALL = 3.0,            -- no overlap while the brake falls faster [1/s]
+  GUARD_BRAKE = 0.35, GUARD_PEDAL = 0.30, GUARD_V_KMH = 1.0,
+  GUARD_DWELL_S = 0.20,              -- dwell only while the brake is being released:
+  GUARD_FALL_RATE = 0.30,            -- ... it fell faster than this [1/s]
+  GUARD_FALL_HOLD_S = 0.12,          -- ... within the last this [s]
+  GUARD_BRAKE_FALL = 3.0,            -- [1/s] no overlap while the brake falls faster
   BRAKE_RATE_TAU_S = 0.05,
   GUARD_BRAKE_OUT = 0.30, GUARD_PEDAL_OUT = 0.20, GUARD_V_OUT_KMH = 3.0,
-  -- self-leveling hold (published etk854hybrid_launchLevelHold)
+  -- self-leveling hold (etk854hybrid_launchLevelHold)
   LEVEL_HOLD_S = 2.0,
-  SPRING_TAU_S = 0.5,                -- reference length LPF (throttle released)
+  SPRING_TAU_S = 0.5,                -- squat reference LPF
   SOC_MIN_BOOST = 0.10,
 }
 
@@ -252,7 +140,7 @@ local PUBLIC = { OFF = "IDLE", ARMED = "ARMED", PRELOAD = "ARMED", READY = "READ
 
 local st = {
   phase = "OFF", why = "none", reason = "none", armSrc = "none", armDe = nil,
-  now = 0, armT = 0, autoT = 0, holdT = 0, preT = 0, readyT = 0, pedalLowT = 0, activeT = 0,
+  armT = 0, autoT = 0, holdT = 0, preT = 0, readyT = 0, pedalLowT = 0, activeT = 0,
   rearmBlock = false, weakMsg = false,
   mode = "-",                        -- "GEN" | "ICE" | "-"
   trim = 1, quietT = 0, hardT = 0, cutT = 0, cut = false, hardN = 0,
@@ -261,15 +149,15 @@ local st = {
   capNm = 0, tFf = 0, tStar = 0, nStar = 0, nRef = 0, c = LC.C_FALLBACK, tr = LC.TR_FALLBACK, ratio = 0,
   gI = 0, iI = 0, G = 0, gSat = false,
   iceThr = 0, iceLpf = 0, regenFrac = 0,
-  nReg = 0,                          -- regulator shaft speed [rpm] (frame mean + LPF)
+  nReg = 0,                          -- regulator shaft speed [rpm]
   thrI = -1,                         -- GEN: ICE throttle integrator (< 0 = seed next frame)
   iceTrim = 0, iceCapNm = 0,         -- GEN: ICE torque target trim / target [Nm]
-  -- physics-rate accumulators (wheelsIntermediate, only while accOn)
+  -- physics-rate accumulators (wheelsIntermediate)
   accOn = false, accAV = 0, accTq = 0, accN = 0,
   unloadT = 0, unloadCap = 0, assistOn = false,
   guard = false, guardNm = 0, guardDwellT = 0, brakePrev = nil, brakeRate = 0, brakeFallT = 9,
   capR = 0, capGround = 0, floorBind = false,
-  nR = 0, nF = 0, rR = 0.34, rF = 0.34, massKg = 0,
+  nR = 0, nF = 0, massKg = 0,
   levelHoldT = 0,
   springs = nil, springRef = nil, springNow = 0,
   stat = { turbMax = 0, whlMax = 0, bodyMax = 0, trimMin = 1, genSum = 0, genN = 0 },
@@ -281,18 +169,9 @@ local st = {
 -- ===========================================================
 -- Helpers
 -- ===========================================================
-local function clamp(v, lo, hi)
-  if v < lo then return lo end
-  if v > hi then return hi end
-  return v
-end
-
-local function clamp01(v)
-  if v ~= v then return 0 end
-  if v < 0 then return 0 end
-  if v > 1 then return 1 end
-  return v
-end
+local U = require("controller/etk854hybrid/etk854hybrid_util")
+local clamp = U.clamp
+local clamp01 = U.clamp01NanZero -- NaN -> 0
 
 local function readNumber(data, key, default)
   if type(data) ~= "table" then return default end
@@ -311,7 +190,7 @@ local function lcLog(fmt, ...)
   log("I", "etk854hybrid.launch", string.format(fmt, ...))
 end
 
--- forward gear (D / S* / M*) - 0.39 reports "S1"/"M2" (beamng-troubleshoot)
+-- forward gear: D / S* / M* (the game reports "S1" / "M2")
 local function gearFwd(ctx)
   if (ctx.gearSign or 0) <= 0 then return false end
   local g = electrics.values.gear
@@ -364,8 +243,7 @@ local function findWheels()
   end
 end
 
--- spring_RR / spring_RL (etk854hybrid_chassis.jbeam, the self-leveling
--- actuators) - read-only here, only for the squat channel
+-- self-leveling actuators spring_RR / spring_RL, read only for the squat channel
 local function findSprings()
   st.springs = nil
   if not (v and v.data and v.data.beams and obj and obj.getBeamLength) then return end
@@ -383,7 +261,7 @@ local function springLen()
   return 0.5 * (obj:getBeamLength(s[1]) + obj:getBeamLength(s[2]))
 end
 
--- vehicle mass [kg] = sum of the jbeam node weights (the load fallback only)
+-- vehicle mass [kg] from the node weights (load fallback only)
 local function findMass()
   st.massKg = 0
   if not (v and v.data and v.data.nodes) then return end
@@ -397,14 +275,11 @@ end
 -- ===========================================================
 -- Capacity model
 -- ===========================================================
--- Holding torque of one friction brake [Nm] exactly as wheels.lua applies it:
---   desired = brakeTorque * (min(b, split) + max(b - split, 0) * splitCoef)
---             b = electrics[brakeElectricsName] * defaultBrakeInputUsageCoef
---             (wheels.lua:556, :581, :595)
---   desired = max(desired, parkingTorque * parkingbrake * usage)   (:596)
---   applied = pressureDelay(desired) * brakeThermalEfficiency     (:642)
--- brakeTorque is already scaled by the part condition (:158). With the hold
--- assist the desired torque is the full brakeTorque (wheelsIntermediate).
+-- Holding torque of one friction brake [Nm] as wheels.lua applies it:
+--   desired = brakeTorque * (min(b, split) + max(b - split, 0) * splitCoef),
+--     b = electrics[brakeElectricsName] * usage; parking brake as a floor
+--   applied = desired * brakeThermalEfficiency
+-- With the hold assist: the full brakeTorque.
 local function wheelHoldNm(wd, assist)
   local bt = wd.brakeTorque or 0
   local eff = wd.brakeThermalEfficiency or 1
@@ -441,9 +316,8 @@ local function axleDownForce(list)
   return s
 end
 
--- Normal force per axle [N] (wheels downForce, wheels.lua:309-310), low-pass
--- filtered while free, latched during a hold / guard. Falls back to a
--- conservative static split when the wheels report nothing plausible.
+-- Normal force per axle [N] from wheels downForce: filtered while free, latched
+-- in a hold / guard, static fallback when implausible.
 local function updateLoads(dt, latch)
   local fb = LC.LOAD_FALLBACK * 0.5 * (st.massKg > 0 and st.massKg or LC.MASS_FALLBACK_KG) * 9.81
   local nR, nF = axleDownForce(st.rear), axleDownForce(st.front)
@@ -457,15 +331,10 @@ local function updateLoads(dt, latch)
     st.nR = st.nR + (nR - st.nR) * a
     st.nF = st.nF + (nF - st.nF) * a
   end
-  st.rR, st.rF = axleRadius(st.rear), axleRadius(st.front)
 end
 
--- Hold capacity at the DRIVEN axle [Nm] (header). RWD, the xAllrad 2WD mode
--- (splitShaft "disconnected") and xAllrad at a standstill (lock clutch open)
--- put the whole converter output on the rear axle: its brakes take it first,
--- the rest goes through the rear tyres into the body, which the front brakes
--- hold through the front tyres - limited by rear grip, front grip and the
--- front brakes. Sets st.capR / st.capGround for the channels.
+-- C_hold at the driven axle [Nm]. RWD, 2WD and AWD with the lock open: rear
+-- brakes + tyre path to the front brakes. Sets st.capR / st.capGround.
 local function holdCapacity(assist)
   local rear = st.rear
   st.capR, st.capGround = 0, 0
@@ -480,16 +349,15 @@ local function holdCapacity(assist)
     return min(cR / LC.AWD_REAR_SHARE, cF / (1 - LC.AWD_REAR_SHARE))
   end
   if LC.GROUND_PATH and st.nR >= LC.AXLE_N_MIN and st.nF >= LC.AXLE_N_MIN then
-    local f = min(LC.MU_HOLD * st.nR, LC.MU_HOLD * st.nF, cF / max(st.rF, 0.1))
-    st.capGround = st.rR * max(0, f)
+    local rR, rF = axleRadius(rear), axleRadius(st.front)
+    local f = min(LC.MU_HOLD * st.nR, LC.MU_HOLD * st.nF, cF / max(rF, 0.1))
+    st.capGround = rR * max(0, f)
   end
   return cR + st.capGround
 end
 
--- Pump torque constant c [Nm/(rad/s)^2] and stall torque ratio, read from
--- the device: at stall (avRatio 0) kFactor = 0.004 * S / (1 + S)
--- (torqueConverter.lua:35), pump torque = kFactor * kFactorCoef * w^2 (:36),
--- output = pump * stallTorqueRatio (:38), kFactorCoef = 844 * D^5 (:181).
+-- Pump torque constant c [Nm/(rad/s)^2] and stall ratio (torqueConverter.lua):
+-- at stall kFactor = 0.004 S / (1 + S), pump = kFactor * kFactorCoef * w^2.
 local function converterConst()
   local tc = st.tc
   if tc and type(tc.converterStiffness) == "number" and type(tc.kFactorCoef) == "number" then
@@ -502,9 +370,7 @@ local function converterConst()
   if st.c <= 1e-6 then st.c = LC.C_FALLBACK end
 end
 
--- gearbox cumulativeGearRatio = gear x final drive (x transfer case): the
--- path from the converter turbine to the wheels (13.25 in gear 1 on the R6
--- cars, 14.85 on the i4 with its 3.15 axle)
+-- turbine-to-wheel ratio (gear 1: 13.25 on R6, 14.85 on i4)
 local function mechRatio()
   local gb = st.gb
   local r = gb and tonumber(gb.cumulativeGearRatio)
@@ -521,9 +387,8 @@ local function nMaxRpm()
   return LC.N_MAX_PETROL
 end
 
--- Feed-forward pump torque cap and shaft speed target.
---   T_ff = margin * C_hold / (TR * i_mech),  T* = T_ff * trim,  n* = sqrt(T*/c)
--- Returns the untrimmed target speed (for the "Bremse fester" check).
+-- T_ff = margin * C_hold / (TR * i), T* = T_ff * trim, n* = sqrt(T*/c).
+-- Returns the untrimmed speed and idle (for "brake harder").
 local function computeTargets(ctx, assist, margin)
   converterConst()
   st.ratio = mechRatio()
@@ -547,14 +412,13 @@ local function genMax(ctx, n)
   return max(0, g * (ctx.regenAcceptFraction or 1)), env
 end
 
--- GEN_LOAD 0 / 1 / 2 (2: petrol only, header)
 local function genWanted()
   local g = LC.GEN_LOAD
   if g == 2 then
     local ice = st.ice
     return not (ice and ice.requiredEnergyType == "diesel")
   end
-  return g == 1 or g == true
+  return g == 1
 end
 
 local function throttleFor(ctx, netNm, rpm)
@@ -568,12 +432,9 @@ end
 -- ===========================================================
 -- Anti-creep sensing + trim
 -- ===========================================================
--- Returns 0 quiet / 1 soft creep / 2 hard creep. Turbine = torque converter
--- output (gearbox input), wheels = largest |wheelSpeed| of the DRIVEN wheels
--- (rear on RWD / xAllrad in 2WD, all four in AWD - 2026-10-10: on the N57 RWD
--- a braked FRONT wheel turned up to 1.5 km/h while the body pitched under the
--- converter preload, the trim fell to its floor and the ICE was cut), body =
--- forward component of the body velocity (a squat is mostly vertical).
+-- 0 quiet / 1 soft / 2 hard creep from turbine speed, max |wheelSpeed| of the
+-- driven wheels (an undriven front wheel turns as the body pitches) and the
+-- forward body speed (the squat is mostly vertical).
 local function senseCreep(ctx, dt)
   local tc = st.tc
   local turb = tc and abs(tonumber(tc.outputAV1) or 0) * AV_TO_RPM or 0
@@ -642,13 +503,9 @@ end
 -- ===========================================================
 -- Hold regulator (PRELOAD / READY)
 -- ===========================================================
--- Frame means of the physics-rate samples (M.wheelsIntermediate, every
--- physics step while st.accOn): shaft speed [rpm] and ICE combustion torque
--- [Nm] over the last graphics frame - a boxcar anti-aliasing filter against
--- the K0 spring ringing (~70 Hz, etk854hybrid_powertrain.jbeam lockDampRatio
--- note) that a single 30 fps sample folds into a slow fake speed error.
--- Falls back to the graphics-frame sample (entry frame of a hold, hook not
--- wired). Consumes the accumulators.
+-- Frame means of the physics-rate samples: shaft speed [rpm], ICE combustion
+-- torque [Nm]. Boxcar anti-aliasing against the ~70 Hz K0 ringing; falls back
+-- to the graphics-frame sample. Consumes the accumulators.
 local function frameMeans(ctx)
   local n, comb
   if st.accN > 0 then
@@ -663,20 +520,11 @@ local function frameMeans(ctx)
   return n, comb
 end
 
--- GEN mode, ICE side: torque feed-forward, NO speed feedback on the
--- throttle. Target capS = T* + GEN_ICE_SHARE x Gmax (+ trim): what the
--- generator absorbs on top of the cap with 15 % headroom. A slow integrator
--- on the measured ICE torque moves the throttle to where the boost that
--- throttle sustains gives exactly capS (turbocharger.lua:178: exhaust power
--- ~ throttle^2) - following the static inverse at the momentary boost
--- instead pulses between ~0.3 and 1 (offline model; consistent with the
--- 0.2 / 0.98 throttle spikes in the round-2 N57 READY data). While capS is
--- out of reach even at full throttle on the current boost (boost still
--- building, i4 30e 338 Nm < 358 Nm) the throttle rises at least
--- ICE_BOOST_RISE. Hard cap
--- every frame: never more than the generator can take (T* + Gmax), exact
--- inverse on the live boost - that catches the boost overshoot at the hold
--- entry that the slow integrator cannot.
+-- GEN mode, ICE side: torque feed-forward, no speed feedback. A slow integrator
+-- on the measured ICE torque finds the throttle whose sustained boost gives
+-- capS (the static inverse at the momentary boost pulses 0.3..1); out of reach
+-- it rises at least ICE_BOOST_RISE. The hard cap capH (exact inverse, every
+-- frame) catches the boost overshoot at the hold entry.
 local function genIceThrottle(ctx, dt, n, gmax)
   local capS = st.tStar + LC.GEN_ICE_SHARE * gmax + st.iceTrim
   local capH = st.tStar + LC.GEN_ICE_HARD * gmax + st.iceTrim
@@ -693,18 +541,15 @@ local function genIceThrottle(ctx, dt, n, gmax)
   return t
 end
 
--- GEN mode, generator: G = T_ice(feed-forward) - c w_ref^2 + KP e + I. The
--- feed-forward is the frame-mean ICE torque plus GEN_ICE_PRED x its rise over
--- the last frame (boost build-up: the torque of the coming frames). The pump
--- torque c w^2 itself damps the shaft (2 c w ~ 2.3 Nm s/rad at 1400 rpm), so
--- the loop needs little gain: GEN_KP 0.25 Nm/rpm. Generator at its limit and
--- the shaft still too fast = the ICE makes more than the model says: trim the
--- ICE target down (and back up slowly once the generator has headroom).
+-- GEN mode, generator: G = T_ice,ff - c w_ref^2 + KP e + I (T_ice,ff = ICE
+-- torque + GEN_ICE_PRED x its rise). The pump torque damps the shaft itself, so
+-- little gain is needed. Saturated with the shaft still too fast = the ICE
+-- makes more than modelled: trim its target down (slowly back up).
 local function genLoad(dt, e, loadRef, gmax, rise)
   local ff = st.iceLpf + LC.GEN_ICE_PRED * max(0, rise)
   local gp = (ff - loadRef) + LC.GEN_KP * e
   local graw = gp + st.gI
-  -- anti-windup: no integration further into a limit
+  -- anti-windup
   if not ((graw <= 0 and e < 0) or (graw >= gmax and e > 0)) then
     st.gI = clamp(st.gI + LC.GEN_KI * e * dt, -LC.GEN_I_MAX, LC.GEN_I_MAX)
   end
@@ -718,9 +563,8 @@ local function genLoad(dt, e, loadRef, gmax, rise)
   return G
 end
 
--- Pure ICE (GEN off / pack full): ICE torque = pump torque at the reference
--- minus a speed correction in Nm, throttle by the exact inverse model - the
--- loop gain is ICE_KP [Nm/rpm] whatever the throttle-map slope.
+-- Pure ICE: torque = pump torque at the reference - PI on the speed error,
+-- throttle by the exact inverse (gain independent of the throttle-map slope).
 local function iceOnly(ctx, dt, n, e, loadRef)
   local tq = loadRef - LC.ICE_KP * e - st.iI
   st.iceCapNm = tq
@@ -748,7 +592,7 @@ local function regulate(ctx, dt)
   st.iceLpf = st.iceLpf + (comb - st.iceLpf) * dt / (LC.ICE_TAU_S + dt)
   local gmax, env = genMax(ctx, n)
   if st.mode == "GEN" and gmax < LC.GEN_MIN_NM then
-    -- the pack stopped accepting charge: hand over to the pure-ICE loop
+    -- pack stopped accepting charge: pure-ICE loop
     st.mode, st.iI, st.gI, st.iceTrim = "ICE", 0, 0, 0
   end
   local thr
@@ -770,9 +614,8 @@ local function regulate(ctx, dt)
   st.regenFrac = (env and env > 1) and clamp01(st.G / env) or 0
 end
 
--- After a hold that ended WITHOUT a fire: the ICE throttle closes, the
--- generator keeps absorbing whatever the engine still makes above T*, so the
--- shaft never sees the full-throttle ICE torque against the brake.
+-- Hold ended without a fire: throttle closed, the generator absorbs whatever
+-- the ICE still makes above T*.
 local function unloadStep(ctx, dt)
   st.unloadT = max(0, st.unloadT - dt)
   local n, comb = frameMeans(ctx)
@@ -819,6 +662,14 @@ local function resetArmState()
   st.weakMsg = false
 end
 
+-- bumpless coordinator seed (launchSeedNm): the full ICE torque the shaft
+-- carries once the generator lets go
+local function seedFromShaft(ctx)
+  local md = st.motor
+  local shaft = (md and type(md.etkShaftNm) == "number") and md.etkShaftNm or 0
+  ctx.launchSeedNm = max(st.iceLpf, shaft, 0)
+end
+
 local function disarm(ctx, why, next)
   clearHoldState()
   resetArmState()
@@ -827,21 +678,18 @@ local function disarm(ctx, why, next)
   setPhase(ctx, next or "OFF", why)
 end
 
--- Leave PRELOAD / READY without a fire. nextPhase: ARMED | OFF | ABORT.
--- skipUnload: the brake is already released and the pedal asks for more than
--- the ICE makes - hand the ICE torque on the shaft to the coordinator like a
--- fire does (bumpless seed) instead of unloading it.
+-- Leave PRELOAD / READY without a fire (nextPhase ARMED | OFF | ABORT).
+-- skipUnload: brake released, pedal above the ICE output -> seed the
+-- coordinator like a fire instead of unloading.
 local function exitHold(ctx, nextPhase, why, skipUnload)
   holdSummary(ctx, "exit:" .. tostring(why))
   local gen = st.mode == "GEN" and st.G > 1
   if gen and skipUnload then
-    local md = st.motor
-    local shaft = (md and type(md.etkShaftNm) == "number") and md.etkShaftNm or 0
-    ctx.launchSeedNm = max(st.iceLpf, shaft, 0)
+    seedFromShaft(ctx)
     gen = false
   end
   clearHoldState()
-  st.unloadCap = st.tStar            -- the unload keeps the cap the hold ran at
+  st.unloadCap = st.tStar            -- unload at the hold's cap
   st.unloadT = gen and LC.UNLOAD_MAX_S or 0
   st.reason = why
   if nextPhase == "ARMED" then
@@ -856,14 +704,8 @@ local function exitHold(ctx, nextPhase, why, skipUnload)
 end
 
 local function enterPreload(ctx)
-  -- A trim the brake-throttle guard wound down while the car waited ARMED
-  -- (ICE start, guard on) was sensed against the PEDAL brake capacity and the
-  -- start / stop transients, not against this hold (DSC assist, own settle
-  -- window): the hold starts from trim 1 like a first entry. st.guard is
-  -- still last frame's value here (updateArmed runs before updateGuard); a
-  -- re-floor after a pedal lift keeps the hold's own trim (guard off below
-  -- GUARD_PEDAL). QA T14a 20261010-115509: guard trim 0.30 seeded the hold
-  -- -> T* 48 Nm under the idle + 150 floor, ICE cut, 0 psi at the release.
+  -- a guard trim was sensed against the pedal brake capacity, not this hold:
+  -- restart from 1 (st.guard is still last frame's value here)
   if st.guard then
     st.trim = 1
     computeTargets(ctx, LC.BRAKE_ASSIST, LC.MARGIN)
@@ -874,8 +716,7 @@ local function enterPreload(ctx)
   st.nRef = max(abs(ctx.rpmMotor or 0), ctx.iceIdleRPM or 800)
   local ice = st.ice
   st.iceLpf = (ice and tonumber(ice.combustionTorque)) or 0
-  -- the throttle the coordinator / guard drove the ICE with: the hold
-  -- throttle starts there (ICE_THR_RISE), no step to full throttle and no dip
+  -- start from the current throttle: no step, no dip
   st.iceThr = clamp01(tonumber(electrics.values.etk854hybrid_iceThrottle) or 0)
   st.accAV, st.accTq, st.accN = 0, 0, 0      -- entry frame: graphics-frame sample
   st.stat = { turbMax = 0, whlMax = 0, bodyMax = 0, trimMin = st.trim, genSum = 0, genN = 0 }
@@ -895,12 +736,7 @@ end
 
 local function fire(ctx)
   holdSummary(ctx, "fire")
-  -- The shaft carries the full ICE torque the instant the generator lets go:
-  -- that is the bumpless seed for the coordinator's jerk-limited total and
-  -- its ICE share (torqueCoord seedFire), not the ~T* the converter saw.
-  local md = st.motor
-  local shaft = (md and type(md.etkShaftNm) == "number") and md.etkShaftNm or 0
-  ctx.launchSeedNm = max(st.iceLpf, shaft, 0)
+  seedFromShaft(ctx)
   clearHoldState()
   st.unloadT, st.assistOn = 0, false
   st.activeT = LC.WINDOW_S
@@ -933,8 +769,8 @@ local function armAllowed(ctx, src)
   return true, nil
 end
 
--- src: "manual" (Alt+K / Actions app / QA T14) or "auto" (SPORT + DTC +
--- brake + kickdown). A manual press while armed switches it off again.
+-- src: "manual" (Alt+K / Actions app / QA) or "auto". A manual press while
+-- armed switches it off.
 function M.arm(ctx, src)
   if not ctx then return false end
   src = src or "manual"
@@ -1013,9 +849,7 @@ local function updateHold(ctx, dt, pedal, brake, kmh, creep)
   st.preT = st.preT + dt
   -- exits first
   if brake < LC.BRAKE_FIRE then
-    -- floored pedal: fire, also within the first 0.3 s of PRELOAD - falling
-    -- back to the normal map would give the same demand with the slower
-    -- SPORT limiter and the generator unload in between
+    -- floored pedal: fire, even early in PRELOAD (no slower map + unload in between)
     if pedal >= LC.PEDAL_FIRE then
       fire(ctx)
     else
@@ -1032,22 +866,17 @@ local function updateHold(ctx, dt, pedal, brake, kmh, creep)
   end
   if not gearFwd(ctx) or ctx.evOnly or st.armDe ~= ctx.deMode then exitHold(ctx, "OFF", "mode"); return end
   if not iceReady(ctx) then exitHold(ctx, "ARMED", "ice-lost"); return end
-  -- targets, anti-creep, regulator
   computeTargets(ctx, LC.BRAKE_ASSIST, LC.MARGIN)
   updateTrim(dt, creep)
-  -- the filtered wheel / body speeds join after the entry settle window
-  -- (<= SETTLE_MAX_S): until then they still carry the ARMED / guard window
-  -- (enterPreload keeps the filters; T14a 20261010-115509 latched the cut on
-  -- a stale 2.08 km/h in the first hold frame at v = 0.13 km/h). The vehicle
-  -- speed itself counts from the first frame.
+  -- filtered wheel / body speeds only after the settle window (they still
+  -- carry the ARMED / guard history and would latch the overspeed cut)
   local vMax = st.settled and max(kmh, st.whlF * 3.6, st.bodyF * 3.6) or kmh
   if vMax > LC.V_OVER_KMH and not st.cut then
     st.cut = true
     st.reason = "overspeed"
     lcLog("[LC] hold overspeed %.2fkm/h - ICE torque 0 for the rest of the hold", vMax)
   end
-  -- the trim asks for less than the idle + 150 rpm floor can deliver: the
-  -- speed regulator cannot follow, so cut the ICE torque now (header)
+  -- trim below the idle floor: the speed loop cannot follow, cut the ICE torque
   if st.floorBind and st.trim < 1 and not st.cut then
     st.cut = true
     st.reason = "trim-floor"
@@ -1057,7 +886,7 @@ local function updateHold(ctx, dt, pedal, brake, kmh, creep)
   end
   regulate(ctx, dt)
   if st.phase == "PRELOAD" then
-    local nNow = (st.nReg > 0) and st.nReg or abs(ctx.rpmMotor or 0)   -- regulator speed
+    local nNow = (st.nReg > 0) and st.nReg or abs(ctx.rpmMotor or 0)
     if abs(nNow - st.nStar) < LC.READY_TOL_RPM then
       st.readyT = st.readyT + dt
     else
@@ -1080,8 +909,7 @@ local function updateFire(ctx, dt, pedal, brake)
   if st.activeT <= 0 then disarm(ctx, "window-end") end
 end
 
--- Brake-throttle guard: torque cap on the coordinator request whenever the
--- driver brakes and presses the pedal at a standstill outside the hold.
+-- Brake-throttle guard: request cap for brake + pedal at a standstill outside the hold.
 local function updateGuard(ctx, dt, pedal, brake, kmh, creep)
   local p = st.phase
   if p == "PRELOAD" or p == "READY" or p == "FIRE" then st.guard = false; return end
@@ -1090,10 +918,7 @@ local function updateGuard(ctx, dt, pedal, brake, kmh, creep)
   if st.guard then
     on = fwd and brake >= LC.GUARD_BRAKE_OUT and pedal >= LC.GUARD_PEDAL_OUT and kmh <= LC.GUARD_V_OUT_KMH
   else
-    -- held or rising brake: at once. Only while the brake is being RELEASED
-    -- (it fell faster than GUARD_FALL_RATE within the last GUARD_FALL_HOLD_S)
-    -- the overlap has to persist GUARD_DWELL_S - the gamepad trigger cross-
-    -- over at a normal braked start (brake decaying while the throttle rises)
+    -- held / rising brake: at once; brake being released: after GUARD_DWELL_S
     local overlap = LC.GUARD_ENABLE and fwd and kmh < LC.GUARD_V_KMH and brake >= LC.GUARD_BRAKE
       and pedal > LC.GUARD_PEDAL and st.brakeRate > -LC.GUARD_BRAKE_FALL
     if overlap then st.guardDwellT = st.guardDwellT + dt else st.guardDwellT = 0 end
@@ -1120,21 +945,20 @@ end
 -- ===========================================================
 function M.updateGFX(ctx, dt)
   if not ctx or not dt or dt <= 0 then return end
-  st.now = st.now + dt
   local pedal = ctx.throttleRaw or 0
   local brake = ctx.brakeRaw or 0
   local kmh = ctx.speedKmh or 0
   if st.rearmBlock and pedal < LC.PEDAL_REARM then st.rearmBlock = false end
-  -- brake pedal rate, time since the brake last fell (guard dwell) and axle
-  -- loads (latched while holding)
+  -- brake rate and time since the brake last fell (guard dwell)
   local bp = st.brakePrev or brake
   st.brakeRate = st.brakeRate + ((brake - bp) / dt - st.brakeRate) * min(1, dt / LC.BRAKE_RATE_TAU_S)
   if bp - brake > LC.GUARD_FALL_RATE * dt then st.brakeFallT = 0 else st.brakeFallT = st.brakeFallT + dt end
   st.brakePrev = brake
 
   local p = st.phase
-  updateLoads(dt, p == "PRELOAD" or p == "READY" or st.guard)
-  local sensing = (p == "PRELOAD" or p == "READY") or st.guard
+  local holdPrev = p == "PRELOAD" or p == "READY"   -- phase before this frame's transitions
+  updateLoads(dt, holdPrev or st.guard)
+  local sensing = holdPrev or st.guard
     or (brake >= LC.GUARD_BRAKE_OUT and pedal > LC.GUARD_PEDAL_OUT and kmh < LC.GUARD_V_OUT_KMH)
   local creep = 0
   if sensing then
@@ -1144,11 +968,8 @@ function M.updateGFX(ctx, dt)
   end
 
   if p == "ABORT" and (brake < LC.GUARD_BRAKE_OUT or pedal < LC.GUARD_PEDAL_OUT) then
-    -- the pedal lift after an abort: the hold's unload ran out during the
-    -- (still floored) abort window, so the coordinator would ramp the ICE
-    -- share down at its normal rate (~0.15 s of full ICE torque into the
-    -- converter against the held brakes - QA T14b 2026-10-10: rear wheels to
-    -- 9 km/h, body 1 km/h). With the brake still held: hard reset instead.
+    -- pedal lift after an abort, brake still held: the unload has run out and a
+    -- normal coordinator ramp would spin up the rear wheels -> hard reset
     if brake >= LC.GUARD_BRAKE_OUT then ctx.launchDrop = true end
     disarm(ctx, "abort-released")
   end
@@ -1166,27 +987,27 @@ function M.updateGFX(ctx, dt)
   if not hold and st.unloadT > 0 then unloadStep(ctx, dt) end
   updateGuard(ctx, dt, pedal, brake, kmh, creep)
   if st.phase == "OFF" and not st.guard and st.unloadT <= 0 then st.trim = 1 end
+  local unloading = st.unloadT > 0
 
-  -- DSC hold assist flag for the physics-rate hook (never while moving)
+  -- physics-rate hook: hold assist (never while moving), frame means for the next frame
   st.assistOn = LC.BRAKE_ASSIST and kmh < LC.V_OVER_KMH
-    and (hold or (st.unloadT > 0 and brake >= LC.BRAKE_HOLD)) or false
-  -- physics-rate frame means for the regulator / unload of the NEXT frame
-  st.accOn = hold or st.unloadT > 0
+    and (hold or (unloading and brake >= LC.BRAKE_HOLD)) or false
+  st.accOn = hold or unloading
   if not st.accOn then st.accAV, st.accTq, st.accN = 0, 0, 0 end
 
   -- ctx contract
   ctx.launchArmed = (p == "ARMED" or hold)
   ctx.launchReady = (p == "READY")
   ctx.launchActive = (p == "FIRE")
-  ctx.launchHold = hold or st.unloadT > 0
+  ctx.launchHold = hold or unloading
   ctx.launchIceThr = st.iceThr
   ctx.launchGenNm = st.G
-  ctx.launchPumpCapNm = hold and st.tStar or (st.unloadT > 0 and st.unloadCap)
+  ctx.launchPumpCapNm = hold and st.tStar or (unloading and st.unloadCap)
                         or (st.guard and st.guardNm or 0)
   ctx.launchTargetRpm = hold and st.nStar or 0
   ctx.launchGuardNm = (st.guard and not ctx.launchHold) and st.guardNm or nil
 
-  -- squat reference: rear spring length at rest with the throttle released
+  -- squat reference: rear spring length at rest, throttle released
   if st.springs then
     st.springNow = springLen()
     if (p == "OFF" or p == "ARMED") and not st.guard and pedal < 0.1 and kmh < LC.V_ENTER_KMH then
@@ -1194,7 +1015,7 @@ function M.updateGFX(ctx, dt)
       else st.springRef = st.springRef + (st.springNow - st.springRef) * min(1, dt / LC.SPRING_TAU_S) end
     end
   end
-  if p ~= "OFF" or st.guard or st.unloadT > 0 then
+  if p ~= "OFF" or st.guard or unloading then
     st.levelHoldT = LC.LEVEL_HOLD_S
   else
     st.levelHoldT = max(0, st.levelHoldT - dt)
@@ -1207,10 +1028,10 @@ function M.updateGFX(ctx, dt)
   ev.etk854hybrid_launchPumpCapNm = ctx.launchPumpCapNm
   ev.etk854hybrid_launchTargetRpm = ctx.launchTargetRpm
   ev.etk854hybrid_launchRefRpm = hold and st.nRef or 0
-  ev.etk854hybrid_launchShaftRpm = hold and st.nReg or 0          -- regulator speed (frame mean + LPF)
-  ev.etk854hybrid_launchIceCapNm = hold and st.iceCapNm or 0     -- ICE torque target (GEN) / command (ICE)
+  ev.etk854hybrid_launchShaftRpm = hold and st.nReg or 0
+  ev.etk854hybrid_launchIceCapNm = hold and st.iceCapNm or 0     -- target (GEN) / command (ICE)
   ev.etk854hybrid_launchGenNm = st.G
-  ev.etk854hybrid_launchIceThr = (hold or st.unloadT > 0) and st.iceThr or 0
+  ev.etk854hybrid_launchIceThr = (hold or unloading) and st.iceThr or 0
   ev.etk854hybrid_launchTrim = st.trim
   ev.etk854hybrid_launchHoldS = hold and st.holdT or 0
   ev.etk854hybrid_launchBrakeCapNm = (hold or st.guard) and st.capNm or 0
@@ -1219,7 +1040,7 @@ function M.updateGFX(ctx, dt)
   ev.etk854hybrid_launchMode = hold and st.mode or (st.guard and "GUARD" or "-")
   ev.etk854hybrid_launchCreep = st.creep
   ev.etk854hybrid_launchAssist = st.assistOn and 1 or 0
-  ev.etk854hybrid_launchUnload = (st.unloadT > 0) and 1 or 0
+  ev.etk854hybrid_launchUnload = unloading and 1 or 0
   ev.etk854hybrid_launchReason = st.reason
   ev.etk854hybrid_launchLevelHold = (st.levelHoldT > 0) and 1 or 0
   ev.etk854hybrid_launchTurbineRpm = st.turbF
@@ -1229,30 +1050,25 @@ function M.updateGFX(ctx, dt)
   end
 end
 
--- Last writer of the motor / ICE channels while the hold (or its unload)
--- runs - after recuperation, anti-kickback and BATTERY CONTROL, which all
--- write etk854hybrid_evRegen (master updateGFX order).
+-- Last writer of the motor / ICE channels during the hold / unload (after
+-- recuperation, anti-kickback and BATTERY CONTROL, which all write evRegen).
 function M.applyOutputs(ctx, dt)
   if not (ctx and ctx.launchHold) then return end
   local ev = electrics.values
   ev.etk854hybrid_evThrottle = 0
   ev.etk854hybrid_fillGain = 0
-  -- EV creep floor inert (defence in depth: etk854hybrid_creep.lua already
-  -- hard-cuts on every launch flag; this is the frame's last writer)
+  -- creep floor off (creep.lua cuts too; defence in depth)
   ev.etk854hybrid_creepMaxNm = 0
   ev.etk854hybrid_creepCut = 1
   ev.etk854hybrid_evRegen = st.regenFrac
   ev.etk854hybrid_iceThrottle = ctx.iceOn and st.iceThr or 0
 end
 
--- Physics rate (master M.updateWheelsIntermediate, main.lua onPhysicsStep:
--- after wheels.updateWheelVelocities has set desiredBrakingTorque, before
--- wheels.updateWheelTorques applies it). Same pattern as the DSE brake stage
--- (brakeControl.lua:49-56): raise, never lower.
+-- Physics rate, between wheels.updateWheelVelocities (sets desiredBrakingTorque)
+-- and updateWheelTorques: frame-mean samples, and the hold assist raises the
+-- desired brake torque, never lowers it (as brakeControl does).
 function M.wheelsIntermediate(dt)
-  -- frame means for the hold regulator (st.accOn: PRELOAD / READY / unload):
-  -- motorShaft speed (= ICE speed with K0 closed) and ICE combustion torque,
-  -- both already updated by powertrain.update in this physics step
+  -- shaft speed (= ICE speed, K0 closed) and combustion torque of this step
   if st.accOn then
     local md = st.motor
     local av = md and md.outputAV1
@@ -1329,7 +1145,7 @@ end
 
 function M.init(ctx)
   local jb = ctx and ctx.jbeamData
-  -- controller args (etk854hybrid_powertrain.jbeam, hybridControl)
+  -- hybridControl args
   local g = readNumber(jb, "launchGenLoad", LC.GEN_LOAD)
   LC.GEN_LOAD = (g == 0 or g == 2) and g or 1
   LC.BRAKE_ASSIST = readNumber(jb, "launchBrakeAssist", LC.BRAKE_ASSIST and 1 or 0) ~= 0
@@ -1364,10 +1180,8 @@ function M.reset(ctx)
   M.initStage2(ctx)
 end
 
-function M.updateFixedStep(ctx, dt) end
-
--- Live tuning (console / dev server): M.setParam('MARGIN', 0.7). Existing
--- numeric or boolean keys of LC only; returns the old value; not persistent.
+-- Live tuning: M.setParam('MARGIN', 0.7). Existing number / boolean LC keys
+-- only; returns the old value; not persistent.
 function M.setParam(key, value)
   local old = LC[key]
   if type(old) == "number" and type(value) == "number" then

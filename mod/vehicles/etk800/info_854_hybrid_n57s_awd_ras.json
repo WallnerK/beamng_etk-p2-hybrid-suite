@@ -1,0 +1,29 @@
+{
+    "Configuration": "ActiveHybrid 35d Perf. xAllrad Rear Steer",
+    "Author": "Deuflhard",
+    "useSubCluster": true,
+    "vehicleSelectorSubCluster": "ActiveHybrid",
+    "SubModel": "ActiveHybrid",
+    "vehicleSelectorSubGroup": "ActiveHybrid 35d - I6 Diesel",
+    "Population": 0,
+    "Body Style": "Wagon",
+    "Config Type": "Custom",
+    "Country": "Germany",
+    "Description": "35d Performance with all-wheel drive and active rear-axle steering: the rear wheels counter-steer below about 60 km/h (smaller turning circle) and steer with the front above (calmer lane changes). System 615 PS / 950 Nm.",
+    "Drivetrain": "AWD",
+    "Fuel Type": "Diesel",
+    "Induction Type": "Turbo",
+    "Power": 615,
+    "PowerPeakRPM": "4300 - 4600",
+    "Propulsion": "Hybrid",
+    "Torque": 950,
+    "TorquePeakRPM": "1800 - 3000",
+    "Transmission": "Automatic",
+    "Value": 88900,
+    "Weight": 1886,
+    "Years": {
+        "min": 2024,
+        "max": 2026
+    },
+    "defaultPaintName1": "Mineral Green"
+}

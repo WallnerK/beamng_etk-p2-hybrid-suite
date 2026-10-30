@@ -1,20 +1,16 @@
 {
 // ============================================================================
-// ETK 854 ActiveHybrid - Diesel fuel tank + HV battery (B57 variant)
+// ETK 854 ActiveHybrid - Diesel fuel tank + HV battery (diesel variant)
 // ----------------------------------------------------------------------------
 // Identical to etk854hybrid_fueltank_battery, except:
-//   - part name                    etk854hybrid_fueltank_battery_diesel
-//   - mainTank energyType          "diesel"  (the base diesel engine part
-//     declares requiredEnergyType:"diesel", a gasoline tank would not feed it)
-//   - selfIgnitionCoef 0.03 -> 0.02 on the fuel nodes, matching the base game
-//     etk800_fueltank_diesel (diesel is less volatile than gasoline)
-// Battery is unchanged: 13.5 kWh, same nodes/beams/mounts.
+//   - mainTank energyType "diesel" (the base diesel engine declares
+//     requiredEnergyType "diesel", a gasoline tank would not feed it)
+//   - selfIgnitionCoef 0.02 instead of 0.03 on the fuel nodes, as in the base
+//     game etk800_fueltank_diesel (diesel is less volatile than gasoline)
+// Battery unchanged: 13.5 kWh, same nodes / beams / mounts.
 //
 // Node IDs are intentionally the same as in the petrol variant: both parts
-// occupy the SAME slot (etk800_fueltank), so only ever one of them is loaded
-// in a config -> no ID collision possible.
-//
-// Author: ETK 854 Hybrid Project   Version: 1.0 (2026-08-13)
+// occupy the same slot (etk800_fueltank), so only one of them is ever loaded.
 // ============================================================================
 "etk854hybrid_fueltank_battery_diesel": {
     "information":{

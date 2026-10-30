@@ -1,6 +1,8 @@
 /* ETK 854 ActiveHybrid - centre screen "energy flow" page (512 x 256)
  * Rendered as the emissive map of the stock "etk800_screen" material; the
  * mesh shows ~99 % of the texture, keep >= 4 px margin at every edge.
+ * The trailer page (trailer stability, group #trlPage) uses the same classes
+ * and presentation attributes only; no extra rules.
  */
 @font-face {
   font-family: "Etk854Cond";
@@ -47,6 +49,6 @@ html, body {
   stroke-width: 2;
   stroke-dasharray: none;
 }
-/* NO CSS animations / transitions (2026-10): a BeamNG 0.39.4 vehicle HTML
- * texture stopped showing DOM updates once an infinite CSS animation ran;
- * dashes and blinks are driven by etk854hybrid_navi_screen.js animate(). */
+/* NO CSS animations / transitions: a BeamNG 0.39.4 vehicle HTML texture
+ * stops showing DOM updates once an infinite CSS animation runs; dashes and
+ * blinks are driven by etk854hybrid_navi_screen.js animate(). */

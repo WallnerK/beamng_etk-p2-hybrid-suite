@@ -1,52 +1,41 @@
 {
 // ====================================================================
-// ETK 854 ActiveHybrid - Anhaengekupplungen (tow hitches)
+// ETK 854 ActiveHybrid - tow hitches
 // ====================================================================
+// Stock body slot "etk800_towhitch" carries nodeOffset (0, -0.30, -0.16),
+// which the slot system adds to every node and flexbody pos of the part
+// and passes on to child slots (nodeOffset + nodeMove add up). All
+// coordinates below are in the same pre-offset frame as the stock 0.39.4
+// hitch.
 //
-// All parts go into the stock wagon/sedan body slot "etk800_towhitch"
-// (etk800.zip vehicles/etk800/etk800_body_wagon.jbeam:49).  That slot
-// carries {"nodeOffset":{"x":0,"y":-0.30,"z":-0.16}}, which the jbeam
-// slot system adds to EVERY node AND flexbody pos of the part and passes
-// on to child slots (lua/common/jbeam/slotSystem.lua:260-262 merges the
-// parent slot options into each child slot; utils.lua:260-276 adds
-// nodeOffset + nodeMove additively).  So all coordinates below are
-// authored in the same PRE-offset frame as the stock 0.39.4 hitch
-// (etk800.zip etk800_towhitch.jbeam - NOT the outdated C_CODE extract).
+// hyb_ names throughout, so the stock tow_hitch_* attachments (tw1/tw2/...)
+// do not fit; each hitch has its own ball-mount child slot
+// (etk854hybrid_towball_eu / _hd). Empty child slot = ball removed.
 //
-// Every node / rail / breakGroup / trigger carries the hyb_ prefix, so
-// the stock tow_hitch_* attachments (which need tw1/tw2/... names) do
-// NOT fit here; we ship our own ball mounts in our own child slots:
-//   etk854hybrid_towhitch_eu -> slot etk854hybrid_towball_eu
-//   etk854hybrid_towhitch_hd -> slot etk854hybrid_towball_hd
-// Emptying the child slot = ball removed (like a production detachable tow hitch).
+// Coupling: the active car-side node carries couplerTag "tow_hitch",
+// couplerRadius 1, like every stock car ball (stock car-size trailers carry
+// the passive tag). beamstate.attachCouplers uses the ACTIVE node's
+// couplerStrength, so the car side sets the break force: EU 2001000
+// (stock), HD 3001000. The HD combo adds an active "pintle" node (dollies,
+// tiltdeck pintle tongue), toggled by pintleHitchToggle or the coupler
+// key (L).
 //
-// Coupling: the car-side (active) node carries couplerTag "tow_hitch",
-// couplerRadius 1 - exactly like every stock car ball (common.zip
-// towhitch_attachments.jbeam:1126).  Every stock car-size trailer
-// (boxutility, boxutility_large, caravan, cargotrailer, tsfb, tiltdeck
-// tongue) carries the passive tag "tow_hitch".  beamstate.attachCouplers
-// (lua/vehicle/beamstate.lua:297-304) passes the ACTIVE node's
-// couplerStrength to obj:attachCoupler, so the car side decides the
-// break force: EU 2001000 (stock), HD 3001000.
-// The HD pintle combo adds a second active node with couplerTag
-// "pintle" (passive tag on dolly_single/dolly_double and the tiltdeck
-// 30ft pintle tongue).  It is toggled by the stock interaction action
-// pintleHitchToggle (common.zip common_default.interaction.json) or by
-// the generic coupler key (L -> beamstate.toggleCouplers()).
-//
-// World positions after the body nodeOffset (rear axle hub ~y1.50):
+// World positions after nodeOffset (rear axle hub ~y1.50):
 //   EU ball              (0, 2.544, 0.465)
 //   HD 2in-rise ball     (0, 2.547, 0.435)   default HD mount
 //   HD 4in-rise ball     (0, 2.547, 0.490)
-//   HD pintle (combo)    (0, 2.610, 0.545)   eye node ~0.11 m above the
-//     ball: stock pintle tongues carry their coupler that much higher than
-//     the ball tongue of the same frame (tiltdeck_tongue.jbeam:612 t4 z0.569
-//     tow_hitch vs :698 t4 z0.678 pintle; dollies z0.77-0.80 vs car
-//     trailers z0.43-0.44), so the trailer sits level on the pintle.
+//   HD pintle (combo)    (0, 2.610, 0.545)   ~0.11 m above the ball, as
+//     stock pintle tongues carry their coupler higher -> trailer sits level.
 //
-// components.hasDiffuserCutout switches the stock sport bumper and all
-// etk800_diffuser_R_* meshes to their *_cut variants
-// (etk800_bumper_R.jbeam:1001,1495-1543) - same as the stock hitch.
+// components.hasDiffuserCutout switches bumper / diffuser meshes to their
+// *_cut variants, as the stock hitch.
+//
+// Trailer stability: both hitch parts declare etk854hybrid_trailerStab.
+// The beams from the carrier (hyb_tw* nodes) to the body act as a 3-axis
+// load pin (drawbar force, lateral force, tongue load); the ball mounts
+// connect only to the carrier, so they are part of the measured assembly.
+// Hidden dev switch $etk854_tsa_enable; the calibration section is
+// identical in both parts.
 // ====================================================================
 "etk854hybrid_towhitch_eu": {
     "information":{
@@ -55,9 +44,8 @@
         "value":1150,
     },
     "slotType" : "etk800_towhitch",
-    // Serien-AHK-Niveau: Geometrie + Steifigkeit 1:1 wie die 0.39.4-Stock-AHK
-    // (etk800.zip etk800_towhitch.jbeam:17-121), nur Namen mit hyb_-Prefix.
-    // Receiver ~17.6 kg, Kugelkopf ~10 kg.
+    // Geometry + stiffness 1:1 as the stock hitch, hyb_ names.
+    // Receiver ~17.6 kg, ball mount ~10 kg.
     "slots2": [
         ["name", "allowTypes", "denyTypes", "default", "description"],
         ["etk854hybrid_towball_eu", ["etk854hybrid_towball_eu"], [], "etk854hybrid_towball_eu", "Tow Ball (empty = removed)", {"nodeMove2":{"x":0.00, "y":2.507, "z":0.435}}],
@@ -65,6 +53,16 @@
     "components":{
         "hasDiffuserCutout":true,
     },
+    "variables": [
+        ["name", "type", "unit", "category", "default", "min", "max", "title", "description"],
+        ["$etk854_tsa_enable", "range", "0=off/1=on", "Chassis", 1, 0, 1, "Trailer Stability (development)", "Development switch for the trailer stability function of the stability control (part of the tow hitch). 1 = on (default). Not shown in the tuning menu.", {"minDis":0, "maxDis":1, "stepDis":1, "subCategory":"Trailer Stability", "hidden":true}],
+    ],
+    "controller": [
+        ["fileName"],
+        // Own name/type, not under drivingDynamics/: the CMU all-active rule never applies.
+        // Registers a yawControl component (lamp / escActive only in braking stages).
+        ["etk854hybrid_trailerStab", {"name":"etk854hybrid_trailerStab", "enabled":"$etk854_tsa_enable"}]
+    ],
     "flexbodies": [
         ["mesh", "[group]:", "nonFlexMaterials"],
         ["eu_tow_beam", ["hyb_towhitch_recv"], [], {"pos":{"x":0.000, "y":2.597, "z":0.490}, "scale":{"x":1.17, "y":1.00, "z":1.0}}],
@@ -179,6 +177,53 @@
         ["hyb_tw1", "hyb_tw1r", "hyb_tw2"],
         {"group":""},
     ],
+    // Calibration, merged into the controller's jbeamData (same values as its
+    // built-in defaults; units and meaning: see the controller).
+    "etk854hybrid_trailerStab": {
+        "gate":   {"swayOnKmh":55, "swayOffKmh":45, "cornerOnKmh":40, "cornerOffKmh":35, "stopKmh":40, "swayInDtc":true},
+        "ref":    {"frontAngleLinDeg":33.67, "frontAngleCubDeg":3.63, "frontRackFactorRef":0.14, "rasCreditTauS":0.15,
+                   "maxLatAcc":9.5, "steerRateLpHz":10, "vchDefault":55},
+        "filt":   {"bpdHpHz":0.3, "bpdLpHz":1.2, "bpcHpHz":0.25, "bpcLpHz":2.5, "ampHoldTauS":1.0,
+                   "rawLpHz":2.5, "rawMeanHz":0.05},
+        "det":    {"hystDegS":0.5, "fMinHz":0.35, "fMaxHz":1.2, "learnBand":0.3, "learnMinHw":4,
+                   "a1DegS":1.5, "n1":2, "a2DegS":2.0, "n2":3, "gNearCrit":0.7, "gNoDecay":1.0, "a3DegS":3.0, "n3":2,
+                   "a3BigDegS":5.0,
+                   "growth":1.25, "growthRsDeg":0.4, "rawFrac":0.5, "soloS3MinHw":4,
+                   "exitDegS":1.0, "exitS":1.5, "reactS":5.0, "reactScale":0.7, "lowTongueScale":0.8,
+                   "s3ExitDegS":1.5, "s3DropKmh":10, "s3MaxS":8.0,
+                   "persistN":3, "persistWinS":60.0, "persistOccS":10.0, "persistOccWinS":30, "persistDropKmh":15,
+                   "maxActiveS":20.0, "suspendS":60.0,
+                   "qMax":0.6, "qMaxPin":0.6, "steerRateDegS":10.0, "steerHoldS":0.3,
+                   "ayMin":0.15, "fyMinN":150, "fyEarlyN":600, "lampOffHoldS":0.15},
+        "ras":    {"k1":0.30, "k2":0.18, "maxDeg":1.0, "signWinS":3.0, "signFrac":-0.2, "signMinSum":0.5,
+                   "signLagS":0.12, "signMinDeg":0.2},
+        "wheel":  {"kNmPerDegS":1000, "dbDegS":0.5, "maxMzNm":3000, "lambda0":0.05, "lambda1":0.08,
+                   "rampNmS":10000, "rampDnNmS":50000, "halfTrackM":0.78, "pauseOnTcs":true},
+        "decel":  {"s3Ms2":2.5, "s2EvtMs2":1.0, "jerkUp":10.0, "jerkDn":10.0, "brakeMax":0.35, "kp":0.04, "ki":0.08,
+                   "iMax":0.15, "releasePerS":2.0, "capNoPinMs2":2.0, "frictionMs2":8.0,
+                   "pushMinN":1200, "pushFrac":0.08, "pushKp":0.5, "pushKi":1.0, "pushDecay":1.0, "massDefault":1500},
+        "corner": {"aB0":5.0, "noCouplerScale":1.2, "tpS":0.5, "k1Frac":0.9, "k1ExitFrac":0.8, "k1ExitS":0.5,
+                   "k1UnwindS":0.2, "k1UnwindFrac":0.8, "k2ExitFrac":0.85, "k2Base":2.5, "k2Slope":2.0, "k2Max":3.0,
+                   "muLow":0.7, "muLowS":60, "muEventMs2":4.0,
+                   "muMinKmh":20, "muBlankS":3.0, "muTcTf":0.9, "muQualS":0.3, "muSlip":0.06,
+                   "massRatioLo":0.5, "massRatioHi":1.0, "massFactorMin":0.85, "massFactorUnknown":0.9,
+                   "laMaxFrac":1.5, "respTauS":0.5, "laMinHoldS":0.3, "laRateFrac":0.9, "laRateLpHz":4.0, "laHoldS":0.1,
+                   "laOnce":true, "ayMeasCap":1.7, "ayMeasLpHz":3.0, "windFrac":0.1,
+                   "tqRecNmS":150, "tqRecFrac":0.9, "tqRecDecMs2":0.05, "tqRecLpHz":1.0},
+        "pin":    {"enabled":true, "nodePrefix":"hyb_tw", "useTorsion":false, "torsionSign":1, "imuComp":false,
+                   "axComp":true, "subSample":2, "tareS":2.0, "tareMaxKmh":0.5, "validMinKmh":5, "maxN":25000,
+                   "implausS":0.2, "implausHoldS":2.0, "contactN":1500, "deformEps":0.001, "checkS":0.25,
+                   "ctlLpHz":5.0, "displayHz":1.0},
+        "est":    {"massHz":10, "massLambda":0.9, "massExcMin":4.0, "massMin":0, "massMax":6000,
+                   "massWinS":0.6, "massGapS":0.8, "massStepMs2":0.8, "massSteadyMs2":0.3, "massDvKmh":4, "massEvtMin":2,
+                   "massLpHz":2.0, "massQPublish":0.5, "tongueLpHz":0.3, "tongueLowKg":25, "tongueLowFrac":0.04,
+                   "vchWindowS":2.0, "vchLambda":0.9, "vchMin":20, "vchMax":80, "keepAfterResetS":5.0, "massQuietS":2.0},
+        "rec":    {"vRecKmh":100, "evtDropKmh":15, "evtHoldS":600, "overKmh":5, "overS":3, "msgRepeatS":20,
+                   "lowTongueVRecKmh":80, "cruiseCancel":true, "k2MsgS":0.45, "k2MsgFrac":1.05},
+        "ysc":    {"minKmh":20, "maxKmh":80, "minDeffDeg":1.0, "minYawDegS":3.0, "maxDdotDegS":2.0, "minAyMs2":1.0,
+                   "windowS":1.0, "windows":3, "agreeFrac":0.9},
+        "dev":    {"componentOrder":15}
+    }
 },
 
 "etk854hybrid_towhitch_hd": {
@@ -188,16 +233,12 @@
         "value":1900,
     },
     "slotType" : "etk800_towhitch",
-    // Verstaerkte US-2-Zoll-Aufnahme auf dem gleichen Karosserie-Knotengeruest
-    // (Rahmenenden r1/r2/r3/r4 + zusaetzlich r7-Reihe, r3/r4 Mitte).
-    // Werte vs. Stock: Karosseriebeams 2000150/60300/283000 -> 2800150/110000/650000,
-    // intern 1264150/90300/623000 -> 1764150/150000/1100000 (pickup_towhitch = 623000,
-    // alte ETK-Einteiler-AHK = 890000), Torsionbars 151000/351000 -> 251000/551000.
-    // Knotenmassen x1.5-1.75 gegenueber Stock, damit k/m (Integrator-Stabilitaet
-    // bei dt = 0.5 ms) auf Stock-Niveau bleibt. Receiver ~29 kg + Traeger ~15 kg.
-    // Meshes: common.zip towhitch/tow_hitch.dae (tow_beam_b, tow_mount_hz_*_wide,
-    // tow_reciever_b); Positionen aus fullsize_towhitch.jbeam:16-22 auf die ETK-Knoten
-    // umgerechnet (Rohr-Unterkante = hyb_tw1 z, Querrohr ueberlappt Rohr-Oberkante).
+    // Reinforced 2 inch receiver on the same body nodes plus the r7 row and
+    // the r3/r4 centre. Beams and torsion bars stiffer and stronger than the
+    // stock-level EU part; node masses x1.5-1.75 so k/m (integrator stability
+    // at dt = 0.5 ms) stays at stock level. Receiver ~29 kg + carrier ~15 kg.
+    // Meshes: common.zip tow_hitch.dae, positions from fullsize_towhitch.jbeam
+    // mapped onto the ETK nodes.
     "slots2": [
         ["name", "allowTypes", "denyTypes", "default", "description"],
         ["etk854hybrid_towball_hd", ["etk854hybrid_towball_hd"], [], "etk854hybrid_towball_hd_rise2", "Ball Mount / Coupling", {"nodeMove2":{"x":0.00, "y":2.510, "z":0.435}}],
@@ -205,6 +246,16 @@
     "components":{
         "hasDiffuserCutout":true,
     },
+    "variables": [
+        ["name", "type", "unit", "category", "default", "min", "max", "title", "description"],
+        ["$etk854_tsa_enable", "range", "0=off/1=on", "Chassis", 1, 0, 1, "Trailer Stability (development)", "Development switch for the trailer stability function of the stability control (part of the tow hitch). 1 = on (default). Not shown in the tuning menu.", {"minDis":0, "maxDis":1, "stepDis":1, "subCategory":"Trailer Stability", "hidden":true}],
+    ],
+    "controller": [
+        ["fileName"],
+        // Own name/type, not under drivingDynamics/: the CMU all-active rule never applies.
+        // Registers a yawControl component (lamp / escActive only in braking stages).
+        ["etk854hybrid_trailerStab", {"name":"etk854hybrid_trailerStab", "enabled":"$etk854_tsa_enable"}]
+    ],
     "flexbodies": [
         ["mesh", "[group]:", "nonFlexMaterials"],
         ["tow_beam_b", ["hyb_towhitch_recv"], [], {"pos":{"x":0.000, "y":2.520, "z":0.590}, "scale":{"x":1.20, "y":1.00, "z":1.0}}],
@@ -306,22 +357,17 @@
         ["hyb_tw11", "r4rr"],
         ["hyb_tw2", "r1", {"beamSpring":3200150, "optional":true}],
         ["hyb_tw1", "r1", {"beamSpring":3200150, "optional":true}],
-        //--HD: additional load paths into the rear sill (r7 row) and the centre
-        //  floor cross member (r3/r4) - spreads drawbar + tongue load so the
-        //  r1/r4 corners do not tear first (stock body beams 60300/283000 would
-        //  fail long before a 3e6 coupler). No links to rfl1l/rfl1r: those are
-        //  1.25 kg fender-liner flexbody helpers hung on 3500-deform beams
-        //  (etk800_body_wagon.jbeam:293-295, 1612-1625) - no structure there.
-        //  optional:true -> silently skipped on a body without these nodes.
+        //--HD: extra load paths into the rear sill (r7) and the floor cross
+        //  member (r3/r4), so the r1/r4 corners do not tear first. No links to
+        //  rfl1l/rfl1r (fender-liner flexbody helpers, no structure).
         {"beamSpring":2400150, "beamDamp":450},
         {"beamDeform":110000, "beamStrength":650000},
         {"breakGroup":"hyb_towRecv_L"},
         ["hyb_tw1l", "r7ll", {"optional":true}],
         {"breakGroup":"hyb_towRecv_R"},
         ["hyb_tw1r", "r7rr", {"optional":true}],
-        //centreline links belong to BOTH receiver groups (beamstate.lua:1203
-        //accepts table breakGroups): whichever side lets go first frees them,
-        //so the receiver drops off like stock instead of hanging on 650 kN beams.
+        //centreline links belong to both receiver groups (table breakGroup):
+        //whichever side lets go first frees them, so the receiver drops off.
         {"breakGroup":["hyb_towRecv_L", "hyb_towRecv_R"]},
         ["hyb_tw11", "r7", {"optional":true}],
         ["hyb_tw12", "r7", {"optional":true}],
@@ -341,6 +387,53 @@
         ["hyb_tw1", "hyb_tw1r", "hyb_tw2"],
         {"group":""},
     ],
+    // Calibration, merged into the controller's jbeamData (same values as its
+    // built-in defaults; units and meaning: see the controller).
+    "etk854hybrid_trailerStab": {
+        "gate":   {"swayOnKmh":55, "swayOffKmh":45, "cornerOnKmh":40, "cornerOffKmh":35, "stopKmh":40, "swayInDtc":true},
+        "ref":    {"frontAngleLinDeg":33.67, "frontAngleCubDeg":3.63, "frontRackFactorRef":0.14, "rasCreditTauS":0.15,
+                   "maxLatAcc":9.5, "steerRateLpHz":10, "vchDefault":55},
+        "filt":   {"bpdHpHz":0.3, "bpdLpHz":1.2, "bpcHpHz":0.25, "bpcLpHz":2.5, "ampHoldTauS":1.0,
+                   "rawLpHz":2.5, "rawMeanHz":0.05},
+        "det":    {"hystDegS":0.5, "fMinHz":0.35, "fMaxHz":1.2, "learnBand":0.3, "learnMinHw":4,
+                   "a1DegS":1.5, "n1":2, "a2DegS":2.0, "n2":3, "gNearCrit":0.7, "gNoDecay":1.0, "a3DegS":3.0, "n3":2,
+                   "a3BigDegS":5.0,
+                   "growth":1.25, "growthRsDeg":0.4, "rawFrac":0.5, "soloS3MinHw":4,
+                   "exitDegS":1.0, "exitS":1.5, "reactS":5.0, "reactScale":0.7, "lowTongueScale":0.8,
+                   "s3ExitDegS":1.5, "s3DropKmh":10, "s3MaxS":8.0,
+                   "persistN":3, "persistWinS":60.0, "persistOccS":10.0, "persistOccWinS":30, "persistDropKmh":15,
+                   "maxActiveS":20.0, "suspendS":60.0,
+                   "qMax":0.6, "qMaxPin":0.6, "steerRateDegS":10.0, "steerHoldS":0.3,
+                   "ayMin":0.15, "fyMinN":150, "fyEarlyN":600, "lampOffHoldS":0.15},
+        "ras":    {"k1":0.30, "k2":0.18, "maxDeg":1.0, "signWinS":3.0, "signFrac":-0.2, "signMinSum":0.5,
+                   "signLagS":0.12, "signMinDeg":0.2},
+        "wheel":  {"kNmPerDegS":1000, "dbDegS":0.5, "maxMzNm":3000, "lambda0":0.05, "lambda1":0.08,
+                   "rampNmS":10000, "rampDnNmS":50000, "halfTrackM":0.78, "pauseOnTcs":true},
+        "decel":  {"s3Ms2":2.5, "s2EvtMs2":1.0, "jerkUp":10.0, "jerkDn":10.0, "brakeMax":0.35, "kp":0.04, "ki":0.08,
+                   "iMax":0.15, "releasePerS":2.0, "capNoPinMs2":2.0, "frictionMs2":8.0,
+                   "pushMinN":1200, "pushFrac":0.08, "pushKp":0.5, "pushKi":1.0, "pushDecay":1.0, "massDefault":1500},
+        "corner": {"aB0":5.0, "noCouplerScale":1.2, "tpS":0.5, "k1Frac":0.9, "k1ExitFrac":0.8, "k1ExitS":0.5,
+                   "k1UnwindS":0.2, "k1UnwindFrac":0.8, "k2ExitFrac":0.85, "k2Base":2.5, "k2Slope":2.0, "k2Max":3.0,
+                   "muLow":0.7, "muLowS":60, "muEventMs2":4.0,
+                   "muMinKmh":20, "muBlankS":3.0, "muTcTf":0.9, "muQualS":0.3, "muSlip":0.06,
+                   "massRatioLo":0.5, "massRatioHi":1.0, "massFactorMin":0.85, "massFactorUnknown":0.9,
+                   "laMaxFrac":1.5, "respTauS":0.5, "laMinHoldS":0.3, "laRateFrac":0.9, "laRateLpHz":4.0, "laHoldS":0.1,
+                   "laOnce":true, "ayMeasCap":1.7, "ayMeasLpHz":3.0, "windFrac":0.1,
+                   "tqRecNmS":150, "tqRecFrac":0.9, "tqRecDecMs2":0.05, "tqRecLpHz":1.0},
+        "pin":    {"enabled":true, "nodePrefix":"hyb_tw", "useTorsion":false, "torsionSign":1, "imuComp":false,
+                   "axComp":true, "subSample":2, "tareS":2.0, "tareMaxKmh":0.5, "validMinKmh":5, "maxN":25000,
+                   "implausS":0.2, "implausHoldS":2.0, "contactN":1500, "deformEps":0.001, "checkS":0.25,
+                   "ctlLpHz":5.0, "displayHz":1.0},
+        "est":    {"massHz":10, "massLambda":0.9, "massExcMin":4.0, "massMin":0, "massMax":6000,
+                   "massWinS":0.6, "massGapS":0.8, "massStepMs2":0.8, "massSteadyMs2":0.3, "massDvKmh":4, "massEvtMin":2,
+                   "massLpHz":2.0, "massQPublish":0.5, "tongueLpHz":0.3, "tongueLowKg":25, "tongueLowFrac":0.04,
+                   "vchWindowS":2.0, "vchLambda":0.9, "vchMin":20, "vchMax":80, "keepAfterResetS":5.0, "massQuietS":2.0},
+        "rec":    {"vRecKmh":100, "evtDropKmh":15, "evtHoldS":600, "overKmh":5, "overS":3, "msgRepeatS":20,
+                   "lowTongueVRecKmh":80, "cruiseCancel":true, "k2MsgS":0.45, "k2MsgFrac":1.05},
+        "ysc":    {"minKmh":20, "maxKmh":80, "minDeffDeg":1.0, "minYawDegS":3.0, "maxDdotDegS":2.0, "minAyMs2":1.0,
+                   "windowS":1.0, "windows":3, "agreeFrac":0.9},
+        "dev":    {"componentOrder":15}
+    }
 },
 
 "etk854hybrid_towball_eu": {
@@ -350,8 +443,8 @@
         "value":180,
     },
     "slotType" : "etk854hybrid_towball_eu",
-    // = stock tow_hitch_eu (common.zip towhitch_attachments.jbeam:1066-1198), hyb_-Namen.
-    // Kugel Welt (0, 2.544, 0.465). couplerStrength 2001000 = Stock-PKW-Wert.
+    // = stock tow_hitch_eu (towhitch_attachments.jbeam), hyb_ names;
+    // couplerStrength = stock car value.
     "flexbodies": [
         ["mesh", "[group]:", "nonFlexMaterials"],
         ["eu_tow_hitch", ["hyb_towhitch_ball"], [], {"pos":{"x":0.0, "y":0.090, "z":0.055}, "rot":{"x":0, "y":0, "z":0}}],
@@ -427,7 +520,7 @@
         {"breakGroup":"hyb_towPin"},
         ["hyb_tw42", "hyb_tw3"],
         ["hyb_tw32", "hyb_tw2", {"beamSpring":3564150}],
-        //pin break triggers (stock pattern, towhitch_attachments.jbeam:1152-1156)
+        //pin break triggers (stock towhitch_attachments pattern)
         {"beamPrecompression":1, "beamType":"|SUPPORT", "beamLongBound":0.3, "beamShortBound":1.0},
         {"beamSpring":0, "beamDamp":0},
         {"beamDeform":"FLT_MAX", "beamStrength":"FLT_MAX"},
@@ -484,10 +577,10 @@
         "value":150,
     },
     "slotType" : "etk854hybrid_towball_hd",
-    // Geometrie = stock tow_hitch_riser_2 (towhitch_attachments.jbeam:406-537).
-    // Kugel Welt (0, 2.547, 0.435): 3 cm tiefer als EU - schwere Tandem-Anhaenger
-    // (cargotrailer, boxutility_large, tiltdeck) stehen damit waagerechter.
-    // couplerStrength 3001000 (Stock PKW 2001000, pintle 2801000).
+    // Geometry = stock tow_hitch_riser_2 (towhitch_attachments.jbeam).
+    // Ball 3 cm lower than EU, so heavy tandem trailers (cargotrailer,
+    // boxutility_large, tiltdeck) sit more level. couplerStrength above the
+    // stock pintle (2801000).
     "flexbodies": [
         ["mesh", "[group]:", "nonFlexMaterials"],
         ["tow_hitch_a", ["hyb_towhitch_ball"], [], {"pos":{"x":0.0, "y":0.100, "z":0.040}, "rot":{"x":0, "y":0, "z":0}}],
@@ -564,7 +657,7 @@
         {"breakGroup":"hyb_towPin"},
         ["hyb_tw42", "hyb_tw3"],
         ["hyb_tw32", "hyb_tw2", {"beamSpring":4964150}],
-        //pin break triggers (stock pattern, towhitch_attachments.jbeam:1152-1156)
+        //pin break triggers (stock towhitch_attachments pattern)
         {"beamPrecompression":1, "beamType":"|SUPPORT", "beamLongBound":0.3, "beamShortBound":1.0},
         {"beamSpring":0, "beamDamp":0},
         {"beamDeform":"FLT_MAX", "beamStrength":"FLT_MAX"},
@@ -621,8 +714,8 @@
         "value":160,
     },
     "slotType" : "etk854hybrid_towball_hd",
-    // Geometrie = stock tow_hitch_riser_4 (towhitch_attachments.jbeam:540-671).
-    // Kugel Welt (0, 2.547, 0.490) fuer Anhaenger mit hoher Deichsel (Caravan, tsfb).
+    // Geometry = stock tow_hitch_riser_4 (towhitch_attachments.jbeam).
+    // For trailers with a high tongue (caravan, tsfb).
     "flexbodies": [
         ["mesh", "[group]:", "nonFlexMaterials"],
         ["tow_hitch_b", ["hyb_towhitch_ball"], [], {"pos":{"x":0.0, "y":0.100, "z":0.040}, "rot":{"x":0, "y":0, "z":0}}],
@@ -699,7 +792,7 @@
         {"breakGroup":"hyb_towPin"},
         ["hyb_tw42", "hyb_tw3"],
         ["hyb_tw32", "hyb_tw2", {"beamSpring":4964150}],
-        //pin break triggers (stock pattern, towhitch_attachments.jbeam:1152-1156)
+        //pin break triggers (stock towhitch_attachments pattern)
         {"beamPrecompression":1, "beamType":"|SUPPORT", "beamLongBound":0.3, "beamShortBound":1.0},
         {"beamSpring":0, "beamDamp":0},
         {"beamDeform":"FLT_MAX", "beamStrength":"FLT_MAX"},
@@ -756,16 +849,10 @@
         "value":260,
     },
     "slotType" : "etk854hybrid_towball_hd",
-    // 2in-Rise-Kugel wie _rise2 PLUS ein zweiter aktiver Koppelknoten hyb_twp mit
-    // couplerTag 'pintle' (ohne couplerLock -> auch per L-Taste loesbar) fuer
-    // Pintle-Anhaenger: dolly_single/dolly_double, tiltdeck 30ft_pintle
-    // (passive Tags: dolly_single.jbeam:116, tiltdeck_tongue.jbeam:698).
-    // Pintle Welt (0, 2.610, 0.545) = ~0.11 m UEBER der Kugel: Stock-Pintle-
-    // Deichseln tragen ihren Koppelknoten so viel hoeher als die Kugel-Deichsel
-    // desselben Rahmens (tiltdeck_tongue.jbeam:612 z0.569 vs :698 z0.678), sonst
-    // haengt der Anhaenger mit der Nase ~0.25 m zu tief. common.zip hat kein
-    // Pintle-Haken-Mesh -> optisch als Schaekel-Oese (tow_shackle) ueber dem
-    // Traegerende dargestellt.
+    // Ball as _rise2 PLUS an active "pintle" coupler hyb_twp (no couplerLock
+    // -> also released by the L key) for dollies and the tiltdeck pintle
+    // tongue. ~0.11 m above the ball (see header), otherwise the trailer nose
+    // hangs ~0.25 m low. No pintle hook mesh in common.zip -> tow_shackle.
     "flexbodies": [
         ["mesh", "[group]:", "nonFlexMaterials"],
         ["tow_hitch_a", ["hyb_towhitch_ball"], [], {"pos":{"x":0.0, "y":0.100, "z":0.040}, "rot":{"x":0, "y":0, "z":0}}],
@@ -854,7 +941,7 @@
         {"breakGroup":"hyb_towPin"},
         ["hyb_tw42", "hyb_tw3"],
         ["hyb_tw32", "hyb_tw2", {"beamSpring":4964150}],
-        //pin break triggers (stock pattern, towhitch_attachments.jbeam:1152-1156)
+        //pin break triggers (stock towhitch_attachments pattern)
         {"beamPrecompression":1, "beamType":"|SUPPORT", "beamLongBound":0.3, "beamShortBound":1.0},
         {"beamSpring":0, "beamDamp":0},
         {"beamDeform":"FLT_MAX", "beamStrength":"FLT_MAX"},

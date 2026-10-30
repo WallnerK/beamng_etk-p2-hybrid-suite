@@ -1,41 +1,21 @@
 {
 // ============================================================================
-// ETK 854 ActiveHybrid - rear differential with an electronically SCHEDULED
-// multi-plate lock (production-style active rear diff lock philosophy, passive-first).
-//
-// Base: stock "etk800_differential_R" (content/vehicles/etk800.zip
-// vehicles/etk800/etk800_differential_R.jbeam, 0.39.4). slots2, section
-// values, node, beams and flexbody are copied 1:1 - only the powertrain row,
-// the default final drive (2.81 = every R6 config; the .pc files set it
-// anyway) and the controller list differ.
-//
-// PHYSICS = the stock LSD model (lua/vehicle/powertrain/differential.lua
-// LSDUpdateTorque :42-66, diffType "lsd"), evaluated in Lua every physics
-// step from the plain device table:
+// ETK 854 ActiveHybrid - rear multi-plate LSD with an electronically scheduled
+// lock (controller etk854hybrid_diffLock picks the preset).
+// Stock etk800_differential_R 1:1 except the powertrain row, the default final
+// drive 2.81 and the controllers.
+// Physics = stock LSD model (differential.lua, diffType "lsd"):
 //   lsdTorque = lsdPreload + min(coef,1)*|T_axle| + activeLockTorque*activeLockCoef
-//   coef = lsdLockCoef under drive, lsdRevLockCoef under coast
-// T_axle is already multiplied by the final drive, so coef 0.5 = capacity
-// T_axle/2 = one wheel may carry the whole axle torque = 100 % lock under
-// drive, in every gear, with converter multiplication and every boost stage.
-// The jbeam values below are the OPEN preset (all 0) = fail-safe if the
-// scheduler is missing: identical to the stock open diff except its
-// 0.034*|T| friction term (differential.lua:36-39, <= 0.34 % of T).
-//
-// lockTorque / lockSpring deliberately NOT set: lockSpringAutoCalc
-// (differential.lua:353, :235-238) then gives lockSpring = lockTorque =
-// 250^2 * min(child inertia), i.e. the stiff spring and a clamp far above any
-// lsdTorque. Setting lockTorque here would cap the lock AND soften the spring.
-// activeLockTorque must be explicit: otherwise it is copied from the
-// pre-autocalc lockTorque default (500, :346/:352).
-//
-// Single-string diffType: availableModes = {"lsd"} (:319-326), so there is no
-// powertrain UI toggle button and the stock "toggleDiffMode" action does
-// nothing - the lock follows Driving Experience x DSC x xAllrad only.
-//
-// Node "rdiff" is NOT hyb_-prefixed: it is the slot contract node referenced
-// by the stock driveshaft and halfshaft parts (etk800_differential_R.jbeam
-// driveshaft/halfshaft beams). Only one part occupies the slot, no collision
-// (same situation as "tcase" in etk854hybrid_transfercase.jbeam).
+//   coef = lsdLockCoef (drive) / lsdRevLockCoef (coast)
+// T_axle includes the final drive, so coef 0.5 (capacity T_axle/2: one wheel
+// can carry the whole axle torque) = 100 % lock in every gear.
+// The jbeam values are the OPEN preset: fail-safe without the scheduler.
+// lockTorque / lockSpring not set: the autocalc gives a stiff spring with a
+// clamp far above any lsdTorque. activeLockTorque must be explicit (else it
+// copies the pre-autocalc default 500).
+// Single diffType = no UI toggle; the lock follows the drive modes only.
+// Node "rdiff" keeps its stock name: slot contract node of the stock
+// driveshaft and halfshaft parts.
 // ============================================================================
 "etk854hybrid_differential_R": {
     "information": {
@@ -51,14 +31,8 @@
         ["etk_finaldrive_R", ["etk_finaldrive_R"], [], "etk_finaldrive_R_281", "Rear Final Drive", {"coreSlot": true}]
     ],
 
-    // DISPLAY (lua/common/jbeam/variables.lua _sanitizeVars :208-256):
-    //   coefficients: unit "" + minDis/maxDis 0/100 -> the slider shows
-    //   0..100 % for 0..0.5 (stock race LSD pattern, etk800_differential_R.jbeam
-    //   $lsdlockcoef_R); stepDis 5 = 5 % steps (0.025).
-    //   switches: non-empty unit naming the encoding + minDis/maxDis/stepDis 1
-    //   (same as $etk854_awd_start2wd).
-    // Prefix $etk854_lsd_* - no clash with the stock $lsdpreload_R /
-    // $lsdlockcoef_R / $lsdlockcoefrev_R of the stock LSD parts.
+    // Coefficients 0..0.5 are shown as 0..100 % lock (stock $lsdlockcoef_R
+    // pattern). Prefix $etk854_lsd_* avoids the stock LSD variable names.
     "variables": [
         ["name", "type", "unit", "category", "default", "min", "max", "title", "description"],
         ["$etk854_lsd_sport_power", "range", "", "Differentials", 0.30, 0, 0.5, "Power Lock Rate (SPORT / DTC)", "Locking rate of the rear multi-plate differential under drive torque in SPORT and DTC. 100 % = fully locked under load.", {"minDis":0, "maxDis":100, "stepDis":5, "subCategory":"Rear"}],
@@ -72,20 +46,15 @@
 
     "controller": [
         ["fileName"],
-        // Stock brake-based EDL, SAME name and type as on the stock open diff:
-        // diffControl (etk_DSE) resolves it by name "lockRear" and type
-        // electronicDiffLock (diffControl.lua:183-211) and fades it out on
-        // oversteer in DSC/DTC exactly as today. Switched per preset by the
-        // scheduler (OPEN/SPORT on, TRACK/DRIFT off): its inner/outer guess
-        // comes from the steering sign and is wrong while countersteering.
+        // Stock brake-based EDL, stock name "lockRear" so the stock diffControl
+        // still manages it. Disabled in TRACK / DRIFT: its inner/outer wheel
+        // guess from the steering sign is wrong while countersteering.
         ["drivingDynamics/actuators/electronicDiffLock", {"name": "lockRear", "differentialName": "differential_R"}],
-        // Own name/type on purpose: diffControl ignores it (no stock typeName),
-        // so it is never opened by the stock oversteer logic.
+        // own name/type: the stock oversteer logic never opens it
         ["etk854hybrid_diffLock", {"name": "etk854hybrid_diffLock", "differentialName": "differential_R", "edlName": "lockRear", "slipHold": "$etk854_lsd_slip_hold", "dtcHold": "$etk854_lsd_dtc_hold"}]
     ],
 
-    // Merged into the controller's jbeamData (controller.lua init:
-    // tableMergeRecursive(row, v.data[name])). Lock % = 200 * coefficient.
+    // merged into the controller's jbeamData; lock % = 200 * coefficient
     "etk854hybrid_diffLock": {
         "presets": {
             "OPEN":  {"preload": 0,   "power": 0.0,  "coast": 0.0,  "edl": true,  "hold": false},
@@ -138,9 +107,8 @@
          {"nodeMaterial": "|NM_METAL"},
          {"frictionCoef": 0.5},
          {"group": "etk800_diff_R"},
-         // 40 kg like the stock OPEN diff (stock LSD parts use 45): keeps the
-         // rear axle mass, ride height and the self-leveling baselines
-         // (QA T26) identical to today.
+         // 40 kg like the stock open diff (keeps ride height and the
+         // self-leveling baselines)
          {"nodeWeight": 40},
          ["rdiff", 0, 1.41, 0.26],
          {"group": ""}

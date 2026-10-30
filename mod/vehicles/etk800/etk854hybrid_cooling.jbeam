@@ -2,55 +2,20 @@
 // =============================================================================
 //  ETK 854 ActiveHybrid - cooling module (radiator + PWM electric fan)
 // =============================================================================
-//  Replaces the stock "etk800_radiator" (slot etk800_radiator, provided by
-//  etk800_body_wagon.jbeam:53). Structure (nodes, beams, flexbody, deform group)
-//  is a 1:1 copy of the stock part in content/vehicles/etk800.zip
-//  vehicles/etk800/etk800_radiator.jbeam:2-80; only the node ids are prefixed
-//  (rad1/rad2 -> hyb_rad1/hyb_rad2). The only body references to rad2
-//  (etk800_body_wagon.jbeam:571-572) sit inside a /* */ block, so the rename
-//  breaks nothing. Group "etk_radiator" is kept because the stock flexbody
-//  (and the radtube/intercooler meshes of other parts) bind to it.
+//  Replaces the stock "etk800_radiator" (same slot). Nodes, beams, flexbody and
+//  deform group are a 1:1 copy of the stock part with prefixed node ids
+//  (hyb_rad1/hyb_rad2; the base body has no active references to rad1/rad2);
+//  group "etk_radiator" is kept because the stock flexbody and other parts'
+//  radtube/intercooler meshes bind to it.
 //
-//  Thermal model: lua/vehicle/powertrain/combustionEngineThermals.lua
-//    radiator heat flow  = (Tc - Tenv) * area * effectiveness * thermostat
-//                          * airCoef * coolantEfficiency               (:772)
-//    airCoef             = max(v / (15 + v), 0.1), v = max(0.8 * airflow,
-//                          fanAirSpeed)                           (:765-766)
-//    thermostat          = 1 K linear ramp above thermostatTemperature (:745)
-//    electric fan        = ONE binary stage, on at radiatorFanTemperature,
-//                          off at thermostat * 1.05                 (:714-731)
-//  Stock: 0.37 m2 x 12000 = 4440 W/K, fan 2.5 m/s at 100 C, thermostat 90.
-//  At standstill that is 4440 * 0.143 = 634 W/K with the fan on, which cannot
-//  carry the ~47-62 kW that N-charge (2900 rpm, 180 Nm regen load,
-//  etk854hybridControl.lua NCHG) puts into the coolant: 108-119 C at 25-35 C
-//  ambient in the replica simulation (plans/PLAN_KUEHLUNG.md).
-//
-//  This part:
-//    0.40 m2 x 13500 = 5400 W/K (+22 %). Deliberately BELOW the stock
-//    high-performance (6400), ttSport (9000) and race (10000) radiators: at
-//    >= 6000 W/K the 0.1 no-fan floor alone carries N-charge in mild weather
-//    and the fan would never run at standstill - not what a real car does.
-//    9.5 kg coolant (N57/B58 circuits hold ~9-10 l).
-//    Thermostat 97 C: centre of the production map-thermostat band (~90 C at high
-//    load, ~105-108 C in ECO part load); the base model has one fixed
-//    opening point, so the map itself is emulated by the controller below
-//    (high-load feed-forward on the fan).
-//    radiatorFanMaxAirSpeed 5.0 m/s = full PWM duty of an 850 W brushless fan
-//    (airCoef 0.25 at standstill vs 0.143 stock). The base binary fan is the
-//    FAILSAFE stage only: on at 114 C, off at 97 * 1.05 = 101.85 C (the base
-//    code forces on >= thermostat * 1.03 + 2 = 101.9 C, :1746-1751).
-//    Everything between 105 and 114 C is the stepless PWM fan emulated by
-//    lua/controller/etk854hybrid_cooling.lua, which adds exactly the extra
-//    radiator heat flow its airspeed would produce over the base airspeed.
-//    The PWM fan starts late (105 C, 35 % duty, 100 % at 112 C), stays off
-//    while the ram air already beats its 5 m/s (about 22 km/h) unless the
-//    coolant reaches 110 C, and is audible (own Electric_05 loop, volume
-//    volumeMax * sqrt(rotor speed)). At standstill it lets steam wisps
-//    (stock particle types 46/48) escape forward through the hood/grille gap:
-//    faint from 106 C while the fan runs or after key-off, light from 110 C,
-//    heavy from 115 C, handed over to the stock cap steam above 120 C.
-//    If that controller fails to load, the part still works as a plain
-//    5400 W/K radiator with a 5 m/s single-stage fan at 114 C.
+//  Radiator 0.40 m2 x 13500 = 5400 W/K, 9.5 kg coolant. The stock radiator gives
+//  only 634 W/K at standstill, too little for a standstill charge (~50-60 kW);
+//  from ~6000 W/K the 0.1 no-fan airflow floor alone would carry it and the fan
+//  would never run. Thermostat 97 C: centre of a map-thermostat band (the
+//  high-load map is emulated by the fan pre-control). The base binary fan is the
+//  failsafe stage only (on 114 C, off 97 * 1.05 = 101.85 C); 105-114 C is the
+//  stepless 850 W PWM fan of etk854hybrid_cooling.lua, which also emits the steam
+//  wisps. Without that controller: a plain radiator with a 5 m/s fan at 114 C.
 // =============================================================================
 "etk854hybrid_radiator": {
     "information":{
@@ -71,14 +36,11 @@
         "coolantVolume":9.5,
         "thermostatTemperature":97,
         "radiatorFanType":"electric",
-        // Failsafe stage of the base fan (see header). Hysteresis 114 -> 101.85 C.
+        // failsafe fan stage (see header)
         "radiatorFanTemperature":114,
         "radiatorFanMaxAirSpeed":5.0,
         "radiatorFanLoopEvent": "event:>Vehicle>Cooling Fan>Electric_05",
-        // Base sample plays at fixed pitch 1 while the failsafe stage runs; the
-        // controller's own source reaches this exact level/pitch at full duty
-        // (volumeMax below) and mutes itself while the base fan is on -> no
-        // doubling, no jump. Stock ETK radiators: 0.4-0.9 (etk800_radiator.jbeam).
+        // = controller volumeMax: seamless hand-over to the failsafe fan
         "radiatorFanVolume": 0.9,
 
         //damage deformGroups
@@ -87,13 +49,13 @@
 
     "controller": [
         ["fileName"],
+        // PWM fan / wisp controller; keep identical to the copy in the
+        // performance part below
         ["etk854hybrid_cooling", {
             "name": "etk854hybrid_cooling",
             "engineName": "mainEngine",
-            // PWM characteristic (coolant outlet temperature, C): the fan
-            // starts late at 105 C with 35 % (audible), 100 % at 112 C, off
-            // below 101 C after at least minOnTime s. Command duty is 0 or
-            // dutyMin..1, never in between.
+            // duty vs coolant (C): on at 105, linear 104 -> 112 = 0 -> 100 %
+            // with a 35 % floor, off below 101 after minOnTime (s)
             "fanOnTemp": 105.0,
             "fanOffTemp": 101.0,
             "dutyZeroTemp": 104.0,
@@ -103,58 +65,41 @@
             // command slew within dutyMin..1
             "rampUpPerSecond": 0.15,
             "rampDownPerSecond": 0.05,
-            // rotor inertia (airflow, power and sound follow the rotor):
-            // spool-up 0 -> 35 % in 2 s, run-down 35 % -> 0 in 7 s
+            // rotor inertia: 0 -> 35 % in 2 s, 35 % -> 0 in 7 s
             "spinUpPerSecond": 0.175,
             "spinDownPerSecond": 0.05,
-            // duty -> radiator face velocity (m/s); max defaults to
-            // mainEngine.radiatorFanMaxAirSpeed so PWM 100 % == failsafe stage
+            // m/s at dutyMin; 100 % = mainEngine.radiatorFanMaxAirSpeed
             "fanAirSpeedMin": 1.7,
-            // Speed gate: no fan while the radiator ram air (0.8 x airflow,
-            // combustionEngineThermals.lua:765) is >= the full-duty fan
-            // airspeed (0 = fanAirSpeedMax, 5 m/s = about 22 km/h), back
-            // below 4 m/s; overridden at >= 110 C coolant (latched, released
-            // below 110 - 2 = 108 C) or >= 125 C oil.
+            // speed gate: no fan from 5 m/s ram air (~22 km/h; 0 = fanAirSpeedMax),
+            // back below 4; overridden from 110 C coolant (release 108) or 125 C oil
             "speedGateAirSpeed": 0,
             "speedGateReleaseAirSpeed": 4.0,
             "speedGateOverrideTemp": 110,
             "speedGateOverrideHyst": 2.0,
-            // engine ECU pre-control: high ICE load at low ram air -> fan at
-            // dutyMin, but only from feedForwardMinTemp on. Low gate only
-            // during standstill N-charge (VCU chargeMode PARK/NEUTRAL_MAX,
-            // load ~0.23); otherwise the drive gate. feedForwardMinTemp >=
-            // fanOnTemp disables it: set to 105 so the fan also starts at
-            // 105 C during standstill N-charge (at 103 C it brought no
-            // on-time reduction, 69 % vs 68 %). The speed gate already zeroes
-            // any request from 5 m/s ram air on, hence max airspeed 5.
+            // ICE high-load pre-control (standstill-charge / drive load gates);
+            // disabled here (feedForwardMinTemp >= fanOnTemp): an earlier start
+            // did not shorten the fan on-time
             "feedForwardLoad": 0.18,
             "feedForwardLoadDrive": 0.55,
             "feedForwardMaxAirSpeed": 5.0,
             "feedForwardDuty": 0.35,
             "feedForwardMinTemp": 105.0,
             "oilFullFanTemp": 125,
-            // after-run after key-off (production cars: up to ~11 min)
+            // after-run after key-off (s)
             "afterRunMaxTime": 660,
-            // electrical load (fan law P ~ n^3), fed via DC/DC from the HV pack
+            // electrical load (P ~ n^3) via DC/DC from the HV pack
             "fanPowerW": 850,
             "dcdcEfficiency": 0.90,
             "batteryName": "mainBattery",
             "drawFromBattery": true,
-            // sound: vol = volumeMax * sqrt(rotor), pitch pitchMin..pitchMax;
-            // keep volumeMax == mainEngine.radiatorFanVolume (failsafe level)
+            // keep volumeMax == mainEngine.radiatorFanVolume
             "fanSoundEvent": "event:>Vehicle>Cooling Fan>Electric_05",
             "volumeMax": 0.90,
             "pitchMin": 0.75,
             "pitchMax": 1.00,
-            // Steam wisps at standstill (stock particle types, no new assets),
-            // emitted at body node f15 (front crossmember, x 0, y -1.95,
-            // z 0.835) and pushed away from hyb_rad1, i.e. forward and ~12 deg
-            // up out of the hood/grille gap ("" = straight up from hyb_rad1).
-            // Faint 46 from 106 C (0.3/s) while the rotor runs >= 35 % or
-            // after key-off; 46 from 110 C (0.7/s), 48 from 115 C (3.5/s),
-            // none from 119 C (stock cap steam > 120 C takes over), none
-            // above 3 m/s airspeed, with a leaking radiator or a blown head
-            // gasket (stock steam already runs there). false = off.
+            // steam wisps at standstill from node f15, out through the
+            // hood/grille gap: faint from 106 C (fan on or after key-off),
+            // light 110 C, heavy 115 C, none from 119 C (stock cap steam)
             "wispsEnabled": true,
             "wispEmitNode": "f15",
             "wispFaintTemp": 106,
@@ -166,7 +111,7 @@
             "wispMaxAirspeed": 3.0,
             "wispRateMin": 0.7,
             "wispRateMax": 3.5,
-            // optional quiet radiator hiss with the heavy wisps (0 = off)
+            // optional radiator hiss with the heavy wisps (0 = off)
             "hissVolumeMax": 0.0
         }]
     ],
@@ -229,38 +174,18 @@
     ],
 },
 // =============================================================================
-//  ETK 854 ActiveHybrid - Performance cooling package (Performance configs only)
+//  ETK 854 ActiveHybrid - Performance cooling package (Performance configs)
 // =============================================================================
-//  Fitted as standard on the tuned Performance models only (854_hybrid_b58s,
-//  _b58s_awd, _n57s, _n57s_awd), together with the larger turbo of their
-//  intake slot. Everything below is a VERBATIM copy of etk854hybrid_radiator
-//  above (structure, main radiator, failsafe fan, the etk854hybrid_cooling
-//  PWM fan / wisp controller block) - that block must stay identical to the
-//  standard part (drift check:
-//  scratch_build/tuned_turbo/static_checks.py, section S5). Differences:
-//   1. Auxiliary coolers (side radiators in the bumper air intakes), 4600 W/K,
-//      emulated by lua/controller/etk854hybrid_perfCooling.lua on the same
-//      coolant integrator the base model uses:
-//        Q_aux = (Tc - Tenv) * 4600 * thermostat * coolantEff * v / (15 + v),
-//        v = 0.8 * |frontAirflow|
-//      i.e. ram air ONLY - no 0.1 floor and no fan, so the standstill
-//      behaviour (PWM fan 105/101 C, wisps, N-charge) stays exactly as on the
-//      standard package. At speed main + aux = 5400 + 4600 = 10000 W/K, the
-//      level of the base race radiator (0.5 m2 x 20000).
-//   2. Engine oil cooler with the base etki_oilcooler values (0.16 m2 x 1500
-//      = 240 W/K, oil thermostat 110 C).
-//  Rejected alternative: a plain 10000 W/K main radiator - its 0.1 no-fan
-//  floor alone gives 1000 W/K at standstill, so the PWM fan and the wisps
-//  would practically never run (undoes the round-1 feedback, see the header
-//  of this file).
-//  Thermal replica (600 s sustained full throttle, 120/250 km/h, 15-40 C
-//  ambient), only together with the tuned ECUs' full-load burnEfficiency
-//  0.30 (etk854hybrid_engines.jbeam): B58S coolant <= 118 C (<= 109 C at up
-//  to 30 C ambient), turboTemp <= 747 (limit 800); N57S coolant <= 110 C,
-//  turboTemp <= 721 (limit 850).
-//  Same slot and same nodes hyb_rad1/hyb_rad2 as the standard part: parts of
-//  one slot are mutually exclusive (the base game reuses rad1/rad2 across its
-//  etk800_radiator variants the same way).
+//  Same slot and nodes as etk854hybrid_radiator; structure, main radiator,
+//  failsafe fan and the etk854hybrid_cooling block are copies of it and must
+//  stay identical. Adds:
+//   1. Ram-air auxiliary coolers (bumper side radiators), 4600 W/K, via
+//      etk854hybrid_perfCooling.lua: main + aux = 10000 W/K at speed, standstill
+//      exactly as the standard package. (A plain 10000 W/K radiator would get
+//      1000 W/K from the no-fan floor alone; fan and wisps would hardly run.)
+//   2. Engine oil cooler with the base etki_oilcooler values.
+//  Sized for sustained full throttle with the tuned ECUs' full-load
+//  burnEfficiency 0.30.
 // =============================================================================
 "etk854hybrid_radiator_performance": {
     "information":{
@@ -281,19 +206,13 @@
         "coolantVolume":9.5,
         "thermostatTemperature":97,
         "radiatorFanType":"electric",
-        // Failsafe stage of the base fan (see header). Hysteresis 114 -> 101.85 C.
+        // failsafe fan stage and sound: as etk854hybrid_radiator
         "radiatorFanTemperature":114,
         "radiatorFanMaxAirSpeed":5.0,
         "radiatorFanLoopEvent": "event:>Vehicle>Cooling Fan>Electric_05",
-        // Base sample plays at fixed pitch 1 while the failsafe stage runs; the
-        // controller's own source reaches this exact level/pitch at full duty
-        // (volumeMax below) and mutes itself while the base fan is on -> no
-        // doubling, no jump. Stock ETK radiators: 0.4-0.9 (etk800_radiator.jbeam).
         "radiatorFanVolume": 0.9,
 
-        // Engine oil cooler (Performance only): the base etki_oilcooler
-        // values, 0.16 m2 x 1500 = 240 W/K, oil thermostat 110 C. No own node
-        // or deform group (it cannot leak) - documented simplification.
+        // oil cooler, 240 W/K; no own node or deform group (cannot leak)
         "oilRadiatorArea":0.16,
         "oilRadiatorEffectiveness":1500,
         "oilThermostatTemperature":110,
@@ -304,74 +223,40 @@
 
     "controller": [
         ["fileName"],
+        // keep identical to etk854hybrid_radiator (key comments there)
         ["etk854hybrid_cooling", {
             "name": "etk854hybrid_cooling",
             "engineName": "mainEngine",
-            // PWM characteristic (coolant outlet temperature, C): the fan
-            // starts late at 105 C with 35 % (audible), 100 % at 112 C, off
-            // below 101 C after at least minOnTime s. Command duty is 0 or
-            // dutyMin..1, never in between.
             "fanOnTemp": 105.0,
             "fanOffTemp": 101.0,
             "dutyZeroTemp": 104.0,
             "dutyFullTemp": 112.0,
             "dutyMin": 0.35,
             "minOnTime": 30,
-            // command slew within dutyMin..1
             "rampUpPerSecond": 0.15,
             "rampDownPerSecond": 0.05,
-            // rotor inertia (airflow, power and sound follow the rotor):
-            // spool-up 0 -> 35 % in 2 s, run-down 35 % -> 0 in 7 s
             "spinUpPerSecond": 0.175,
             "spinDownPerSecond": 0.05,
-            // duty -> radiator face velocity (m/s); max defaults to
-            // mainEngine.radiatorFanMaxAirSpeed so PWM 100 % == failsafe stage
             "fanAirSpeedMin": 1.7,
-            // Speed gate: no fan while the radiator ram air (0.8 x airflow,
-            // combustionEngineThermals.lua:765) is >= the full-duty fan
-            // airspeed (0 = fanAirSpeedMax, 5 m/s = about 22 km/h), back
-            // below 4 m/s; overridden at >= 110 C coolant (latched, released
-            // below 110 - 2 = 108 C) or >= 125 C oil.
             "speedGateAirSpeed": 0,
             "speedGateReleaseAirSpeed": 4.0,
             "speedGateOverrideTemp": 110,
             "speedGateOverrideHyst": 2.0,
-            // engine ECU pre-control: high ICE load at low ram air -> fan at
-            // dutyMin, but only from feedForwardMinTemp on. Low gate only
-            // during standstill N-charge (VCU chargeMode PARK/NEUTRAL_MAX,
-            // load ~0.23); otherwise the drive gate. feedForwardMinTemp >=
-            // fanOnTemp disables it: set to 105 so the fan also starts at
-            // 105 C during standstill N-charge (at 103 C it brought no
-            // on-time reduction, 69 % vs 68 %). The speed gate already zeroes
-            // any request from 5 m/s ram air on, hence max airspeed 5.
             "feedForwardLoad": 0.18,
             "feedForwardLoadDrive": 0.55,
             "feedForwardMaxAirSpeed": 5.0,
             "feedForwardDuty": 0.35,
             "feedForwardMinTemp": 105.0,
             "oilFullFanTemp": 125,
-            // after-run after key-off (production cars: up to ~11 min)
             "afterRunMaxTime": 660,
-            // electrical load (fan law P ~ n^3), fed via DC/DC from the HV pack
             "fanPowerW": 850,
             "dcdcEfficiency": 0.90,
             "batteryName": "mainBattery",
             "drawFromBattery": true,
-            // sound: vol = volumeMax * sqrt(rotor), pitch pitchMin..pitchMax;
-            // keep volumeMax == mainEngine.radiatorFanVolume (failsafe level)
             "fanSoundEvent": "event:>Vehicle>Cooling Fan>Electric_05",
             "volumeMax": 0.90,
             "pitchMin": 0.75,
             "pitchMax": 1.00,
-            // Steam wisps at standstill (stock particle types, no new assets),
-            // emitted at body node f15 (front crossmember, x 0, y -1.95,
-            // z 0.835) and pushed away from hyb_rad1, i.e. forward and ~12 deg
-            // up out of the hood/grille gap ("" = straight up from hyb_rad1).
-            // Faint 46 from 106 C (0.3/s) while the rotor runs >= 35 % or
-            // after key-off; 46 from 110 C (0.7/s), 48 from 115 C (3.5/s),
-            // none from 119 C (stock cap steam > 120 C takes over), none
-            // above 3 m/s airspeed, with a leaking radiator or a blown head
-            // gasket (stock steam already runs there). false = off.
             "wispsEnabled": true,
             "wispEmitNode": "f15",
             "wispFaintTemp": 106,
@@ -383,12 +268,9 @@
             "wispMaxAirspeed": 3.0,
             "wispRateMin": 0.7,
             "wispRateMax": 3.5,
-            // optional quiet radiator hiss with the heavy wisps (0 = off)
             "hissVolumeMax": 0.0
         }],
-        // Auxiliary coolers in the bumper air intakes (Performance only):
-        // ram air only, no floor, no fan - see the header above this part.
-        // 4600 W/K + the 5400 W/K main radiator = 10000 W/K at speed.
+        // aux coolers, ram air only (W/K)
         ["etk854hybrid_perfCooling", {
             "name": "etk854hybrid_perfCooling",
             "engineName": "mainEngine",

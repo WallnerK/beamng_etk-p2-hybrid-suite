@@ -4,24 +4,23 @@
   <meta charset="UTF-8">
   <title>ETK 854 ActiveHybrid - energy flow</title>
   <!--
-    ETK 854 ActiveHybrid centre screen page (OEM-style energy flow).
-    Loaded by the stock beamNavigator controller "etk800_navi" into the web
-    view "@etk800_screen" at 512 x 256 (see etk854hybrid_gauges.jbeam, part
-    etk854hybrid_navi_energyflow).
-    JS entry points:
-      etk854hybridUpdate(d)   15 Hz from lua/controller/etk854hybrid_screenData.lua
-      map.updateData(g)       15 Hz from beamNavigator (x, y, rotation, speed,
-                              ignitionLevel) - only ignitionLevel is used
-      map.setData(m)          once from the game engine (road network) - ignored
-      map.setBootscreenImage  optional - ignored
-    Everything is stubbed/buffered in this head script so no call can hit an
-    undefined function before etk854hybrid_navi_screen.js has run.
-    Desktop browser: runs a demo; #demo=<state> pins one state.
+    ETK 854 ActiveHybrid centre screen (energy flow, trailer page, cockpit panel layers).
+    Loaded by the stock beamNavigator controller "etk800_navi" into "@etk800_screen" at
+    512 x 256 (part etk854hybrid_navi_energyflow). JS entry points, stubbed / buffered in the
+    head script so no call hits an undefined function before the page scripts have run:
+      etk854hybridUpdate(d)   15 Hz from etk854hybrid_screenData.lua
+      etk854hybridPanel(p)    from etk854hybrid_cockpitPanel.lua (etk854hybrid_cockpit_panel.js)
+      map.updateData(g)       15 Hz from beamNavigator: ignitionLevel + the MAP view stream
+      map.setData(m)          once (road network), kept for the MAP view
+      map.setBootscreenImage  ignored
+    Desktop browser: runs a demo; #demo=<state> pins one state
+    (trailer / trailersway / trailerpush / trailertail / trailerpark for the trailer page).
   -->
   <script>
     (function () {
       var q = window.__etk854nq = { data: null, ign: null };
       window.etk854hybridUpdate = function (d) { q.data = d; };
+      window.etk854hybridPanel = function (p) { q.panel = p; }; // taken over by etk854hybrid_cockpit_panel.js
       window.map = {
         updateData: function (g) { if (g && typeof g.ignitionLevel === "number") { q.ign = g.ignitionLevel; } },
         setData: function () {},
@@ -42,6 +41,9 @@
       };
     })();
   </script>
+  <!-- frame watchdog: reloads the page after the replaceVehicle frame freeze -->
+  <script src="../etk854hybrid_webview_watchdog.js"></script>
+  <script src="etk854hybrid_cockpit_panel.js"></script><!-- control panel + MAP view -->
   <link rel="stylesheet" type="text/css" href="etk854hybrid_navi_screen.css">
 </head>
 <body>
@@ -59,9 +61,10 @@
   </defs>
 
   <!-- ============================== header ============================== -->
-  <text class="b" x="10" y="19" font-size="12" letter-spacing="1.6" fill="#e6ebf2">ENERGY FLOW</text>
-  <rect x="10" y="23" width="78" height="1.6" fill="#2b8bff"/>
-  <text x="106" y="19" font-size="10" letter-spacing="1.2" fill="#5d6778">HYBRID SYSTEM</text>
+  <!-- reads TRAILER / STABILITY ASSIST on the trailer page -->
+  <text id="hTitle" class="b" x="10" y="19" font-size="12" letter-spacing="1.6" fill="#e6ebf2">ENERGY FLOW</text>
+  <rect id="hUnder" x="10" y="23" width="78" height="1.6" fill="#2b8bff"/>
+  <text id="hSub" x="106" y="19" font-size="10" letter-spacing="1.2" fill="#5d6778">HYBRID SYSTEM</text>
   <text id="hTemp" x="464" y="19" font-size="10" text-anchor="end" fill="#8b95a5"></text>
   <text id="hClock" class="b" x="502" y="19" font-size="12" text-anchor="end" fill="#e6ebf2"></text>
   <rect x="8" y="28" width="496" height="1" fill="#1c222c"/>
@@ -72,6 +75,8 @@
   <text id="phTxt" class="b" x="56" y="47.3" font-size="10.5" letter-spacing="1.3" text-anchor="middle" fill="#8cc8ff">READY</text>
   <text id="modeTxt" x="336" y="47.5" font-size="10" letter-spacing="0.9" text-anchor="end" fill="#8b95a5">COMFORT &#183; AUTO EV</text>
 
+  <!-- energy-flow page (left area); hidden while the trailer page is shown -->
+  <g id="flowPage">
   <!-- body -->
   <path d="M50 66 H296 Q318 66 320 90 V142 Q318 166 296 166 H50 Q28 166 26 142 V90 Q28 66 50 66 Z"
         fill="url(#nBody)" stroke="#2a3140" stroke-width="1.4"/>
@@ -111,7 +116,7 @@
   <!-- components -->
   <g id="ice" fill="#0b0e13" stroke="#394150" stroke-width="1.5">
     <rect x="46" y="98" width="62" height="36" rx="4"/>
-    <!-- inline six (B58 / N57 style) -->
+    <!-- inline six -->
     <circle cx="53" cy="116" r="3.3"/>
     <circle cx="63" cy="116" r="3.3"/>
     <circle cx="73" cy="116" r="3.3"/>
@@ -134,7 +139,7 @@
   <g id="tank">
     <rect x="198" y="76" width="50" height="26" rx="4" fill="#0b0e13" stroke="#394150" stroke-width="1.5"/>
     <rect id="tankFill" x="201" y="79" width="0" height="20" rx="2" fill="#ffab3d" opacity="0.28"/>
-    <!-- litres from the on-board computer (gaugeData item 10), "FUEL" without data -->
+    <!-- litres from the on-board computer (gaugeData), "FUEL" without data -->
     <text id="tankTxt" x="223" y="93" font-size="9" letter-spacing="1" text-anchor="middle" class="b" fill="#8b95a5">FUEL</text>
   </g>
   <g id="batt">
@@ -148,6 +153,77 @@
     <circle cx="32" cy="189" r="3" fill="#2b8bff"/><text x="38" y="192">ELECTRIC</text>
     <circle cx="94" cy="189" r="3" fill="#ffab3d"/><text x="100" y="192">ENGINE</text>
     <circle cx="148" cy="189" r="3" fill="#2ad99c"/><text x="154" y="192">RECUPERATION / CHARGE</text>
+  </g>
+  </g>
+
+  <!-- ======================= trailer page (left area) ======================= -->
+  <!-- replaces the energy flow (rules in the script); visibility via wrapper opacity only,
+       the banner and the sway meter blink through an inner group -->
+  <g id="trlPage" opacity="0">
+    <!-- combination, top view, front at left -->
+    <path d="M26 76 H90 Q98 76 98 84 V104 Q98 112 90 112 H26 Q16 112 16 102 V86 Q16 76 26 76 Z"
+          fill="url(#nBody)" stroke="#2a3140" stroke-width="1.4"/>
+    <path d="M42 79 Q39 94 42 109" fill="none" stroke="#1d242f" stroke-width="1.2"/>
+    <path d="M88 79 Q91 94 88 109" fill="none" stroke="#1d242f" stroke-width="1.2"/>
+    <g fill="#0b0e13" stroke="#394150" stroke-width="1.2">
+      <rect x="26" y="70" width="16" height="8" rx="2.5"/>
+      <rect x="26" y="110" width="16" height="8" rx="2.5"/>
+      <rect x="74" y="70" width="16" height="8" rx="2.5"/>
+      <rect x="74" y="110" width="16" height="8" rx="2.5"/>
+    </g>
+    <line id="tHitchLn" x1="98" y1="94" x2="108" y2="94" stroke="#394150" stroke-width="2.4"/>
+    <circle id="tBall" cx="110" cy="94" r="3.2" fill="#0b0e13" stroke="#8b95a5" stroke-width="1.4"/>
+    <path id="tBar" d="M113 94 L124 86 M113 94 L124 102" fill="none" stroke="#394150" stroke-width="2" stroke-linecap="round"/>
+    <rect id="tBox" x="124" y="66" width="60" height="56" rx="4" fill="url(#nBody)" stroke="#394150" stroke-width="1.4"/>
+    <g id="tTw" fill="#0b0e13" stroke="#394150" stroke-width="1.2">
+      <rect x="146" y="60" width="16" height="8" rx="2.5"/>
+      <rect x="146" y="120" width="16" height="8" rx="2.5"/>
+    </g>
+    <!-- drawbar force arrow: PULL toward the trailer, PUSH toward the car -->
+    <polygon id="tArr" points="96,132.5 115,132.5 115,129 124,134 115,139 115,135.5 96,135.5" fill="#8cc8ff" opacity="0"/>
+
+    <!-- recommended maximum speed -->
+    <circle id="tSign" cx="36" cy="166" r="18" fill="#e6ebf2" stroke="#ff4f5e" stroke-width="4"/>
+    <text id="tVr" class="b" x="36" y="171" font-size="14" text-anchor="middle" fill="#0b0e13">--</text>
+    <text id="tVrU" x="36" y="194" font-size="8" letter-spacing="0.6" text-anchor="middle" fill="#8b95a5">km/h</text>
+    <g id="tRec" font-size="8.5" letter-spacing="1" fill="#8b95a5">
+      <text id="tRecL1" x="62" y="162">RECOMMENDED</text>
+      <text id="tRecL2" x="62" y="174">MAX SPEED</text>
+    </g>
+    <g id="tRs" opacity="0">
+      <g id="tRsBlink">
+        <rect x="62" y="152" width="124" height="26" rx="4" fill="#3a1418" stroke="#ff4f5e" stroke-width="1.4"/>
+        <text class="b" x="124" y="169.5" font-size="11" letter-spacing="1.4" text-anchor="middle" fill="#ff4f5e">REDUCE SPEED</text>
+      </g>
+    </g>
+
+    <!-- data rows: labels left, values right-aligned -->
+    <g font-size="9" letter-spacing="1" fill="#8b95a5">
+      <text id="tlSt" x="196" y="70">STABILITY</text>
+      <text x="196" y="88">SWAY</text>
+      <text x="196" y="106">DRAWBAR</text>
+      <text x="196" y="124">TONGUE LOAD</text>
+      <text id="tlM" x="196" y="142">TRAILER MASS</text>
+      <text id="tlRs" x="196" y="160">REAR STEER</text>
+      <text x="196" y="178">LEVEL</text>
+    </g>
+    <g class="b" font-size="11" text-anchor="end" fill="#e6ebf2">
+      <text id="tvSt" x="338" y="70">--</text>
+      <text id="tvFx" x="338" y="106">--</text>
+      <text id="tvTg" x="338" y="124">--</text>
+      <text id="tvM" x="338" y="142">--</text>
+      <text id="tvRs" x="338" y="160">--</text>
+      <text id="tvLv" x="338" y="178">--</text>
+    </g>
+    <!-- sway meter 0..1.5 (1.0 = stage-2 threshold), ticks at 0.5 and 1.0 -->
+    <g id="tvSw">
+      <g id="tvSwBlink">
+        <rect x="246" y="81" width="92" height="6" rx="3" fill="#161b23"/>
+        <rect id="tvSwBar" x="246" y="81" width="0" height="6" rx="3" fill="#2b8bff"/>
+        <rect id="tvSwT1" x="276.2" y="79" width="1" height="10" fill="#5d6778"/>
+        <rect id="tvSwT2" x="306.8" y="79" width="1" height="10" fill="#8b95a5"/>
+      </g>
+    </g>
   </g>
 
   <!-- =========================== right panel ============================ -->
@@ -175,7 +251,7 @@
   <text x="352" y="166" font-size="10" letter-spacing="1.2" fill="#8b95a5">SYSTEM</text>
   <text id="sysKw" class="b" x="504" y="166" font-size="15" text-anchor="end" fill="#e6ebf2">0 kW</text>
 
-  <!-- status chips, laid out left to right by the script -->
+  <!-- status chips (laid out by the script) -->
   <g id="chips"></g>
 
   <!-- ============================ bottom row ============================ -->

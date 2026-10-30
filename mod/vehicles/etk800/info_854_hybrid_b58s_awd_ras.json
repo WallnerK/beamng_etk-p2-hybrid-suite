@@ -1,0 +1,29 @@
+{
+    "Configuration": "ActiveHybrid 40e Perf. xAllrad Rear Steer",
+    "Author": "Deuflhard",
+    "useSubCluster": true,
+    "vehicleSelectorSubCluster": "ActiveHybrid",
+    "SubModel": "ActiveHybrid",
+    "vehicleSelectorSubGroup": "ActiveHybrid 40e - I6 Gasoline",
+    "Population": 0,
+    "Body Style": "Wagon",
+    "Config Type": "Custom",
+    "Country": "Germany",
+    "Description": "40e Performance with all-wheel drive and active rear-axle steering: the rear wheels counter-steer below about 60 km/h (smaller turning circle) and steer with the front above (calmer lane changes). System 678 PS / 820 Nm.",
+    "Drivetrain": "AWD",
+    "Fuel Type": "Gasoline",
+    "Induction Type": "Turbo",
+    "Power": 678,
+    "PowerPeakRPM": "6300 - 6700",
+    "Propulsion": "Hybrid",
+    "Torque": 820,
+    "TorquePeakRPM": "2500 - 5000",
+    "Transmission": "Automatic",
+    "Value": 92200,
+    "Weight": 1850,
+    "Years": {
+        "min": 2024,
+        "max": 2026
+    },
+    "defaultPaintName1": "Mineral Green"
+}

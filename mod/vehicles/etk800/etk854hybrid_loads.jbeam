@@ -1,60 +1,29 @@
 {
 // ====================================================================
-// ETK 854 ActiveHybrid - optionale Kofferraumlasten (trunk loads)
+// ETK 854 ActiveHybrid - optional trunk loads
 // ====================================================================
+// Stock wagon slot "etk800_trunk_load": no nodeOffset, so coordinates
+// are absolute body coordinates. The carrier part opens three child
+// slots so compressor, hydraulic unit and tool chest combine freely;
+// masses are tuning sliders (category "Cargo").
 //
-// Slot: stock wagon body slot "etk800_trunk_load"
-// (etk800.zip vehicles/etk800/etk800_body_wagon.jbeam:43, default "").
-// That slot has NO nodeOffset -> all coordinates here are absolute body
-// coordinates (unlike the tow hitch slot).
-//
-// The parent part "etk854hybrid_trunkload_workshop" carries no nodes; it
-// opens three child slots so compressor, hydraulic power pack and tool
-// chest can be combined freely (one stock slot would only allow ONE load):
-//   etk854hybrid_load_compressor  (default fitted, 60 kg,  30-90 kg) - functional:
-//                                 40 l air receiver + 1.5 kW electric compressor,
-//                                 supplies air-braked trailers (dolly) through the
-//                                 hitch coupler nodes, see that part below
-//                                 (plans/PLAN_DRUCKLUFT_ANHAENGER.md)
-//   etk854hybrid_load_hydraulic   (default fitted, 120 kg, 60-180 kg)
-//   etk854hybrid_load_toolbox     (default fitted, 40 kg,  10-60 kg)
-// Emptying a child slot removes that item; the masses are tuning sliders
-// (category "Cargo") so the vehicle weight shown in the configurator and
-// the real node mass follow the slider.
-//
-// Wagon trunk floor (etk800_body_wagon.jbeam:257-290, NM_METAL):
+// Trunk floor nodes (etk800_body_wagon.jbeam):
 //   r1rr/r1/r1ll  (-0.61/0/0.61, 1.36-1.41, 0.54)   front edge (seat back)
 //   r5rr/r5/r5ll  (-0.55/0/0.55, 1.68, 0.54)
 //   r6rr/r6/r6ll  (-0.55/0/0.55, 1.97-2.00, 0.54)
 //   r4rr/r4ll     (-/+0.65, 2.18, 0.54)              rear edge
 //   r7rr/r7/r7ll  (-0.36/0/0.36, 2.28-2.31, 0.58)    loading sill
-// Free volume: x +-0.50, y 1.40-2.12, floor surface ~0.55.  Every load
-// cage starts at z 0.58 (3 cm above the floor nodes, like the stock
-// trunk boxes: nodeMove z 0.55 + local 0.03, etk800_trunk_load_cargobox
-// .jbeam:11) so nothing is spawned inside the floor.  Heights stay below
-// ~0.45 m above the floor so the cargo cover / tailgate glass is clear.
+// Free volume x +-0.50, y 1.40-2.12. Cages start at z 0.58 (3 cm above
+// the floor, as the stock trunk boxes) and stay below ~0.45 m above the
+// floor (cargo cover).
 //
-// Each load = 8-node rigid cage (all 28 node pairs beamed) carrying the
-// mass (nodeWeight = slider / 8), tied to the floor nodes with bolted-
-// mount beams in their own breakGroup: in a heavy crash the mount tears
-// and the load becomes a projectile, like a real, badly secured load.
-// Tie beams: stock trunk-box straps are 1001000/30, deform 20000,
-// strength 15000 (etk800_trunk_load_cargobox.jbeam:35-...) - ours are
-// bolted to the lashing eyes, so 1201000/50, deform 35000, strength
-// 45000 (pump: 70000).
+// Each load = rigid 8-node cage (nodeWeight = slider / 8), bolted to the
+// floor in its own breakGroup: a heavy crash tears it loose like a badly
+// secured load. Mount beams are stiffer than the stock trunk-box straps
+// (bolted to the lashing eyes).
 //
-// Meshes: only vehicles/etk800 + vehicles/common are searched by the
-// loader (lua/common/jbeam/loader.lua:427) -> the truck compressors /
-// pumps of other vehicles are NOT usable.  Stand-ins from common.zip:
-//   compressor : trailers_common.dae bogie_air_tank (air receiver, baked
-//                at x+-0.526 y0.063-0.301 z0.706-0.943) + large_motor.dae
-//                large_motor_body scaled down as the motor/pump head
-//   hydraulic  : mixer.dae mixer_body_pump (baked y-1.333..-0.802
-//                z0.672..1.099) + generic_trash_assets_keg_barrel as the
-//                oil reservoir
-//   tool chest : generic_trash_assets_toolbox scaled up
-// pos values below compensate the baked offsets (pos = wanted centre -
-// scale * baked centre).
+// Meshes: the loader only searches vehicles/etk800 + vehicles/common, so
+// common.zip stand-ins are used; pos = wanted centre - scale * baked centre.
 // ====================================================================
 "etk854hybrid_trunkload_workshop": {
     "information":{
@@ -63,8 +32,7 @@
         "value":0,
     },
     "slotType" : "etk800_trunk_load",
-    // Carrier part only: no nodes, just the three combinable child slots.
-    // Child slots need no options - the trunk-load slot has no nodeOffset.
+    // Carrier only (no nodes); child slots need no options.
     "slots2": [
         ["name", "allowTypes", "denyTypes", "default", "description"],
         ["etk854hybrid_load_compressor", ["etk854hybrid_load_compressor"], [], "etk854hybrid_load_compressor", "Compressor (right, -x)"],
@@ -80,34 +48,19 @@
         "value":900,
     },
     "slotType" : "etk854hybrid_load_compressor",
-    // Kolbenkompressor: liegender Druckluftkessel, Motor/Verdichter obenauf.
-    // Kaefig x -0.46..-0.10, y 1.45..1.73, z 0.58..0.98 (-x = rechte Fahrzeugseite, r*rr-Knoten).
-    //
-    // Functional since 2026-10 (plans/PLAN_DRUCKLUFT_ANHAENGER.md):
-    //  * energyStorage "etk854hybrid_airTank" = the 40 l receiver (the flexbody
-    //    below IS the receiver). isPrimarySupply: supply pressure = own pressure,
-    //    otherwise pressureTank.updateTankSync exports 0 to a trailer
-    //    (lua/vehicle/energyStorage/pressureTank.lua:39-50).
-    //    pneumaticPTOConsumerCouplerNodeNames = our hitch coupler nodes
-    //    (etk854hybrid_towing.jbeam: hyb_twp pintle on the HD combo mount,
-    //    hyb_twb ball on every ball mount). pressureTank.new only keeps names
-    //    that exist in the spawned vehicle (:360-364, :368-372 test
-    //    beamstate.nodeNameMap first), so ONE declaration here covers "no
-    //    hitch", EU ball, HD rise2/rise4 and the HD ball+pintle combo, like the
-    //    stock md_series/us_semi/wl40 tanks that always list "fwk2","pintle".
-    //    A trailer tank that names its coupler node in
-    //    pneumaticPTOSupplyCouplerNodeNames (dolly.zip dolly.jbeam mainAirTank:
-    //    ["pintle"]) then fills from us; its airbrakes force the spring brakes
-    //    on below 40 psi supply and otherwise follow our parking brake; full
-    //    release needs 60 psi (4.14 bar) in the trailer tank
-    //    (controller/pneumatics/airbrakes.lua:159-183, curve 0 -> 413685 Pa).
-    //  * controller etk854hybrid_airCompressor = the electric compressor on the
-    //    HV battery (EV mode / standstill OK): cut-in 7.2 / cut-out 8.6 bar
-    //    gauge, stock compressor + dryer purge sounds, HUD/cluster/Actions app.
-    //  * tank damage: the cage beams form deformGroup hyb_airtank_damage
-    //    (leak grows with deformation, pressureTank.lua:65-68); the named mount
-    //    beam hyb_airHoseMount is the break trigger (torn off the floor ->
-    //    hose torn -> tank vents in ~3 s, pressureTank.lua:194-197, :323).
+    // Horizontal air receiver, motor/compressor on top; cage x -0.46..-0.10,
+    // y 1.45..1.73, z 0.58..0.98 (right-hand side).
+    //  * etk854hybrid_airTank = the 40 l receiver. isPrimarySupply is required,
+    //    otherwise pressureTank exports 0 supply pressure to a trailer. The consumer
+    //    coupler names cover every hitch (hyb_twp pintle, hyb_twb ball);
+    //    pressureTank.new drops names missing in the vehicle. A trailer tank
+    //    naming its coupler in pneumaticPTOSupplyCouplerNodeNames (dolly:
+    //    "pintle") fills from here; the dolly's airbrakes apply its spring
+    //    brakes below 40 psi supply and release fully from 60 psi (4.14 bar).
+    //  * etk854hybrid_airCompressor = electric compressor on the HV battery
+    //    (works in EV mode / at standstill).
+    //  * Damage: cage deformation -> leak; breaking the mount beam
+    //    hyb_airHoseMount tears the hose (tank vents in ~3 s).
     "variables": [
         ["name", "type", "unit", "category", "default", "min", "max", "title", "description"],
         ["$etk854hybrid_load_compressor_kg", "range", "kg", "Cargo", 60, 30, 90, "Compressor Mass", "Mass of the compressor including the air reservoir", {"stepDis":1}],
@@ -119,8 +72,7 @@
         ["pressureTank", "etk854hybrid_airTank"],
     ],
     "etk854hybrid_airTank": {
-        // 40 l steel receiver, PN 10: maxPressure is ABSOLUTE (pressureTank.lua:304),
-        // startingPressure is RELATIVE (:305 adds the ambient pressure)
+        // maxPressure absolute, startingPressure gauge (pressureTank adds ambient)
         "capacity": 0.040,
         "maxPressure": 1000000,
         "startingPressure": "$=$etk854hybrid_air_startBar*100000",
@@ -139,36 +91,31 @@
             // electrical input at full load; air power = ratedPowerW * isothermalEfficiency
             "ratedPowerW": "$=$etk854hybrid_air_powerKW*1000",
             "isothermalEfficiency": 0.30,
-            // swept volume x volumetric efficiency at low back pressure (free air)
-            "maxFreeAirLpm": 270,
+            "maxFreeAirLpm": 270,            // at low back pressure
             "idlePowerFraction": 0.30,
             "converterEfficiency": 0.95,
-            // pressure switch / relief valve / low warning, bar GAUGE
+            // pressure switch / relief valve / low warning, bar gauge
             "cutInBar": 7.2,
             "cutOutBar": 8.6,
             "reliefBar": 8.9,
             "lowWarnBar": 4.14,
-            // trailer supply protection valve (controller header): the trailer
-            // is fed only from 6.0 bar receiver pressure on and cut off below
-            // 3.4 bar for 0.5 s, with or without the compressor - never in the
-            // dolly's 40 psi (2.76 bar) auto-apply band, where its spring
-            // brakes limit-cycle (live run 20261009-172556_air_supply)
+            // Trailer protection valve: keeps the trailer out of the dolly's
+            // 2.76 bar spring-brake auto-apply band (limit cycle).
             "trailerValveOpenBar": 6.0,
             "trailerValveCloseBar": 3.4,
             "trailerValveCloseDelayS": 0.5,
-            // HV battery protection = VCU SOC_ICE_FORCE (etk854hybridControl.lua:251)
+            // HV battery protection, minSoc = the VCU's SOC_ICE_FORCE
             "minSoc": 0.08,
             "resumeSoc": 0.10,
             "restartDelayS": 3.0,
-            // stock pneumatics sounds (powertrain/compressor.lua:181-189)
+            // stock pneumatics sounds
             "soundNode": "hyb_ldc6",
             "compressorLoopEvent": "event:>Vehicle>Pneumatics>Air_Compressor",
             "purgeEvent": "event:>Vehicle>Pneumatics>Air_Dryer_Purge",
             "compressorSoundVolume": 0.5,
             "purgeSoundVolume": 0.5,
             "soundRpm": 1450,
-            // stock trailer channel names (bogie_suspension.jbeam bogie_brakeValve
-            // "airbrakes", dolly/bogie tanks "mainAirTank")
+            // stock trailer electrics (brake valve "airbrakes", tank "mainAirTank")
             "trailerTankElectric": "mainAirTank_pressureRelative",
             "trailerParkingElectric": "airbrakes_pressure_parking",
             "trailerServiceElectric": "airbrakes_pressure_service",
@@ -187,7 +134,7 @@
         {"selfCollision":true},
         {"group":"hyb_load_compressor"},
         {"nodeWeight":"$=$etk854hybrid_load_compressor_kg/8"},
-        //bottom (z 0.58) then top (z 0.98); 1..4 = x/y grid, 5..8 above 1..4
+        //1..4 bottom (z 0.58), 5..8 above them (z 0.98)
         ["hyb_ldc1", -0.46, 1.45, 0.58],
         ["hyb_ldc2", -0.10, 1.45, 0.58],
         ["hyb_ldc3", -0.46, 1.73, 0.58],
@@ -201,11 +148,10 @@
     "beams": [
         ["id1:", "id2:"],
         {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
-        //--rigid cage: edges + face and space diagonals (all 28 pairs)--
+        //--rigid cage (all 28 pairs)--
         {"beamSpring":1501000, "beamDamp":80},
         {"beamDeform":120000, "beamStrength":"FLT_MAX"},
-        //receiver deformation -> leak (tankDamageDeformGroup, stock pattern
-        //md_series_pneumatics.jbeam md_series_airtank, ratio 0.02)
+        //receiver deformation -> leak (stock md_series_airtank pattern)
         {"deformGroup":"hyb_airtank_damage", "deformationTriggerRatio":0.02},
         ["hyb_ldc1", "hyb_ldc2"],
         ["hyb_ldc1", "hyb_ldc3"],
@@ -236,13 +182,12 @@
         ["hyb_ldc6", "hyb_ldc8"],
         ["hyb_ldc7", "hyb_ldc8"],
         {"deformGroup":"", "deformationTriggerRatio":""},
-        //--bolted floor mount (lashing eyes) -> floor nodes--
+        //--bolted floor mount--
         {"beamSpring":1201000, "beamDamp":50},
         {"beamDeform":35000, "beamStrength":45000},
         {"breakGroup":"hyb_load_compressor_mount"},
-        //named: air tank breakTriggerBeam (energyStorage.lua:128-132 maps the
-        //beam name, beamBroke -> pressureTank onBreak). The whole breakGroup
-        //goes at once, so the unit tearing loose also tears the air hose.
+        //air tank breakTriggerBeam; the whole breakGroup goes at once, so the
+        //unit tearing loose also tears the hose
         ["hyb_ldc1", "r1rr", {"name":"hyb_airHoseMount"}],
         ["hyb_ldc1", "r5rr"],
         ["hyb_ldc1", "r1"],
@@ -274,9 +219,8 @@
         "value":2400,
     },
     "slotType" : "etk854hybrid_load_hydraulic",
-    // Hydraulik-Powerpack: Pumpe mit E-Motor vorn, Oelbehaelter hinten.
-    // Kaefig x 0.12..0.42, y 1.45..2.09, z 0.58..0.92; hoehere Befestigungs-
-    // festigkeit (70000) weil doppelte Masse gegenueber dem Kompressor.
+    // Pump + e-motor in front, oil reservoir behind; cage x 0.12..0.42,
+    // y 1.45..2.09, z 0.58..0.92. Stronger mount for twice the mass.
     "variables": [
         ["name", "type", "unit", "category", "default", "min", "max", "title", "description"],
         ["$etk854hybrid_load_hydraulic_kg", "range", "kg", "Cargo", 120, 60, 180, "Hydraulic Unit Mass", "Mass of pump, motor and oil tank", {"stepDis":1}],
@@ -294,7 +238,7 @@
         {"selfCollision":true},
         {"group":"hyb_load_hydraulic"},
         {"nodeWeight":"$=$etk854hybrid_load_hydraulic_kg/8"},
-        //bottom (z 0.58) then top (z 0.92); 1..4 = x/y grid, 5..8 above 1..4
+        //1..4 bottom (z 0.58), 5..8 above them (z 0.92)
         ["hyb_ldh1", 0.12, 1.45, 0.58],
         ["hyb_ldh2", 0.42, 1.45, 0.58],
         ["hyb_ldh3", 0.12, 2.09, 0.58],
@@ -308,7 +252,7 @@
     "beams": [
         ["id1:", "id2:"],
         {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
-        //--rigid cage: edges + face and space diagonals (all 28 pairs)--
+        //--rigid cage (all 28 pairs)--
         {"beamSpring":1501000, "beamDamp":80},
         {"beamDeform":120000, "beamStrength":"FLT_MAX"},
         ["hyb_ldh1", "hyb_ldh2"],
@@ -339,7 +283,7 @@
         ["hyb_ldh6", "hyb_ldh7"],
         ["hyb_ldh6", "hyb_ldh8"],
         ["hyb_ldh7", "hyb_ldh8"],
-        //--bolted floor mount (lashing eyes) -> floor nodes--
+        //--bolted floor mount--
         {"beamSpring":1201000, "beamDamp":50},
         {"beamDeform":35000, "beamStrength":70000},
         {"breakGroup":"hyb_load_hydraulic_mount"},
@@ -374,7 +318,7 @@
         "value":450,
     },
     "slotType" : "etk854hybrid_load_toolbox",
-    // Werkzeugkiste quer hinter dem Kompressor, vor der Ladekante.
+    // Lying across, behind the compressor.
     "variables": [
         ["name", "type", "unit", "category", "default", "min", "max", "title", "description"],
         ["$etk854hybrid_load_toolbox_kg", "range", "kg", "Cargo", 40, 10, 60, "Toolbox Mass", "Mass of the toolbox including contents", {"stepDis":1}],
@@ -391,7 +335,7 @@
         {"selfCollision":true},
         {"group":"hyb_load_toolbox"},
         {"nodeWeight":"$=$etk854hybrid_load_toolbox_kg/8"},
-        //bottom (z 0.58) then top (z 0.79); 1..4 = x/y grid, 5..8 above 1..4
+        //1..4 bottom (z 0.58), 5..8 above them (z 0.79)
         ["hyb_ldt1", -0.48, 1.87, 0.58],
         ["hyb_ldt2", -0.08, 1.87, 0.58],
         ["hyb_ldt3", -0.48, 2.03, 0.58],
@@ -405,7 +349,7 @@
     "beams": [
         ["id1:", "id2:"],
         {"beamPrecompression":1, "beamType":"|NORMAL", "beamLongBound":1.0, "beamShortBound":1.0},
-        //--rigid cage: edges + face and space diagonals (all 28 pairs)--
+        //--rigid cage (all 28 pairs)--
         {"beamSpring":1501000, "beamDamp":80},
         {"beamDeform":120000, "beamStrength":"FLT_MAX"},
         ["hyb_ldt1", "hyb_ldt2"],
@@ -436,7 +380,7 @@
         ["hyb_ldt6", "hyb_ldt7"],
         ["hyb_ldt6", "hyb_ldt8"],
         ["hyb_ldt7", "hyb_ldt8"],
-        //--bolted floor mount (lashing eyes) -> floor nodes--
+        //--bolted floor mount--
         {"beamSpring":1201000, "beamDamp":50},
         {"beamDeform":35000, "beamStrength":45000},
         {"breakGroup":"hyb_load_toolbox_mount"},

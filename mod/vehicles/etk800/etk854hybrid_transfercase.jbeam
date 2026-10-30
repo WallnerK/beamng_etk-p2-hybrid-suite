@@ -1,39 +1,14 @@
 {
 // ============================================================================
-// ETK 854 ActiveHybrid - xAllrad transfer case with switchable rear-only (2WD)
-// mode.
-//
-// Base: stock "etk_transfer_case_AWD"
-//   content/vehicles/common.zip vehicles/common/etk/etk_transmission.jbeam:768-813
-//   (extract: C_CODE/BeamNG_Extract/common/vehicles/common/etk/etk_transmission.jbeam)
-// Nodes, beams, flexbody, actuator and splitShaft parameters are copied 1:1.
-// The ONLY physical difference is "canDisconnect": true on the splitShaft,
-// which unlocks splitShaft mode "disconnected" (splitShaft.lua:246-252).
-//
-// WHY splitShaft "disconnected" and not just switching off the clutch actuator:
-//   electronicSplitShaftLock.lua:98 clamps its clutchRatio into
-//   [overrideMin, overrideMax] AFTER the isEnabled branch. awdControl
-//   (stock etk_DSE, controlMode "rearMain", awdControl.lua:38-42/66-67) raises
-//   overrideMin up to 1 on oversteer with throttle - so a "disabled" actuator
-//   can still lock the front axle. disconnectedUpdateTorque (splitShaft.lua:42-45)
-//   hard-writes 0 Nm to output 2 and ignores clutchRatio -> real 2WD.
-//
-// Driveline topology (unchanged vs. stock AWD config):
-//   gearbox -> transfercase(splitShaft) -out1-> driveshaft_R chain (rear, primary)
-//                                       -out2-> driveshaft_F -> differential_F
-//   (etk800_differential_F.jbeam:205 hangs driveshaft_F on transfercase output 2)
-//
-// Mode switching lives in the auxiliary controller etk854hybrid_awdMode
-// (lua/controller/etk854hybrid_awdMode.lua). It re-applies the mode after every
-// vehicle reset because splitShaft.reset() reverts to the jbeam default
-// (splitShaft.lua:179-183) and powertrain.reset does not replay
-// previousDeviceModes (powertrain.lua:722-748).
-//
-// Node id "tcase" is deliberately NOT hyb_-prefixed: it is the slot contract
-// node of etk_transfer_case. The stock front diff part references it by name
-// for its driveshaft beam (etk800_differential_F.jbeam:217 ["fdiff","tcase",
-// {"name":"driveshaft_F","breakGroup":"driveshaft_F",...}]). Only one part can
-// occupy the slot, so there is no collision with etk_transfer_case_RWD/_AWD.
+// ETK 854 ActiveHybrid - xAllrad transfer case, switchable to rear-only (2WD).
+// Stock etk_transfer_case_AWD 1:1 plus "canDisconnect" on the splitShaft.
+// 2WD = splitShaft mode "disconnected" (0 Nm to output 2, clutchRatio
+// ignored); a disabled actuator is not enough, the stock awdControl still
+// raises its overrideMin on oversteer and locks the front axle.
+// Mode switching: controller etk854hybrid_awdMode (re-applies the mode after
+// every reset, splitShaft.reset() reverts to the jbeam default).
+// Node "tcase" keeps its stock name: slot contract node of etk_transfer_case,
+// referenced by name by the stock front driveshaft.
 // ============================================================================
 "etk854hybrid_transfer_case_AWD": {
     "information":{
@@ -45,11 +20,7 @@
 
     "variables": [
         ["name", "type", "unit", "category", "default", "min", "max", "title", "description"],
-        // Binary selector (variables.lua:277 has no boolean type). Non-empty unit
-        // keeps minDis/maxDis = min/max (see etk854hybrid_powertrain.jbeam
-        // DISPLAY RULES) so the slider shows 0/1 and not a -100..100 % scale.
-        // The unit is printed after the raw value, so it names the encoding
-        // instead of one mode (a plain "2WD" would read "0 2WD").
+        // binary selector; the unit names the encoding (shown after the raw value)
         ["$etk854_awd_start2wd", "range", "0=AWD/1=2WD", "Hybrid System", 0, 0, 1, "Startup Drive Mode (0 = xAllrad AWD, 1 = 2WD Rear)", "Drive mode after spawning. 0 = xAllrad all-wheel drive (front axle engaged on slip), 1 = pure rear-wheel drive with the front axle decoupled. Switch in game with Alt+W or via the radial menu (Vehicle Features).", {"minDis":0, "maxDis":1, "stepDis":1, "subCategory":"Drivetrain"}]
     ],
 
@@ -61,37 +32,25 @@
     ],
     "controller": [
         ["fileName"],
-        // Stock actuator, identical to etk_transfer_case_AWD. Keeps its stock
-        // name: awdControl finds it via CMU.getActuator("electronicSplitShaftLock")
-        // (awdControl.lua:118-120 default awdActuatorName).
+        // stock actuator; stock name, awdControl finds it by awdActuatorName
         ["drivingDynamics/actuators/electronicSplitShaftLock", {"name": "electronicSplitShaftLock", "splitShaftName":"transfercase", "clutchPIDkP":0.005, "clutchPIDkI":0.01, "clutchPIDkD":0}],
-        // AWD <-> 2WD switch. Own controller instead of a stock driveModes
-        // instance: driveModes' default quickAccessTitle "ui.radialmenu2.ESC"
-        // (driveModes.lua:252) collides with our DSC driveModes radial entry
-        // (uniqueID "driveModeNext"..title), and the VCU/HUD want a small
-        // setMode/toggle/getMode API plus a string electrics channel.
+        // AWD <-> 2WD switch (own controller: a stock driveModes instance would
+        // collide with the DSC radial entry)
         ["etk854hybrid_awdMode", {
             "name": "etk854hybrid_awdMode",
             "shaftName": "transfercase",
             "splitLockName": "electronicSplitShaftLock",
             "start2WD": "$etk854_awd_start2wd",
-            // false (default): the actuator keeps tracking in 2WD. Physically
-            // irrelevant (disconnectedUpdateTorque ignores clutchRatio), but it
-            // keeps clutchRatioPID/clutchRatioSmoother live. With true, those
-            // freeze at switch time (electronicSplitShaftLock.lua:63-95 only
-            // updates them under isEnabled) and a stale high ratio would engage
-            // the lockDamp*avDiff*clutchRatio term (splitShaft.lua:27) for up to
-            // ~0.2 s after reconnect. true also does not hide "acting" in debug:
-            // the overrideMin clamp (:98/:101) still runs.
+            // false: the actuator keeps tracking in 2WD, so no stale clutch
+            // ratio engages the splitShaft damping term after reconnect
             "disableSplitLockIn2WD": false
         }]
     ],
 
     "powertrain" : [
         ["type", "name", "inputName", "inputIndex"],
-        // Stock params verbatim + canDisconnect/isDisconnected. The initial mode
-        // stays "connected"; the controller applies $etk854_awd_start2wd in
-        // initLastStage (after the CMU is registered, so setParameters works).
+        // stock params + canDisconnect; the start mode is applied by the
+        // controller in initLastStage
         ["splitShaft", "transfercase", "gearbox", 1, {"splitType":"locked", "visualPositionRelativeParent":[0,0.6,0], "primaryOutputID":1, "lockTorque":3000, "friction":0.35, "dynamicFriction":0.00039, "torqueLossCoef":0.02, "uiName":"xAllrad Transfer Case", "defaultVirtualInertia":0.1, "canDisconnect":true, "isDisconnected":false}]
     ],
 

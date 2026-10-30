@@ -40,13 +40,11 @@ html, body {
 .b { font-weight: 700; }
 
 /* --- energy-flow links: moving dashes, direction by class --------------- */
-/* NO CSS animations / transitions on this page (2026-10): BeamNG's vehicle
- * HTML texture (genericGauges, 0.39.4) stopped showing ANY later DOM update
- * once an infinite CSS animation ran (the energy-flow dashes start as soon
- * as the car drives): the cluster froze with the last gear / mode / chips,
- * a blinking chip kept blinking. The dashes (stroke-dashoffset) and the
- * blinks (opacity) are driven from the page script per data frame instead
- * (etk854hybrid_gauges_screen.js animate()). */
+/* NO CSS animations / transitions on this page: the vehicle HTML texture
+ * (0.39.4) stops showing ANY later DOM update once an infinite CSS
+ * animation runs, so the cluster would freeze with the last gear / mode /
+ * chips. The dashes (stroke-dashoffset) and the blinks (opacity) are driven
+ * per data frame by animate() in etk854hybrid_gauges_screen.js instead. */
 .flow {
   fill: none;
   stroke-width: 2.2;
